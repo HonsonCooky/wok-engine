@@ -58,6 +58,8 @@ pub enum UsageSite {
         scene: SceneId,
         coord: ChunkCoord,
     },
+    /// The scene manifest's `default_light_state` field references this LightStateRef.
+    SceneDefaultLightState { scene: SceneId },
 }
 
 /// Mesh registry entry. `primitive` is `Some` for procedurally-generated placeholders and
