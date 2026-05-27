@@ -1,10 +1,18 @@
-# `wok-content` — Detailed Crate Plan (v1)
+# `wok-content` — Detailed Crate Plan (v3)
+
+**Status: locked, ready for Phase A implementation.**
+
+This is the canonical wok-content design plan. Lives in
+`wok-engine-designs/`. All architectural-weight decisions are
+resolved; the §12 Decisions Index is the spine. Phase A
+implementation kicks off from here; subsequent revisions follow
+the plan-vs-reality memo discipline (§1.6).
 
 The orchestrator crate that sits between `wok-scene` and everything
 else. Owns the asset registry, the chunk lifecycle (load / unload /
 transition), the streaming algorithm, the background worker thread,
-placeholder mesh data and GPU upload coordination, whole-world
-snapshots, and Vista enforcement.
+placeholder mesh data and GPU upload coordination, terrain mesh
+generation, whole-world snapshots, and Vista enforcement.
 
 This is the biggest crate in the engine by surface area and the first
 one that genuinely orchestrates side effects. `wok-scene` was 90% data
@@ -31,8 +39,11 @@ The only types `wok-content` introduces are:
 
 - **Registry types** — `AssetEntry`, `Registry`, `RegistryDelta`. The
   identity table for the engine's assets.
-- **Runtime-storage types** — `MeshGpu`, `MeshCpu`, `AudioBuffer`.
-  Concrete loaded data behind asset IDs. Not authored; not on disk.
+- **Runtime-storage types** — `MeshGpu`, `MeshCpu`. Concrete loaded
+  data behind mesh asset IDs. Not authored; not on disk. Audio
+  buffer storage lives in `wok-audio`; wok-content's registry
+  still tracks `AudioCueId` identities but doesn't store the
+  loaded data (same pattern as `wok-anim` and `wok-light`).
 - **Lifecycle types** — `ChunkSlot`, `SlotState`, `ResidentChunk`,
   `LoadHandle`, `LoadError`, `LoadStatus`. State machine for
   in-flight and resident chunks.
@@ -175,6 +186,40 @@ does not delegate to a "GPU helper" in pantry. pantry's role is
 device acquisition and re-export. Buffer creation policy is
 wok-content's domain.
 
+### 1.6 Plan-vs-reality memo at each phase boundary
+
+This plan is the design target, not the truth. The truth is the
+shipped code. At the end of each phase in §11, the implementer
+(typically CC) produces a **plan-vs-reality memo** comparing
+what landed against what this plan specified. Drift falls into
+two buckets:
+
+- **Intentional improvement.** The implementer found a cleaner
+  shape, surfaced a missed constraint, or simplified something
+  the plan over-specified. The memo documents the deviation and
+  the reasoning; this plan is updated to match reality at the
+  next review.
+- **Unintended regression.** The implementer cut a corner,
+  missed a requirement, or accidentally diverged from a
+  load-bearing decision (e.g., bypassing the accessor pattern,
+  conflating authored and runtime eagerness, dropping a §9
+  gotcha). The memo flags it; reality is pulled back to the
+  plan in a follow-up commit.
+
+This matches the broader project-canon practice. A worked
+example already exists upstream: wok-scene's `audio_cues` field
+shipped as `BTreeMap<String, AudioCueId>` rather than the plan's
+`Vec<(String, AudioCueId)>`. The deviation was deliberate
+(deterministic on save, duplicate-name keys structurally
+forbidden, cleaner JSON), the plan-vs-reality memo documented
+it, and wok-scene's plan was absorbed to match reality. That's
+the loop, run once.
+
+The memo is short — what changed, why, and a one-line "plan
+update needed" / "no plan update needed" verdict. It is not a
+postmortem. It exists so plan and code stay in lockstep across
+the lifetime of the engine, not just at v1 review.
+
 ---
 
 ## 2. Crate Layout
@@ -196,17 +241,21 @@ wok-content/
     │   └── serde.rs            # On-disk format for the registry file
     │
     ├── primitives/
-    │   ├── mod.rs              # Procedural mesh generation
+    │   ├── mod.rs              # Procedural mesh generation from ShapePrimitive variants
     │   ├── cube.rs
     │   ├── ellipsoid.rs
     │   ├── cylinder.rs
     │   ├── capsule.rs
     │   └── plane.rs
     │
+    ├── terrain/
+    │   ├── mod.rs              # Procedural mesh generation from RuntimeTerrain
+    │   ├── mesh.rs             # Vertex + index generation, normals, surface colors
+    │   └── palette.rs          # SurfaceTag → color mapping (read from ContentConfig)
+    │
     ├── storage/
-    │   ├── mod.rs              # Storage layer over loaded assets
-    │   ├── mesh.rs             # MeshGpu, MeshCpu, upload helpers
-    │   └── audio.rs            # AudioBuffer (stub for Phase 4)
+    │   ├── mod.rs              # Storage layer over loaded mesh data
+    │   └── mesh.rs             # MeshGpu, MeshCpu, upload helpers
     │
     ├── chunk/
     │   ├── mod.rs              # ChunkSlot, ContentSystem chunk operations
@@ -259,9 +308,11 @@ pub struct ContentSystem {
     // Identity layer
     registry: Registry,
 
-    // Storage layer
+    // Storage layer (mesh only; audio storage lives in wok-audio,
+    // animation in wok-anim, light state in wok-light — wok-content
+    // tracks identity for all asset kinds via the registry but only
+    // stores loaded data for kinds without their own crate)
     meshes: HashMap<MeshId, MeshGpu>,        // serial-keyed, via Hash impl
-    audio: HashMap<AudioCueId, AudioBuffer>, // stub for Phase 4
 
     // Chunk lifecycle
     slots: HashMap<ChunkCoord, ChunkSlot>,
@@ -338,6 +389,16 @@ impl ContentSystem {
     // None if the chunk isn't part of the loaded scene at all.
     pub fn authored_eagerness(&self, coord: ChunkCoord) -> Option<ChunkEagerness>;
 
+    // Streaming-only accessor. Returns the same value as
+    // `authored_eagerness` — this exists as a semantic alias so call
+    // sites in the streaming algorithm name what they're reading. Do
+    // not call from outside `streaming/`; if you're writing a debug
+    // overlay or editor diff, call `authored_eagerness` instead.
+    // The two functions are intentionally separate names for the same
+    // value: the streaming layer must read authored, never runtime,
+    // and the naming makes wrong use visible at review.
+    pub fn streaming_eagerness(&self, coord: ChunkCoord) -> Option<ChunkEagerness>;
+
     // Registry access
     pub fn registry(&self) -> &Registry;
     pub fn mesh(&self, id: MeshId) -> Option<&MeshGpu>;
@@ -383,6 +444,12 @@ pub struct ResidentChunk {
 
 pub struct ChunkGpuHandles {
     pub visible_mesh_refs: Vec<MeshGpuRef>,
+    // Per-chunk terrain mesh, generated from ChunkRuntime.terrain
+    // at load time. None for chunks with no terrain data (e.g.,
+    // purely indoor scenes). Owned by the slot — drops when the
+    // slot drops — because terrain is unique per chunk and not
+    // shareable across slots. See §9.17.
+    pub terrain: Option<MeshGpu>,
     // Phase 4 holds nothing more; later phases add textures, etc.
 }
 
@@ -523,7 +590,11 @@ impl Registry {
     pub fn rename_mesh(&mut self, id: MeshId, new_slug: Slug) -> Result<(), RegistryError>;
     pub fn set_mesh_source(&mut self, id: MeshId, source: PathBuf) -> Result<(), RegistryError>; // upgrade from placeholder
 
-    // Auto-population (called after scene/prefab load)
+    // Auto-population (called after scene/prefab load). Walks
+    // each prefab's states; for each state, scans `audio_cues:
+    // BTreeMap<String, AudioCueId>` and `mesh_override: Option<MeshId>`
+    // for asset-ID references and records UsageSites. Walks each
+    // chunk's regions and placements likewise.
     pub fn populate_from_scene(&mut self, scene: &Scene, prefabs: &HashMap<PrefabId, Prefab>, chunks: &HashMap<ChunkCoord, Chunk>);
 
     // Snapshot for worker
@@ -630,6 +701,16 @@ pub enum ContentEvent {
 The game polls `system.poll()` once per tick and drains these. They
 are emitted on the main thread in response to worker results being
 processed.
+
+**No separate `TerrainLoaded` event.** Terrain is part of a
+chunk's resident state, not a separate lifecycle concept — it's
+generated as part of the load pipeline alongside placement
+slicing and visible-mesh upload, and ships in
+`ChunkResident(coord)` like everything else in the slot. A
+consumer that wants to know "is terrain ready" looks at
+`slot.runtime.<terrain field>` (wok-scene-owned) or
+`rc.gpu.terrain` (wok-content-owned). The lifecycle event signals
+all-resident-or-nothing.
 
 ---
 
@@ -749,12 +830,15 @@ Three layers of mismatch detection, ordered by check strictness:
 `engine_version` is informational only — never enforced. Useful
 for debug logs when crossing major version boundaries.
 
-### 4.4 The smoke-test directory
+### 4.4 Workspace integration test fixtures
 
-For the in-tree smoke-test (`wok/examples/smoke-test/`):
+The wok-engine workspace ships an integration test target that
+exercises wok-content (and, in later phases, wok-render /
+wok-physics / wok-anim together). The test fixtures live at
+`wok-engine/tests-integration/fixtures/`:
 
 ```
-wok/examples/smoke-test/content/
+wok-engine/tests-integration/fixtures/
 ├── registry.json
 ├── prefabs/
 │   ├── player-capsule.json    # one capsule prefab, hitbox + visible
@@ -763,16 +847,27 @@ wok/examples/smoke-test/content/
 │   ├── interactable-box.json  # one box, hitbox + visible
 │   └── trigger-pad.json       # hitbox-only volume with trigger_id
 └── scenes/
-    └── smoke/
+    └── room/
         ├── scene.json
-        └── 0_0.json
+        ├── 0_0.json
+        └── 0_0.heightmap.bin  # sibling binary per HLD §1 wok-scene;
+                               # u16-quantized heights for the chunk's
+                               # 128×128 surface tag grid
 ```
 
-Phase-4 smoke-test load path: `ContentSystem::load_scene("smoke")`
-populates registry from this content, then `request_load((0, 0))`
-brings the chunk resident with one player capsule, room geometry,
-one interactable box, and one trigger pad. Game wires the trigger
-pad's `TriggerId` to a print statement and calls it done.
+The fixtures encode the minimum content needed to drive Phase 4's
+acceptance: one room, one player capsule, one interactable box,
+one trigger pad. For Phase A's terrain step (§11 #8), the
+heightmap fixture can be flat (uniform u16 value) — terrain mesh
+generation is exercised, but the room itself is bounded by prefab
+walls and floor rather than terrain. Sloped or interesting
+heightmaps land in later integration test scenes when wok-physics
+heightmap collision (per HLD §1 wok-physics) is exercised.
+
+This is integration test scaffolding, not an example crate
+pretending to be a game. The future game (when it exists, in its
+own repo per the high-level design) is the engine's example. The
+engine itself ships test fixtures — honestly named.
 
 ---
 
@@ -820,7 +915,26 @@ LoadChunk:
             cpu_data = generate_or_load(job.id, &registry)
             upload to wgpu::Queue
             record handle
-    send WorkerResult::ChunkLoaded { coord, runtime, gpu_handles, newly_uploaded_meshes }
+    // Terrain mesh: generated per-chunk from RuntimeTerrain (if
+    // present) using wok-scene's normal_at(&chunk, x, z) and
+    // surface_at(&chunk, x, z) samplers, and the ContentConfig
+    // palette. Sampling functions take `&ChunkRuntime` uniformly
+    // (the chunk owns the heightmap, surface_tag_table, and any
+    // chunk-level state the samplers need). Not deduplicated —
+    // terrain is unique per chunk and owned by the slot.
+    // `runtime.terrain` is `Option<RuntimeTerrain>`, a public
+    // field on ChunkRuntime in the same shape as `runtime.visible`,
+    // `runtime.hitboxes`, etc.
+    terrain_gpu: Option<MeshGpu> = if runtime.terrain.is_some() {
+        let cpu = terrain::generate_mesh(&runtime, &config.terrain_palette)
+        Some(terrain::upload(cpu, &device, &queue))
+    } else {
+        None
+    }
+    send WorkerResult::ChunkLoaded {
+        coord, runtime, gpu_handles, newly_uploaded_meshes,
+        terrain_gpu,
+    }
 ```
 
 Main thread integrates the result:
@@ -829,13 +943,16 @@ Main thread integrates the result:
 on ChunkLoaded result:
     if !slots.contains(coord) or matches!(slot.state, SlotState::Unloading(_)):
         // game called unload between request and completion;
-        // release the GPU handles, drop runtime, no event
+        // release the GPU handles (including terrain_gpu), drop runtime, no event
         return
     for mesh_handle in newly_uploaded_meshes:
         storage.meshes.insert(mesh_handle.id, mesh_handle.gpu)
     slot.state = SlotState::Resident(ResidentChunk {
         runtime,
-        gpu: ChunkGpuHandles { visible_mesh_refs: ... },
+        gpu: ChunkGpuHandles {
+            visible_mesh_refs: ...,
+            terrain: terrain_gpu,
+        },
     })
     emit ChunkResident(coord)
 ```
@@ -942,6 +1059,16 @@ unload_radius(meta):
 ```
 
 Algorithm:
+
+The pseudocode below iterates `scene.chunks_authored` directly
+because the streaming module is the data's owner-at-this-layer
+and has full visibility into the map. For single-coord lookups
+outside this iteration (interlock chasing, per-tick checks
+against a specific chunk), the canonical accessor is
+`ContentSystem::streaming_eagerness(coord)` — the semantic alias
+of `authored_eagerness` that makes "this is a streaming read of
+authored data, not a runtime read" obvious at the call site
+(§9.16).
 
 ```text
 tick_streaming(cam):
@@ -1108,6 +1235,13 @@ What the engine snapshot does **not** carry:
 - **Registry.** Deterministic from `content/`; not snapshotted.
 - **Asset storage** (GPU buffers, mesh CPU data). Reconstructable
   from registry + authored data.
+- **Terrain mesh state.** Terrain meshes regenerate
+  deterministically from `TerrainData` on chunk load (via
+  wok-scene's sampling functions); duplicating them in the
+  snapshot would violate the "authored data is the source of
+  truth" rule (§9.6) for no benefit. If a future proposal
+  surfaces "snapshot includes terrain mesh for fast load," that's
+  a regression and the §9.6 rule is the reason it's wrong.
 
 Restore is the inverse, synchronous, blocking:
 
@@ -1173,12 +1307,12 @@ Three streams, one stitch_id, game enforces matching. Engine's
 contract is just "write what you got, return what you wrote."
 
 **Sync vs async restore.** Phase A ships blocking
-`restore_engine_snapshot` (smoke-test needs only save/load, no
-loading screen). Async restore that returns a `RestoreHandle` the
-game polls is required for multiplayer join-in-progress (per the
-multiplayer model doc — anchor-event resync can't freeze the main
-loop). It lands in the multiplayer phase; the API shape will be
-parallel to the blocking version.
+`restore_engine_snapshot` (Phase-4 integration tests need only
+save/load, no loading screen). Async restore that returns a
+`RestoreHandle` the game polls is required for multiplayer
+join-in-progress (per the multiplayer model doc — anchor-event
+resync can't freeze the main loop). It lands in the multiplayer
+phase; the API shape will be parallel to the blocking version.
 
 ### 5.4 Registry rename
 
@@ -1394,6 +1528,42 @@ can race with worker uploads. Explicit shutdown call required.
 GPU upload tested separately with a headless wgpu adapter — needs
 a `tests/common.rs` helper that boots one.
 
+### 7.2b Terrain mesh generation (`tests/terrain.rs`)
+
+Fixtures: hand-built minimal `ChunkRuntime` instances with
+`runtime.terrain == Some(rt)` where `rt: RuntimeTerrain` carries
+known heights and surface tags at a few sizes (2 × 2 quads,
+4 × 4 quads, 128 × 128 = full chunk). The samplers
+(`normal_at(&chunk, ..)`, `surface_at(&chunk, ..)`) operate on
+the chunk uniformly, so fixtures must be `ChunkRuntime`-shaped
+even though only the `terrain` and `surface_tag_table` fields
+carry meaningful values. (`RuntimeTerrain` is wok-scene's
+runtime form, derived from authored `TerrainData` by the
+slicer.)
+
+1. Generated `MeshCpu` has `(quads_x * quads_z) * 2` triangles
+   and `(quads_x + 1) * (quads_z + 1)` vertices.
+2. Determinism: same `RuntimeTerrain` + same palette →
+   byte-identical `MeshCpu`. (Property the multiplayer-model
+   determinism rule rides on; see §7.8 test #4.)
+3. Triangulation diagonal is northwest-to-southeast at every
+   quad (locked direction; see §9.18).
+4. Vertex normals: at each vertex `(x, z)`, the generated normal
+   equals `wok_scene::normal_at(&chunk, x, z)` within
+   float-precision tolerance, where `chunk` is the `ChunkRuntime`
+   the terrain mesh was generated from. Sample a few interior
+   vertices, plus all four corners.
+5. Vertex colors: at each vertex, the generated color equals
+   `palette[wok_scene::surface_at(&chunk, x, z)]`. Unknown surface
+   tags map to the palette's fallback color, not a panic.
+6. Bounding AABB: x/z extents span the chunk's horizontal range;
+   y extent matches `(min_height, max_height)` over the
+   heightfield.
+7. GPU upload via `LoopbackWorker` produces a non-zero
+   `MeshGpu.index_count` matching the CPU index count.
+8. Terrain mesh from a `ChunkRuntime` with `runtime.terrain ==
+   None` → `ChunkGpuHandles.terrain == None`. No spurious upload.
+
 ### 7.3 Chunk lifecycle (`tests/chunk_lifecycle.rs`)
 
 Tests use a synchronous mode of the worker (a `LoopbackWorker`
@@ -1499,6 +1669,14 @@ I/O — feed a `Scene` and prefab map directly into the system.
 12. `vista_multiplier = 1.0` in `ContentConfig` → Vista chunks
     behave identically to Eager for load/unload (the runtime
     state still differs; only the radius changes).
+13. **Accessor equality**: for every chunk coord in the loaded
+    scene, `system.authored_eagerness(coord) ==
+    system.streaming_eagerness(coord)`. These are semantic
+    aliases; the test exists so a future implementation that
+    accidentally diverges them (e.g., by reading from different
+    sources) fails at the property layer rather than at a
+    streaming behavior layer where the symptom would be hard to
+    trace.
 
 ### 7.6 Snapshot (`tests/snapshot.rs`)
 
@@ -1558,6 +1736,15 @@ camera path = byte-identical observable state.
    property surfaced at the wok-content layer.)
 3. Same scene, same scripted camera trajectory → identical chunk
    load/unload sequence.
+4. **Terrain determinism**: same authored `TerrainData` + same
+   `ContentConfig.terrain_palette` → byte-identical `MeshCpu`
+   (vertices, indices, normals, colors, bounding AABB) across
+   two slices of the same chunk. Locks in the property §9.18's
+   triangulation rule and §7.2b ride on. (Property holds at the
+   authored level — wok-scene's slicer produces the same
+   `RuntimeTerrain` from the same `TerrainData`, and wok-content's
+   mesh generator produces the same `MeshCpu` from the same
+   `RuntimeTerrain`.)
 
 ---
 
@@ -1689,18 +1876,28 @@ When a chunk unloads, its `MeshGpuRef`s drop. The underlying
 `MeshGpu` does NOT drop — it might be referenced by other
 chunks.
 
-**Decision**: through Phase 4, meshes are immortal — uploaded
-once at first use and never released. The placeholder mesh set
-is small and constant (one `MeshGpu` per primitive shape ×
-tessellation parameters from `ContentConfig`); memory pressure
-is not a concern at this fidelity.
+**Decision**: through Phase 4, registry-tracked meshes are
+immortal — uploaded once at first use and never released. The
+placeholder mesh set is small and constant (one `MeshGpu` per
+primitive shape × tessellation parameters from `ContentConfig`);
+memory pressure is not a concern at this fidelity.
+
+This rule applies to *registry-tracked* meshes. Terrain meshes
+follow a different lifetime model — see §9.17 — because they're
+unique per chunk and slot-owned rather than registry-tracked. The
+"immortal" rule below covers everything in `ContentSystem.meshes`;
+slot-owned GPU resources (currently just terrain) drop with their
+slot.
 
 When shipped assets arrive (post-GLTF integration, when meshes
 can be large and per-chunk), `MeshGpu` gains a refcount and is
 released when count == 0. The public interface stays identical;
 the storage layer changes. Pin the migration to the phase that
-introduces the first non-immortal asset kind so the refcount
-ships with a real test surface, not speculatively.
+introduces the first non-immortal *registry-tracked* asset kind
+so the refcount ships with a real test surface, not speculatively.
+(Terrain has already proved out slot-owned GPU resource Drop
+semantics, which is the harder half of refcounted lifetime; see
+§9.17.)
 
 ### 9.5 Hot reload races
 
@@ -1762,13 +1959,22 @@ pub struct ContentConfig {
     pub ellipsoid_subdivisions: u32,         // default 16
     pub cylinder_segments: u32,              // default 24
     pub priority_queue_capacity: usize,      // default 64
+    pub terrain_palette: SurfaceTagPalette,  // SurfaceTag → [f32; 3]; default greens/grays/browns
+}
+
+pub struct SurfaceTagPalette {
+    // Placeholder: concrete shape pinned in Phase A implementation
+    // once wok-scene's surface_tag table API is final. Expected to
+    // be a map from SurfaceTag (likely an interned u16 ID per
+    // wok-scene's surface_tag_table indirection) to [f32; 3] RGB,
+    // with a fallback color for unknown tags.
 }
 ```
 
 Most callers use `ContentConfig::default()`. Knobs exist for
-testing and unusual scenes. Defaults are the values smoke-test
-exercises; deviating from them changes engine behavior in ways
-test suites won't catch.
+testing and unusual scenes. Defaults are the values the workspace
+integration tests exercise; deviating from them changes engine
+behavior in ways test suites won't catch.
 
 ### 9.10 `_format` of the registry is independent of authored data
 
@@ -1935,6 +2141,112 @@ Don't move to lock-based incremental mutation — that inverts
 read/write costs and complicates the worker-snapshot
 determinism story.
 
+### 9.16 Two accessors return the same eagerness value, on purpose
+
+`ContentSystem` exposes two accessors that return the authored
+eagerness for a chunk:
+
+- `authored_eagerness(coord)` — for callers that compare authored
+  intent against runtime state (debug overlays, editor diff, game
+  logic deciding whether to transition a chunk back to Eager).
+- `streaming_eagerness(coord)` — for callers inside the streaming
+  module. Returns the same value.
+
+The duplication is the point. The streaming algorithm must read
+authored eagerness, never runtime — using the runtime tag would
+make load/unload behavior depend on game transitions and break
+determinism against authored data. The naming makes wrong use
+visible at review: `streaming_eagerness` at a debug overlay
+raises an eyebrow; `authored_eagerness` at a streaming site does
+the same. Either reading the wrong value or reaching into
+`rc.runtime.eagerness` from a streaming site is the bug the two
+accessors are designed to catch.
+
+There is no `runtime_eagerness(coord)` accessor for symmetry —
+runtime eagerness is per-slot and naturally accessed through
+iteration (`system.slots()` yielding `(coord, &ResidentChunk)`).
+A single-coord runtime lookup would have to handle "what if not
+Resident," which is exactly the lifecycle pattern §3.2 keeps off
+the iteration path.
+
+If `streaming_eagerness` and `authored_eagerness` ever diverge
+in implementation, that's a structural error — the value is
+authoritative, the names are semantic aliases. Tests in §7.5
+assert their equality on every reachable chunk.
+
+### 9.17 Terrain meshes are slot-owned, not registry-tracked
+
+Terrain meshes are unique per chunk. They are not registered
+(no `MeshId`, no entry in `Registry.meshes`) and not stored in
+`ContentSystem.meshes`. The `MeshGpu` for a chunk's terrain
+lives inside `ResidentChunk.gpu.terrain: Option<MeshGpu>` and
+drops when the slot drops.
+
+This breaks the symmetry with primitive and (future) shipped
+meshes, which are registry-tracked and stored in
+`ContentSystem.meshes` for reuse across chunks. Terrain is
+intentionally outside that system because:
+
+- Refcount = 1 always. One chunk owns its terrain. Reuse is
+  impossible (the heights and surface tags vary per chunk).
+- No identity stable across runs. The `TerrainData` is the
+  identity; if it changes, the mesh changes. No slug, no serial.
+- The §9.4 "meshes are immortal in Phase 4" rule does not apply.
+  Terrain meshes have a lifetime tied to chunk slot lifetime,
+  which is what the slot-ownership model encodes.
+
+This means `ChunkSlot` becomes the first place in wok-content
+that owns GPU resources directly rather than borrowing handles
+from the storage layer. The implementation pattern (Drop on
+`MeshGpu` releases the underlying `wgpu::Buffer`) is identical
+to what registry-tracked meshes will need when shipped assets
+arrive and trigger the §9.4 refcount migration. Treat terrain
+as the proof-of-concept for slot-owned GPU resources; the
+patterns will generalize.
+
+### 9.18 Terrain triangulation diagonal is locked
+
+Each 1m × 1m terrain quad is split into two triangles. The
+diagonal runs **northwest to southeast** (i.e., from
+`(x, z)` to `(x + 1, z + 1)`, or in chunk-local coords from
+the corner with smaller x and smaller z to the corner with
+larger x and larger z).
+
+This is locked for determinism. Same `TerrainData` must produce
+byte-identical `MeshCpu` — the multiplayer-model property
+extends to terrain. A future implementation that picks the
+diagonal based on per-quad heuristics (e.g., "shorter diagonal
+of the four heights") would break this; if such a heuristic
+turns out to look meaningfully better, it lands as a deliberate
+authored property on `TerrainData` (a per-quad bit in wok-scene)
+rather than as a runtime decision.
+
+### 9.19 Public API is async-only by design
+
+Chunk loading exposes `request_load(coord) -> LoadHandle` and
+completion arrives via `ContentEvent::ChunkResident`. There is
+no `load_chunk_blocking` in the public API.
+
+`LoopbackWorker` (§7.3) is the synchronous mode and covers the
+two contexts where blocking is wanted: test code (deterministic,
+no thread coordination) and editor-preview consumers in wok-shell
+(in-editor chunk previews where async polling would complicate
+the editor's rendering loop). Both of these are workspace-internal
+consumers that can construct a `ContentSystem` with the loopback
+worker directly.
+
+A `load_chunk_blocking` wrapper to the public API is deferred
+until a concrete use case beyond editor-preview surfaces — adding
+it now would expand the API surface for no current consumer. If
+the need arrives, the implementation is a thin pump:
+`request_load` then `poll` in a loop until the slot reports
+Resident or Failed. The shape mirrors `restore_engine_snapshot`'s
+existing blocking-pump pattern (§5.3).
+
+This deferral is canon, not accident. Async-first matches the
+engine's broader sync-with-polling posture (§9.7); the blocking
+variant lands when its consumer is concrete, not speculatively.
+
 ---
 
 ## 10. What This Crate Is Explicitly Not
@@ -1970,10 +2282,19 @@ determinism story.
 
 ## 11. Order of Implementation
 
-Phased to support smoke-test as early as possible (Phase 4 of
-Harrison's roadmap, currently active). Each step lands with tests.
+Phased to support the Phase-4 milestone as early as possible
+(currently active on Harrison's roadmap). Each step lands with
+tests.
 
-### Phase A — Minimum viable for Phase-4 smoke-test (sync, no streaming)
+**Phase-boundary deliverable**: at the end of each phase, the
+implementer produces a plan-vs-reality memo (§1.6) comparing
+shipped code against the section of this plan covered by the
+phase. Intentional deviations document the reasoning and pull
+into the plan at the next review; unintentional ones flag as
+regression and pull the code back to the plan. The memo is the
+phase's exit gate alongside the technical work and tests.
+
+### Phase A — Minimum viable for Phase 4 (sync, no streaming)
 
 Goal: load one chunk, draw one room, walk a capsule around it.
 
@@ -1993,17 +2314,31 @@ Goal: load one chunk, draw one room, walk a capsule around it.
    (`transition_chunk`). Vista state is now carried correctly
    through slot iteration; consumers honor it at their read sites.
    Tests: §7.4.
-8. **`system.rs`** — `ContentSystem` minimal API for Phase A:
+8. **`terrain/`** — procedural terrain mesh generation. Consumes
+   `&ChunkRuntime` (the runtime form, with `runtime.terrain ==
+   Some(_)`; the slicer produced this from authored `TerrainData`).
+   Uses wok-scene's `normal_at(&chunk, x, z)` and
+   `surface_at(&chunk, x, z)` samplers; reads palette from
+   `ContentConfig`. Northwest-to-southeast triangulation locked
+   (§9.18). Terrain meshes are slot-owned, not registry-tracked
+   (§9.17). Tests: §7.2b.
+9. **`system.rs`** — `ContentSystem` minimal API for Phase A:
    `new(device, queue, content_root, config) / shutdown /
     load_scene / unload_scene / request_load / request_unload /
     transition_chunk / poll / slot / slots / active_slots /
-    vista_slots / mesh / registry / authored_eagerness`.
-   `tick_streaming`, `capture_engine_snapshot`, and
-   `restore_engine_snapshot` are deferred to later phases.
-9. **Smoke-test crate skeleton** at `wok/examples/smoke-test/`
-   with the content layout from §4.4. Verifies: scene loads,
-   chunk goes Resident, capsule renders, room renders, transition
-   to Vista works.
+    vista_slots / mesh / registry / authored_eagerness /
+    streaming_eagerness`. `tick_streaming`, `capture_engine_snapshot`,
+   and `restore_engine_snapshot` are deferred to later phases.
+10. **Integration test fixtures** at
+    `wok-engine/tests-integration/fixtures/` with the content
+    layout from §4.4. Phase A test cases verify wok-content-only
+    behavior: scene loads, chunk reaches Resident, transition to
+    Vista works, registry populates correctly, terrain mesh
+    appears in slot's GPU handles when chunk has terrain data.
+    The `tests-integration/` crate skeleton may be created here
+    or in a later phase when additional crates participate;
+    Phase A only requires the fixtures and wok-content's own
+    contribution to the integration test suite.
 
 Phase A ships the crate end-to-end for Phase-4 needs.
 
@@ -2011,38 +2346,38 @@ Phase A ships the crate end-to-end for Phase-4 needs.
 
 Goal: file I/O off the main thread.
 
-10. **`worker/`** — real `std::thread`-based worker with
+11. **`worker/`** — real `std::thread`-based worker with
     crossbeam channels. `LoopbackWorker` stays as a test-only
     variant. Tests: §7.7.
-11. **Mesh-upload dedup** — `Arc<Mutex<HashSet<MeshId>>>`. Tests:
+12. **Mesh-upload dedup** — `Arc<Mutex<HashSet<MeshId>>>`. Tests:
     §7.3 #8.
-12. **Cancellation paths** — slot transitions to Unloading while
+13. **Cancellation paths** — slot transitions to Unloading while
     Loading, etc. Tests: §7.3 #3-#5 under async worker.
-13. **`registry/view.rs`** — `RegistryReadView` + Arc-swap
+14. **`registry/view.rs`** — `RegistryReadView` + Arc-swap
     pattern. Tests: §7.1 #9.
 
 ### Phase C — Streaming
 
 Goal: camera-driven chunk loading.
 
-14. **`streaming/desired.rs`, `streaming/hysteresis.rs`** —
+15. **`streaming/desired.rs`, `streaming/hysteresis.rs`** —
     desired set + hysteresis. Tests: §7.5 #1-#4.
-15. **`streaming/interlock.rs`** — interlock fixpoint. Tests:
+16. **`streaming/interlock.rs`** — interlock fixpoint. Tests:
     §7.5 #7-#8.
-16. **`streaming/prioritize.rs`** — distance-ordered queue.
+17. **`streaming/prioritize.rs`** — distance-ordered queue.
     Tests: covered by §7.5 #9.
-17. **MAX_LOADED enforcement and LRU** — `slots.lru` bookkeeping.
+18. **MAX_LOADED enforcement and LRU** — `slots.lru` bookkeeping.
     Tests: §7.5 #9.
-18. **Vista-multiplier radius** — authored Vista chunks load at
+19. **Vista-multiplier radius** — authored Vista chunks load at
     extended range. Tests: §7.5 #10.
 
 ### Phase D — Snapshots
 
 Goal: save/load.
 
-19. **`snapshot/mod.rs`** — `EngineSnapshot`, `StitchId`, and the
+20. **`snapshot/mod.rs`** — `EngineSnapshot`, `StitchId`, and the
     compile-time `schema_hash` derive macro. Tests: §7.6 #6, #7.
-20. **`snapshot/capture.rs`, `snapshot/restore.rs`** — engine
+21. **`snapshot/capture.rs`, `snapshot/restore.rs`** — engine
     fields only (game stitching pattern). Blocking restore that
     pumps worker internally; async restore deferred to the
     multiplayer phase. Tests: §7.6 #1–#5, #8–#10.
@@ -2051,10 +2386,10 @@ Goal: save/load.
 
 Goal: the editor's "Run" preview reflects edits.
 
-21. Poll wok-scene's `FileWatcher` from `ContentSystem::poll()`.
-22. Re-dispatch affected chunks via `request_load` (which is
+22. Poll wok-scene's `FileWatcher` from `ContentSystem::poll()`.
+23. Re-dispatch affected chunks via `request_load` (which is
     already idempotent and replaces existing slot).
-23. Generation-token policy (§9.5) — workers receive a generation
+24. Generation-token policy (§9.5) — workers receive a generation
     snapshot; main thread compares on receive.
 
 ### Phase F — Determinism harness integration
@@ -2062,7 +2397,7 @@ Goal: the editor's "Run" preview reflects edits.
 Goal: ship the workspace-level deterministic replay (high-level
 §4 Level 2).
 
-24. Expose deterministic dump format for ContentSystem state
+25. Expose deterministic dump format for ContentSystem state
     (current slots, loaded scene, registry hash). Tests: §7.8.
 
 ---
@@ -2086,4 +2421,12 @@ for decisions whose reasoning lives in the body:
 | Registry deletion form | Tombstones, not sparse-array nulls | §4.1 |
 | Worker concurrency | One worker thread; rayon for fan-out inside requests if profiles justify | §6.3 |
 | Channel implementation | `crossbeam_channel` (bounded priority + unbounded mpsc) | §6.2 |
+| Streaming-eagerness accessor | Semantic alias of `authored_eagerness`; naming enforces "streaming reads authored, never runtime" at review | §9.16 |
+| Audio buffer storage location | Lives in wok-audio (new crate); wok-content keeps AudioCueId identity in the registry but stores no buffer data | §1.1, §3.1 |
+| Terrain mesh storage and lifetime | Slot-owned `Option<MeshGpu>`, not registry-tracked; drops with slot | §3.2, §9.17 |
+| Terrain event lifecycle | Folded into `ChunkResident`; no separate `TerrainLoaded` event | §3.6 |
+| Terrain triangulation direction | Northwest-to-southeast diagonal locked; runtime heuristics forbidden | §9.18 |
+| Test scaffolding shape | Workspace integration test fixtures at `tests-integration/fixtures/`; no example-crate-as-fake-game | §4.4, §11 |
+| Plan-vs-reality memo discipline | Each §11 phase ends with a memo; intentional drift pulls into plan, unintentional drift pulls into code | §1.6, §11 |
+| Public API is async-only | Sync needs covered by `LoopbackWorker` for test and editor-preview; `load_chunk_blocking` deferred until concrete consumer surfaces | §9.19 |
 
