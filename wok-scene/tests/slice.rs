@@ -4,7 +4,7 @@ use wok_scene::pantry::math::{Aabb, Quat, Transform, Vec3};
 use wok_scene::{
     Chunk, ChunkCoord, ChunkEagerness, ChunkMetadata, LightStateRef, Prefab, PrefabId,
     PrefabPlacement, PrefabState, RegionMarker, RegionPurpose, Shape, ShapePrimitive, SliceError,
-    Slug, TriggerId, slice_chunk,
+    Slug, TerrainData, TriggerId, slice_chunk,
 };
 
 // ---- Fixture and helpers ----
@@ -620,4 +620,185 @@ fn t13_eagerness_carried_through_arrays_unchanged() {
     assert_eq!(lazy.triggers, vista.triggers);
     assert_eq!(lazy.regions, vista.regions);
     assert_eq!(lazy.surface_tag_table, vista.surface_tag_table);
+}
+
+// ---- v0.2.0 terrain slicing (plan §7 tests 14-18) ----
+
+/// A heightmap whose cells form a simple slope along the x axis: cell (x, z) = x * 100.
+/// Surface tags `["grass", "wood", "stone"]` in alphabetical order (matches the save-time
+/// invariant). All cells reference index 1 (`wood`) so the post-merge remapping is visible.
+fn fixture_terrain(heightmap_file: &str) -> TerrainData {
+    let mut heights = vec![0u16; TerrainData::CELL_COUNT];
+    for z in 0..TerrainData::CELLS_PER_AXIS as usize {
+        for x in 0..TerrainData::CELLS_PER_AXIS as usize {
+            heights[z * (TerrainData::CELLS_PER_AXIS as usize) + x] = (x * 100) as u16;
+        }
+    }
+    TerrainData {
+        heights: heights.into_boxed_slice(),
+        surface_indices: vec![1u16; TerrainData::CELL_COUNT].into_boxed_slice(),
+        surface_tags: vec![
+            "grass".to_string(),
+            "wood".to_string(),
+            "stone".to_string(),
+        ],
+        vertical_range_meters: 32.0,
+        heightmap_file: heightmap_file.to_string(),
+    }
+}
+
+fn chunk_with_terrain(coord: ChunkCoord, terrain: TerrainData) -> Chunk {
+    Chunk {
+        coord,
+        metadata: ChunkMetadata {
+            eagerness: ChunkEagerness::Eager,
+            neighbors: Vec::new(),
+            interlocks: Vec::new(),
+        },
+        light_state: LightStateRef::new(slug("l"), 1),
+        placements: Vec::new(),
+        regions: Vec::new(),
+        terrain: Some(terrain),
+    }
+}
+
+#[test]
+fn t14_terrain_slice_smoke() {
+    // Plan §7 #14. Smoke test: a chunk with terrain slices to a RuntimeTerrain with the
+    // expected shape - 16641 cells, width 129, vertical_range preserved.
+    let prefabs: HashMap<PrefabId, Prefab> = HashMap::new();
+    let chunk = chunk_with_terrain(ChunkCoord::new(0, 0), fixture_terrain("0_0.heightmap.bin"));
+    let rt = slice_chunk(&chunk, &prefabs).unwrap();
+    let terrain = rt.terrain.as_ref().expect("terrain present after slice");
+    assert_eq!(terrain.heights.len(), TerrainData::CELL_COUNT);
+    assert_eq!(terrain.surface_indices.len(), TerrainData::CELL_COUNT);
+    assert_eq!(terrain.width, TerrainData::CELLS_PER_AXIS);
+    assert!((terrain.vertical_range_meters - 32.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn t15_terrain_slice_position_independent() {
+    // Plan §7 #15. Position independence: same chunk at two different coords produces
+    // byte-identical RuntimeTerrain. The only field that differs across the two ChunkRuntimes
+    // is `coord` itself.
+    let prefabs: HashMap<PrefabId, Prefab> = HashMap::new();
+    let a = slice_chunk(
+        &chunk_with_terrain(ChunkCoord::new(0, 0), fixture_terrain("0_0.heightmap.bin")),
+        &prefabs,
+    )
+    .unwrap();
+    let b = slice_chunk(
+        &chunk_with_terrain(ChunkCoord::new(5, -3), fixture_terrain("0_0.heightmap.bin")),
+        &prefabs,
+    )
+    .unwrap();
+    assert_ne!(a.coord, b.coord);
+    assert_eq!(a.terrain, b.terrain, "RuntimeTerrain is position-independent");
+}
+
+#[test]
+fn t16_terrain_slice_deterministic() {
+    // Plan §7 #16. Same chunk sliced twice produces byte-equal outputs (including terrain).
+    let prefabs: HashMap<PrefabId, Prefab> = HashMap::new();
+    let chunk = chunk_with_terrain(ChunkCoord::new(0, 0), fixture_terrain("0_0.heightmap.bin"));
+    let a = slice_chunk(&chunk, &prefabs).unwrap();
+    let b = slice_chunk(&chunk, &prefabs).unwrap();
+    assert_eq!(a, b);
+}
+
+#[test]
+fn t17_terrain_surface_table_merge() {
+    // Plan §7 #17. Chunk with a prefab using "wood" and terrain using ["grass", "wood",
+    // "stone"]. Runtime table should be ["wood", "grass", "stone"]: prefab tags first by
+    // existing slicer order, then terrain appends new ones in authored (alphabetical) order.
+    // Terrain cells originally referencing authored idx 1 ("wood") must be remapped to
+    // runtime idx 0.
+    let mut prefabs = HashMap::new();
+    let prefab = Prefab {
+        id: PrefabId(slug("wood-block")),
+        default_state: "s".to_string(),
+        states: vec![PrefabState {
+            name: "s".to_string(),
+            shapes: vec![Shape {
+                primitive: ShapePrimitive::Cube {
+                    half_extents: Vec3::new(0.5, 0.5, 0.5),
+                },
+                transform: Transform::IDENTITY,
+                is_hitbox: true,
+                is_visible: true,
+                trigger_id: None,
+                surface_tag: Some("wood".to_string()),
+                visual_color: None,
+            }],
+            mesh_override: None,
+            audio_cues: BTreeMap::new(),
+        }],
+    };
+    prefabs.insert(prefab.id.clone(), prefab);
+
+    let chunk = Chunk {
+        coord: ChunkCoord::new(0, 0),
+        metadata: ChunkMetadata {
+            eagerness: ChunkEagerness::Eager,
+            neighbors: Vec::new(),
+            interlocks: Vec::new(),
+        },
+        light_state: LightStateRef::new(slug("l"), 1),
+        placements: vec![PrefabPlacement {
+            prefab: PrefabId(slug("wood-block")),
+            transform: Transform::IDENTITY,
+            state: "s".to_string(),
+            instance_tag: None,
+        }],
+        regions: Vec::new(),
+        terrain: Some(fixture_terrain("0_0.heightmap.bin")),
+    };
+
+    let rt = slice_chunk(&chunk, &prefabs).unwrap();
+    assert_eq!(
+        rt.surface_tag_table,
+        vec!["wood".to_string(), "grass".to_string(), "stone".to_string()],
+        "prefab tag first, then terrain tags in authored order"
+    );
+    let terrain = rt.terrain.as_ref().unwrap();
+    // Every cell in the fixture authors index 1 ("wood"), which sits at runtime idx 0.
+    for &idx in &*terrain.surface_indices {
+        assert_eq!(idx, 0, "wood remapped to runtime idx 0");
+    }
+}
+
+#[test]
+fn t18_terrain_surface_table_overflow_errors() {
+    // Plan §7 #18. Pathological chunk with > 65535 distinct terrain tags returns
+    // SliceError::TerrainSurfaceTableOverflow rather than panicking. The runtime intern
+    // table can hold exactly 65536 entries (u16 indices 0..=u16::MAX), so the 65537th intern
+    // attempt overflows.
+    const N: usize = 65_537;
+    let prefabs: HashMap<PrefabId, Prefab> = HashMap::new();
+    let mut tags = Vec::with_capacity(N);
+    for i in 0..N {
+        tags.push(format!("tag-{i}"));
+    }
+    let terrain = TerrainData {
+        heights: vec![0u16; TerrainData::CELL_COUNT].into_boxed_slice(),
+        surface_indices: vec![0u16; TerrainData::CELL_COUNT].into_boxed_slice(),
+        surface_tags: tags,
+        vertical_range_meters: 32.0,
+        heightmap_file: "0_0.heightmap.bin".to_string(),
+    };
+    let chunk = chunk_with_terrain(ChunkCoord::new(2, -1), terrain);
+
+    let err = slice_chunk(&chunk, &prefabs).unwrap_err();
+    match err {
+        SliceError::TerrainSurfaceTableOverflow {
+            coord,
+            prefab_tag_count,
+            terrain_tag_count,
+        } => {
+            assert_eq!(coord, ChunkCoord::new(2, -1));
+            assert_eq!(prefab_tag_count, 0);
+            assert_eq!(terrain_tag_count, N);
+        }
+        other => panic!("expected TerrainSurfaceTableOverflow, got {other:?}"),
+    }
 }

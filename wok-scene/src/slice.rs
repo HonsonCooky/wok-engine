@@ -3,10 +3,12 @@
 
 use std::collections::HashMap;
 
-use crate::authored::{Chunk, Prefab, PrefabState, Shape};
+use crate::authored::{Chunk, Prefab, PrefabState, Shape, TerrainData};
 use crate::error::SliceError;
-use crate::ids::PrefabId;
-use crate::runtime::{ChunkRuntime, PhysicalHitbox, RuntimeRegion, TriggerVolume, VisibleShape};
+use crate::ids::{ChunkCoord, PrefabId};
+use crate::runtime::{
+    ChunkRuntime, PhysicalHitbox, RuntimeRegion, RuntimeTerrain, TriggerVolume, VisibleShape,
+};
 
 /// Resolves prefab identifiers to authored prefab data. Implementations must be deterministic
 /// for the lifetime of a slice call: the same id passed twice must produce the same result.
@@ -144,6 +146,16 @@ pub fn slice_chunk(
         });
     }
 
+    // v0.2.0: terrain pass. Merge authored terrain surface tags into the same intern table
+    // (preserving prefab-first ordering), then rewrite per-cell surface indices through the
+    // resulting remap. Position-independent: nothing here reads chunk.coord except the
+    // overflow-error context. See plan section 5 "Slicing terrain" and the determinism
+    // properties (#1, #4, #5).
+    let terrain = match &chunk.terrain {
+        None => None,
+        Some(authored) => Some(slice_terrain(authored, &mut surface_intern, chunk.coord)?),
+    };
+
     Ok(ChunkRuntime {
         coord: chunk.coord,
         eagerness: chunk.metadata.eagerness,
@@ -153,9 +165,55 @@ pub fn slice_chunk(
         regions,
         light_state: chunk.light_state.clone(),
         surface_tag_table: surface_intern.into_vec(),
-        // v0.2.0 terrain pass lands in step 10. For now the slicer always yields None; the
-        // field exists so downstream types are stable across this and the next checkpoint.
-        terrain: None,
+        terrain,
+    })
+}
+
+/// Merge authored terrain surface tags into the runtime intern table and produce a
+/// `RuntimeTerrain` whose surface indices reference the merged table. Authored tags are
+/// appended to the intern table in the order they appear in `authored.surface_tags` (which
+/// the save path keeps alphabetically sorted, see `authored::terrain::write_sibling`).
+/// Returns `SliceError::TerrainSurfaceTableOverflow` if the merge would push the runtime
+/// table past `u16::MAX` entries.
+fn slice_terrain(
+    authored: &TerrainData,
+    intern: &mut StringInterner,
+    coord: ChunkCoord,
+) -> Result<RuntimeTerrain, SliceError> {
+    let prefab_tag_count = intern.len();
+    let mut remap: Vec<u16> = Vec::with_capacity(authored.surface_tags.len());
+    for tag in &authored.surface_tags {
+        let runtime_idx = intern.intern(tag);
+        let runtime_idx_u16 =
+            u16::try_from(runtime_idx).map_err(|_| SliceError::TerrainSurfaceTableOverflow {
+                coord,
+                prefab_tag_count,
+                terrain_tag_count: authored.surface_tags.len(),
+            })?;
+        remap.push(runtime_idx_u16);
+    }
+
+    // Rewrite per-cell surface indices through the remap. An out-of-range authored index
+    // (which would indicate corrupt in-memory TerrainData; loader-validated data cannot
+    // produce this) passes through unchanged: the cell then references whatever happens to
+    // be at that runtime-table position. Cheaper than threading another error variant for a
+    // case that the loader already rejects.
+    let surface_indices: Box<[u16]> = authored
+        .surface_indices
+        .iter()
+        .map(|&authored_idx| {
+            remap
+                .get(usize::from(authored_idx))
+                .copied()
+                .unwrap_or(authored_idx)
+        })
+        .collect();
+
+    Ok(RuntimeTerrain {
+        heights: authored.heights.clone(),
+        surface_indices,
+        width: TerrainData::CELLS_PER_AXIS,
+        vertical_range_meters: authored.vertical_range_meters,
     })
 }
 
@@ -202,6 +260,10 @@ impl StringInterner {
             self.table.push(s.to_string());
             idx
         }
+    }
+
+    fn len(&self) -> usize {
+        self.table.len()
     }
 
     fn into_vec(self) -> Vec<String> {

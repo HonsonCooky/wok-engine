@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use pantry::serde_json;
 
-use crate::ids::PrefabId;
+use crate::ids::{ChunkCoord, PrefabId};
 
 /// Errors produced by `slice_chunk`. Slicing is fail-fast: one error aborts the whole chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +16,14 @@ pub enum SliceError {
         placement_index: usize,
         shape_index: usize,
         reason: String,
+    },
+    /// Merging a chunk's authored terrain surface tags with its prefab surface tags would
+    /// produce a `surface_tag_table` larger than `u16::MAX` entries. Unreachable for any
+    /// realistic chunk; surfaced rather than panicked so authoring tools can report it.
+    TerrainSurfaceTableOverflow {
+        coord: ChunkCoord,
+        prefab_tag_count: usize,
+        terrain_tag_count: usize,
     },
 }
 
@@ -33,6 +41,16 @@ impl std::fmt::Display for SliceError {
             } => write!(
                 f,
                 "invalid shape at placement {placement_index} shape {shape_index}: {reason}"
+            ),
+            SliceError::TerrainSurfaceTableOverflow {
+                coord,
+                prefab_tag_count,
+                terrain_tag_count,
+            } => write!(
+                f,
+                "chunk ({}, {}) merged surface tag table would exceed u16::MAX entries: \
+                 {prefab_tag_count} from prefabs + {terrain_tag_count} from terrain",
+                coord.x, coord.z
             ),
         }
     }
