@@ -281,6 +281,105 @@ fn t05_authored_vista_loads_as_vista() {
     assert_eq!(slot_eagerness(&system, coord), ChunkEagerness::Vista);
 }
 
+// §7.4 #3: active_slots excludes Vista; vista_slots includes only Vista; slots includes both.
+#[test]
+fn t03_iteration_accessors_partition_by_eagerness() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let scene_dir = setup_fixture(tmp.path(), ChunkEagerness::Eager);
+    let mut system = boot(tmp.path());
+    system.load_scene(&scene_dir).expect("load_scene");
+    let coord = ChunkCoord::new(0, 0);
+    drain_to_resident(&mut system, coord);
+
+    // Eager: should be in slots() and active_slots(); not in vista_slots().
+    let all: Vec<ChunkCoord> = system.slots().map(|(c, _)| c).collect();
+    let active: Vec<ChunkCoord> = system.active_slots().map(|(c, _)| c).collect();
+    let vista: Vec<ChunkCoord> = system.vista_slots().map(|(c, _)| c).collect();
+    assert_eq!(all, vec![coord]);
+    assert_eq!(active, vec![coord]);
+    assert!(vista.is_empty());
+
+    // Transition to Vista: now in slots() and vista_slots(); not in active_slots().
+    system
+        .transition_chunk(coord, ChunkEagerness::Vista)
+        .expect("transition");
+    let all: Vec<ChunkCoord> = system.slots().map(|(c, _)| c).collect();
+    let active: Vec<ChunkCoord> = system.active_slots().map(|(c, _)| c).collect();
+    let vista: Vec<ChunkCoord> = system.vista_slots().map(|(c, _)| c).collect();
+    assert_eq!(all, vec![coord]);
+    assert!(active.is_empty());
+    assert_eq!(vista, vec![coord]);
+}
+
+// §7.4 #6: trigger volumes on a Vista chunk are present in slots() and vista_slots() but
+// absent from active_slots(). wok-physics iterates active_slots() so Vista trigger volumes
+// never reach the overlap math.
+#[test]
+fn t06_vista_trigger_volumes_in_correct_iterators() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let scene_dir = setup_fixture(tmp.path(), ChunkEagerness::Vista);
+    let mut system = boot(tmp.path());
+    system.load_scene(&scene_dir).expect("load_scene");
+    let coord = ChunkCoord::new(0, 0);
+    drain_to_resident(&mut system, coord);
+
+    // The fixture's prefab has one trigger volume (hitbox-only with trigger_id).
+    let trigger_count_via_slots: usize = system
+        .slots()
+        .map(|(_, rc)| rc.runtime.triggers.len())
+        .sum();
+    let trigger_count_via_vista: usize = system
+        .vista_slots()
+        .map(|(_, rc)| rc.runtime.triggers.len())
+        .sum();
+    let trigger_count_via_active: usize = system
+        .active_slots()
+        .map(|(_, rc)| rc.runtime.triggers.len())
+        .sum();
+    assert!(
+        trigger_count_via_slots >= 1,
+        "fixture should produce at least one trigger volume"
+    );
+    assert_eq!(trigger_count_via_vista, trigger_count_via_slots);
+    assert_eq!(trigger_count_via_active, 0);
+}
+
+// §7.4 #8: authored eagerness vs runtime eagerness divergence.
+#[test]
+fn t08_authored_runtime_divergence() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let scene_dir = setup_fixture(tmp.path(), ChunkEagerness::Eager);
+    let mut system = boot(tmp.path());
+    system.load_scene(&scene_dir).expect("load_scene");
+    let coord = ChunkCoord::new(0, 0);
+    drain_to_resident(&mut system, coord);
+
+    // Pre-transition: authored == runtime == Eager.
+    assert_eq!(system.authored_eagerness(coord), Some(ChunkEagerness::Eager));
+    assert_eq!(slot_eagerness(&system, coord), ChunkEagerness::Eager);
+    // streaming_eagerness is a semantic alias of authored.
+    assert_eq!(
+        system.streaming_eagerness(coord),
+        system.authored_eagerness(coord)
+    );
+
+    // Transition: authored stays Eager (it's a property of the loaded scene's chunk
+    // metadata); runtime becomes Vista.
+    system
+        .transition_chunk(coord, ChunkEagerness::Vista)
+        .expect("transition");
+    assert_eq!(system.authored_eagerness(coord), Some(ChunkEagerness::Eager));
+    assert_eq!(slot_eagerness(&system, coord), ChunkEagerness::Vista);
+
+    // Unload + reload: runtime transition was not persistent. Both equal Eager again.
+    system.request_unload(coord);
+    let _ = system.poll(); // emits ChunkUnloaded; slot now gone.
+    assert!(system.slot(coord).is_none());
+    drain_to_resident(&mut system, coord);
+    assert_eq!(system.authored_eagerness(coord), Some(ChunkEagerness::Eager));
+    assert_eq!(slot_eagerness(&system, coord), ChunkEagerness::Eager);
+}
+
 // §7.4 #7: transition_chunk on Pending or Loading → NotResident. No state change.
 #[test]
 fn t07_transition_pending_errors() {

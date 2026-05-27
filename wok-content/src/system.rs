@@ -14,20 +14,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pantry::wgpu;
-use wok_scene::{Chunk, ChunkCoord, Prefab, PrefabId, Scene};
-
-use wok_scene::ChunkEagerness;
+use wok_scene::{Chunk, ChunkCoord, ChunkEagerness, MeshId, Prefab, PrefabId, Scene};
 
 use crate::chunk::{
-    ChunkSlot, ContentEvent, LoadHandle, SlotState,
+    ChunkSlot, ContentEvent, LoadHandle, ResidentChunk, SlotState,
     load::{integrate_result, should_dispatch},
     transition::apply_transition,
     unload::{apply_unload, finalize_unloads},
 };
-use crate::error::TransitionError;
 use crate::config::ContentConfig;
-use crate::error::LoadError;
+use crate::error::{LoadError, TransitionError};
 use crate::registry::Registry;
+use crate::storage::MeshGpu;
 use crate::worker::{LoopbackWorker, WorkerRequest};
 
 /// The engine's content system. Owns the registry, the chunk lifecycle map, the worker,
@@ -257,6 +255,71 @@ impl ContentSystem {
     /// Borrow the current resident scene state. `None` if no scene is loaded.
     pub fn scene(&self) -> Option<&LoadedScene> {
         self.scene.as_ref()
+    }
+
+    // ---- Iteration accessors (plan section 3.2 "Canonical iteration") --------------------
+
+    /// Iterate every Resident and Unloading slot, yielding `(ChunkCoord, &ResidentChunk)`
+    /// pairs. Consumers should prefer this over walking `slots` directly; the pattern match
+    /// on `SlotState` lives inside the accessor so consumers cannot accidentally treat a
+    /// Failed or Loading slot as a renderable one.
+    pub fn slots(&self) -> impl Iterator<Item = (ChunkCoord, &ResidentChunk)> {
+        self.slots.iter().filter_map(|(coord, slot)| match &slot.state {
+            SlotState::Resident(rc) | SlotState::Unloading(rc) => Some((*coord, rc)),
+            _ => None,
+        })
+    }
+
+    /// Iterate slots whose runtime eagerness is **not** Vista (Eager + Lazy). wok-physics
+    /// uses this to skip Vista chunks for collision and trigger overlap; wok-render does
+    /// not (Vista chunks render normally per the high-level design).
+    pub fn active_slots(&self) -> impl Iterator<Item = (ChunkCoord, &ResidentChunk)> {
+        self.slots()
+            .filter(|(_, rc)| !matches!(rc.runtime.eagerness, ChunkEagerness::Vista))
+    }
+
+    /// Iterate slots whose runtime eagerness is Vista. The complement of `active_slots`
+    /// inside `slots`. Renderers that want only the Vista layer can use this directly.
+    pub fn vista_slots(&self) -> impl Iterator<Item = (ChunkCoord, &ResidentChunk)> {
+        self.slots()
+            .filter(|(_, rc)| matches!(rc.runtime.eagerness, ChunkEagerness::Vista))
+    }
+
+    // ---- Authored vs runtime accessors (plan section 9.11, 9.16) ------------------------
+
+    /// Authored eagerness for a coord, read from the loaded scene's chunk metadata. Returns
+    /// `None` if the coord is not part of the loaded scene or no scene is loaded. Plan
+    /// section 9.11 distinguishes this from `rc.runtime.eagerness` (which may diverge after
+    /// a `transition_chunk` call).
+    pub fn authored_eagerness(&self, coord: ChunkCoord) -> Option<ChunkEagerness> {
+        let scene = self.scene.as_ref()?;
+        let chunk = scene.chunks_authored.get(&coord)?;
+        Some(chunk.metadata.eagerness)
+    }
+
+    /// Semantic alias of `authored_eagerness`. Plan section 9.16: the streaming algorithm
+    /// must read authored eagerness, never runtime, and naming the call site
+    /// `streaming_eagerness` makes wrong use visible at review. Returns identical values to
+    /// `authored_eagerness` on every coord.
+    pub fn streaming_eagerness(&self, coord: ChunkCoord) -> Option<ChunkEagerness> {
+        self.authored_eagerness(coord)
+    }
+
+    // ---- Storage access -----------------------------------------------------------------
+
+    /// Look up a registry-tracked mesh's GPU buffers by `MeshId`. Phase A has no
+    /// registry-tracked meshes (visible primitives are slot-owned per the step-6 deviation
+    /// and terrain is slot-owned per plan section 9.17), so this method always returns
+    /// `None`. Phase B's MeshId-keyed dedup will populate the storage and this method will
+    /// resolve real handles. The signature is stable across phases.
+    pub fn mesh(&self, _id: &MeshId) -> Option<&MeshGpu> {
+        None
+    }
+
+    /// Borrow the registry. Read-only - mutating the registry must go through the
+    /// registry's own API which routes through `mutate` and rebuilds the read view.
+    pub fn registry(&self) -> &Registry {
+        &self.registry
     }
 }
 
