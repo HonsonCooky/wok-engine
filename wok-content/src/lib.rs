@@ -11,3 +11,12 @@ pub use pantry;
 pub use wok_scene;
 
 pub mod error;
+pub mod registry;
+
+pub use error::{AssetKind, LoadError, RegistryError, SaveError, SnapshotError, TransitionError};
+pub use registry::{
+    AnimationEntry, AnimationReadEntry, AnimationSerial, AssetStatus, AudioEntry, AudioReadEntry,
+    AudioSerial, EntrySlot, KindTable, LightEntry, LightReadEntry, LightSerial, MeshEntry,
+    MeshReadEntry, MeshSerial, Registry, RegistryReadView, UsageSite, VoiceEntry, VoiceReadEntry,
+    VoiceSerial,
+};
