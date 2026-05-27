@@ -1,0 +1,20 @@
+{
+  "_format": 1,
+  "id": "interactable-box",
+  "default_state": "default",
+  "states": [
+    {
+      "name": "default",
+      "shapes": [
+        {
+          "primitive": { "kind": "cube", "half_extents": [0.5, 0.5, 0.5] },
+          "transform": { "pos": [0.0, 0.5, 0.0] },
+          "is_hitbox": true,
+          "is_visible": true,
+          "surface_tag": "wood",
+          "visual_color": [0.55, 0.4, 0.25]
+        }
+      ]
+    }
+  ]
+}
