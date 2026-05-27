@@ -14,13 +14,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pantry::wgpu;
-use wok_scene::{Chunk, ChunkCoord, Prefab, PrefabId, Scene, SceneId};
+use wok_scene::{Chunk, ChunkCoord, Prefab, PrefabId, Scene};
+
+use wok_scene::ChunkEagerness;
 
 use crate::chunk::{
     ChunkSlot, ContentEvent, LoadHandle, SlotState,
     load::{integrate_result, should_dispatch},
+    transition::apply_transition,
     unload::{apply_unload, finalize_unloads},
 };
+use crate::error::TransitionError;
 use crate::config::ContentConfig;
 use crate::error::LoadError;
 use crate::registry::Registry;
@@ -38,9 +42,10 @@ pub struct ContentSystem {
     worker: LoopbackWorker,
     scene: Option<LoadedScene>,
     tick: u64,
-    /// Queued scene-level event waiting for the next `poll()` to emit it. The plan has
-    /// `poll` as the only event channel (no return from load_scene), so we stash here.
-    pending_scene_event: Option<PendingSceneEvent>,
+    /// Queued events waiting for the next `poll()` to emit them. Plan section 3.1 has
+    /// `poll` as the only event channel, so synchronous operations (load_scene,
+    /// unload_scene, transition_chunk) stash here rather than returning events directly.
+    pending_events: Vec<ContentEvent>,
 }
 
 /// Resident scene state. Plan section 3.1. Phase A loads every chunk's authored data and
@@ -79,7 +84,7 @@ impl ContentSystem {
             worker: LoopbackWorker::new(),
             scene: None,
             tick: 0,
-            pending_scene_event: None,
+            pending_events: Vec::new(),
         })
     }
 
@@ -133,12 +138,8 @@ impl ContentSystem {
             chunks_authored,
             prefabs,
         });
-        // Pending: emit SceneLoaded after caller drains poll(). Phase A surfaces it via the
-        // event mechanism; the event is held in a per-scene-load buffer until poll() is
-        // called. We bypass the worker queue here because the event is main-thread-direct.
-        // Mechanically, store the scene id and emit on the next poll(). Phase A uses a
-        // single optional "pending scene event" slot.
-        self.pending_scene_event = Some(PendingSceneEvent::Loaded(manifest_id));
+        self.pending_events
+            .push(ContentEvent::SceneLoaded(manifest_id));
         Ok(())
     }
 
@@ -149,9 +150,25 @@ impl ContentSystem {
         // Drop every slot (cancels in-flight loads via the missing-slot path; releases GPU
         // resources for resident slots).
         self.slots.clear();
-        self.pending_scene_event = Some(PendingSceneEvent::Unloaded(scene.manifest.id));
+        self.pending_events
+            .push(ContentEvent::SceneUnloaded(scene.manifest.id));
         // The LoadedScene drops here; its Arc<Chunk> and Arc<HashMap<PrefabId, Prefab>>
         // release with it.
+    }
+
+    /// Flip a Resident slot's runtime eagerness. Plan section 3.1 + 5; mechanics in
+    /// `chunk/transition.rs`. The `ChunkTransitioned` event is queued for the next
+    /// `poll()`. Returns `TransitionError::UnknownSlot` if the coord has no slot;
+    /// `TransitionError::NotResident` if the slot is Pending / Loading / Failed.
+    pub fn transition_chunk(
+        &mut self,
+        coord: ChunkCoord,
+        new: ChunkEagerness,
+    ) -> Result<(), TransitionError> {
+        if let Some(event) = apply_transition(&mut self.slots, coord, new)? {
+            self.pending_events.push(event);
+        }
+        Ok(())
     }
 
     /// Idempotent. If the coord already has a Pending / Loading / Resident slot, returns
@@ -217,10 +234,7 @@ impl ContentSystem {
     /// inside this method.
     pub fn poll(&mut self) -> Vec<ContentEvent> {
         self.tick = self.tick.saturating_add(1);
-        let mut events: Vec<ContentEvent> = Vec::new();
-        if let Some(pending) = self.pending_scene_event.take() {
-            events.push(pending.into_event());
-        }
+        let mut events: Vec<ContentEvent> = std::mem::take(&mut self.pending_events);
         // Drain worker queue. We collect results first so the closure does not borrow self;
         // then integrate.
         let mut results = Vec::new();
@@ -246,18 +260,3 @@ impl ContentSystem {
     }
 }
 
-/// Pending scene events stashed between `load_scene` / `unload_scene` and the next `poll`.
-#[derive(Debug)]
-enum PendingSceneEvent {
-    Loaded(SceneId),
-    Unloaded(SceneId),
-}
-
-impl PendingSceneEvent {
-    fn into_event(self) -> ContentEvent {
-        match self {
-            PendingSceneEvent::Loaded(id) => ContentEvent::SceneLoaded(id),
-            PendingSceneEvent::Unloaded(id) => ContentEvent::SceneUnloaded(id),
-        }
-    }
-}
