@@ -1,0 +1,27 @@
+[package]
+name = "wok-content"
+version = "0.1.0"
+edition = "2024"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+# Style noise mirrors wok-scene's allow list; the orchestration code here surfaces a similar
+# set of pedantic complaints (casts, doc-markdown, missing-docs). Add more as they show up.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+too_many_lines = "allow"
+module_name_repetitions = "allow"
+
+[dependencies]
+pantry = { path = "../../pantry" }
+wok-scene = { path = "../wok-scene", version = "0.2" }
+
+[dev-dependencies]
+tempfile = "3"
+pollster = "0.4"
