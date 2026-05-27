@@ -153,6 +153,9 @@ pub fn slice_chunk(
         regions,
         light_state: chunk.light_state.clone(),
         surface_tag_table: surface_intern.into_vec(),
+        // v0.2.0 terrain pass lands in step 10. For now the slicer always yields None; the
+        // field exists so downstream types are stable across this and the next checkpoint.
+        terrain: None,
     })
 }
 

@@ -20,7 +20,9 @@ pub use ids::{
     Slug, TriggerId, VoiceLineId,
 };
 pub use load::{load_chunk, load_prefab, load_prefab_dir, load_scene_manifest};
-pub use runtime::{ChunkRuntime, PhysicalHitbox, RuntimeRegion, TriggerVolume, VisibleShape};
+pub use runtime::{
+    ChunkRuntime, PhysicalHitbox, RuntimeRegion, RuntimeTerrain, TriggerVolume, VisibleShape,
+};
 pub use save::{save_chunk, save_prefab, save_scene_manifest};
 pub use slice::{PrefabLookup, slice_chunk};
 pub use watcher::{FileEvent, FileWatcher};
