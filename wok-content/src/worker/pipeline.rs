@@ -22,6 +22,7 @@ use crate::chunk::VisibleMesh;
 use crate::error::{AssetKind, LoadError};
 use crate::primitives;
 use crate::storage;
+use crate::terrain;
 use crate::worker::protocol::{ChunkLoadedPayload, WorkerRequest, WorkerResult};
 
 pub fn run_load_chunk(request: WorkerRequest) -> WorkerResult {
@@ -92,8 +93,23 @@ pub fn run_load_chunk(request: WorkerRequest) -> WorkerResult {
                 });
             }
 
-            // Terrain: step 8.
-            let terrain_gpu = None;
+            // Terrain: slot-owned, generated only when the runtime carries a terrain field.
+            // Plan section 9.17 (slot ownership) and 9.18 (NW-SE triangulation locked).
+            let terrain_gpu = if runtime.terrain.is_some() {
+                let cpu = terrain::generate_mesh(&runtime, &config.terrain_palette);
+                let label = format!("chunk({},{}).terrain", coord.x, coord.z);
+                match storage::upload(&device, &queue, &cpu, &label) {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        return WorkerResult::ChunkFailed {
+                            coord,
+                            error: Arc::new(e),
+                        };
+                    }
+                }
+            } else {
+                None
+            };
 
             WorkerResult::ChunkLoaded(Box::new(ChunkLoadedPayload {
                 coord,

@@ -17,6 +17,7 @@ pub mod primitives;
 pub mod registry;
 pub mod storage;
 pub mod system;
+pub mod terrain;
 pub mod worker;
 
 pub use chunk::{
