@@ -10,12 +10,19 @@
 pub use pantry;
 pub use wok_scene;
 
+pub mod chunk;
 pub mod config;
 pub mod error;
 pub mod primitives;
 pub mod registry;
 pub mod storage;
+pub mod system;
+pub mod worker;
 
+pub use chunk::{
+    ChunkGpuHandles, ChunkSlot, ContentEvent, HotReloadKind, LoadHandle, LoadStatus, MeshGpuRef,
+    ResidentChunk, SlotState, TerrainGpu, VisibleMesh,
+};
 pub use config::{ContentConfig, SurfaceTagPalette};
 pub use error::{AssetKind, LoadError, RegistryError, SaveError, SnapshotError, TransitionError};
 pub use registry::{
@@ -25,3 +32,6 @@ pub use registry::{
     VoiceSerial,
 };
 pub use storage::{MeshCpu, MeshGpu, MeshVertex};
+pub use system::{ContentSystem, LoadedScene};
+pub use worker::{LoopbackWorker, WorkerRequest, WorkerResult};
+pub use worker::protocol::ChunkLoadedPayload;
