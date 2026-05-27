@@ -201,3 +201,41 @@ fn chunk_delete_emits_chunk_removed_with_coord() {
         "expected ChunkRemoved at (0, 0); got {events:?}"
     );
 }
+
+// ---- v0.2.0 heightmap watcher coverage (plan §7 tests 8 and 9) ----
+
+#[test]
+fn t8_heightmap_modification_emits_chunk_changed() {
+    // Plan §7 #8. Writing a heightmap binary in a scene directory emits ChunkChanged with
+    // the coord parsed from the filename. The point: heightmap touches coalesce with the
+    // chunk JSON path - no separate ChunkHeightmapChanged variant.
+    let (dir, mut watcher) = setup();
+    let path = dir.path().join("scenes/act1/3_-2.heightmap.bin");
+    // A minimal payload - the watcher does not parse the binary, it only classifies the
+    // filename.
+    std::fs::write(&path, b"WTRN\x01\x00").unwrap();
+    settle();
+    let events = watcher.poll();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            FileEvent::ChunkChanged { coord, .. } if *coord == ChunkCoord::new(3, -2)
+        )),
+        "expected ChunkChanged at (3, -2) for heightmap modification; got {events:?}"
+    );
+}
+
+#[test]
+fn t9_unparseable_heightmap_filename_emits_error() {
+    // Plan §7 #9. A heightmap filename that does not parse as `{i}_{j}.heightmap.bin`
+    // surfaces as FileEvent::Error, same posture as unparseable chunk-JSON names.
+    let (dir, mut watcher) = setup();
+    let path = dir.path().join("scenes/act1/notachunk.heightmap.bin");
+    std::fs::write(&path, b"WTRN\x01\x00").unwrap();
+    settle();
+    let events = watcher.poll();
+    assert!(
+        events.iter().any(|e| matches!(e, FileEvent::Error(_))),
+        "expected Error for unparseable heightmap filename; got {events:?}"
+    );
+}

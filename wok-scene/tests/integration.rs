@@ -12,8 +12,8 @@ use wok_scene::pantry::math::{Transform, Vec3};
 use wok_scene::{
     Chunk, ChunkCoord, ChunkEagerness, ChunkMetadata, FileEvent, FileWatcher, LightStateRef,
     MeshId, Prefab, PrefabId, PrefabPlacement, PrefabState, Scene, SceneId, Shape, ShapePrimitive,
-    Slug, TriggerId, load_chunk, load_prefab_dir, save_chunk, save_prefab, save_scene_manifest,
-    slice_chunk,
+    Slug, TerrainData, TriggerId, height_at, load_chunk, load_prefab_dir, save_chunk, save_prefab,
+    save_scene_manifest, slice_chunk, surface_at,
 };
 
 fn slug(s: &str) -> Slug {
@@ -147,6 +147,7 @@ fn full_workflow_load_and_slice() {
             },
         ],
         regions: Vec::new(),
+        terrain: None,
     };
     save_chunk(&scene_dir, &chunk).unwrap();
 
@@ -248,6 +249,7 @@ fn workflow_hot_reload() {
             instance_tag: None,
         }],
         regions: Vec::new(),
+        terrain: None,
     };
     save_chunk(&scene_dir, &chunk).unwrap();
 
@@ -318,5 +320,152 @@ fn workflow_hot_reload() {
     assert_eq!(
         new_visible.local_transform.w_axis.truncate(),
         Vec3::new(20.0, 0.0, 30.0)
+    );
+}
+
+// ---- v0.2.0 terrain integration (plan §7 v0.2.0 integration cases) ----
+
+const TERRAIN_VR: f32 = 32.0;
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn quantize_height(height_m: f32) -> u16 {
+    let t = ((height_m + TERRAIN_VR) / (2.0 * TERRAIN_VR)).clamp(0.0, 1.0);
+    (t * f32::from(u16::MAX)).round() as u16
+}
+
+/// A terrain whose cells are all at `height_m`, except for the cell at integer (5, 7) which
+/// is bumped to `bumped_height_m`. The bump gives the sampler a position to verify a known
+/// value at and lets the hot-reload test confirm that a modification flows through.
+#[allow(clippy::cast_possible_truncation)]
+fn fixture_terrain_with_bump(
+    heightmap_file: &str,
+    base_height_m: f32,
+    bumped_height_m: f32,
+) -> TerrainData {
+    let mut heights = vec![quantize_height(base_height_m); TerrainData::CELL_COUNT];
+    let w = TerrainData::CELLS_PER_AXIS as usize;
+    heights[7 * w + 5] = quantize_height(bumped_height_m);
+    TerrainData {
+        heights: heights.into_boxed_slice(),
+        surface_indices: vec![0u16; TerrainData::CELL_COUNT].into_boxed_slice(),
+        surface_tags: vec!["grass".to_string()],
+        vertical_range_meters: TERRAIN_VR,
+        heightmap_file: heightmap_file.to_string(),
+    }
+}
+
+#[test]
+fn full_workflow_load_slice_sample() {
+    // Plan §7 v0.2.0 integration: write a chunk JSON + sibling binary, call load_chunk +
+    // slice_chunk, then exercise the three samplers at known positions. End-to-end
+    // verification that authored terrain bytes flow correctly through load -> slice ->
+    // sample.
+    let tempdir = tempdir().unwrap();
+    let scene_dir = tempdir.path().join("scenes").join("terrain-scene");
+    std::fs::create_dir_all(&scene_dir).unwrap();
+
+    let coord = ChunkCoord::new(0, 0);
+    let chunk = Chunk {
+        coord,
+        metadata: ChunkMetadata {
+            eagerness: ChunkEagerness::Eager,
+            neighbors: Vec::new(),
+            interlocks: Vec::new(),
+        },
+        light_state: LightStateRef::new(slug("test-light"), 1),
+        placements: Vec::new(),
+        regions: Vec::new(),
+        terrain: Some(fixture_terrain_with_bump("0_0.heightmap.bin", 0.0, 5.0)),
+    };
+    save_chunk(&scene_dir, &chunk).unwrap();
+    assert!(scene_dir.join("0_0.json").exists());
+    assert!(scene_dir.join("0_0.heightmap.bin").exists());
+
+    let loaded = load_chunk(&scene_dir, coord).unwrap();
+    let prefabs: std::collections::HashMap<PrefabId, Prefab> = std::collections::HashMap::new();
+    let rt = slice_chunk(&loaded, &prefabs).unwrap();
+
+    let terrain = rt.terrain.as_ref().expect("terrain present after slice");
+    assert_eq!(terrain.width, TerrainData::CELLS_PER_AXIS);
+    assert_eq!(rt.surface_tag_table, vec!["grass".to_string()]);
+
+    // height_at(5, 7) should match the bumped height. Tolerance covers the u16 quantum.
+    let h = height_at(&rt, 5.0, 7.0).expect("in-domain sample");
+    let quantum_m = 2.0 * TERRAIN_VR / f32::from(u16::MAX);
+    assert!(
+        (h - 5.0).abs() <= 2.0 * quantum_m,
+        "expected ~5.0 at the bumped cell, got {h}"
+    );
+
+    // height_at at a flat cell should be ~0.0.
+    let h_flat = height_at(&rt, 0.0, 0.0).expect("in-domain sample");
+    assert!(
+        h_flat.abs() <= quantum_m,
+        "expected ~0.0 at a flat cell, got {h_flat}"
+    );
+
+    // surface_at returns the only authored tag at every in-domain cell.
+    assert_eq!(surface_at(&rt, 5.0, 7.0), Some("grass"));
+    assert_eq!(surface_at(&rt, 64.0, 64.0), Some("grass"));
+}
+
+#[test]
+fn hot_reload_terrain_modification() {
+    // Plan §7 v0.2.0 integration: install the watcher, write the initial terrain, modify the
+    // heightmap binary, poll the watcher for ChunkChanged, re-load + re-slice, and verify
+    // the sampled value reflects the modification.
+    let tempdir = tempdir().unwrap();
+    let content_root = tempdir.path();
+    let scene_dir = content_root.join("scenes").join("terrain-scene");
+    std::fs::create_dir_all(&scene_dir).unwrap();
+    std::fs::create_dir_all(content_root.join("prefabs")).unwrap();
+    std::fs::create_dir_all(content_root.join("lights")).unwrap();
+
+    let coord = ChunkCoord::new(0, 0);
+    let mut chunk = Chunk {
+        coord,
+        metadata: ChunkMetadata {
+            eagerness: ChunkEagerness::Eager,
+            neighbors: Vec::new(),
+            interlocks: Vec::new(),
+        },
+        light_state: LightStateRef::new(slug("test-light"), 1),
+        placements: Vec::new(),
+        regions: Vec::new(),
+        terrain: Some(fixture_terrain_with_bump("0_0.heightmap.bin", 0.0, 5.0)),
+    };
+    save_chunk(&scene_dir, &chunk).unwrap();
+
+    // Settle, install watcher, settle, drain startup ghosts. Same shape as the v0.1.0
+    // hot-reload test.
+    std::thread::sleep(Duration::from_millis(50));
+    let mut watcher = FileWatcher::new(content_root).unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    let _ = watcher.poll();
+
+    // Modify the terrain in memory and re-save (which rewrites both the JSON and the
+    // sibling binary).
+    chunk.terrain = Some(fixture_terrain_with_bump("0_0.heightmap.bin", 0.0, 12.0));
+    save_chunk(&scene_dir, &chunk).unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+
+    let events = watcher.poll();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            FileEvent::ChunkChanged { coord: c, .. } if *c == coord
+        )),
+        "expected ChunkChanged after terrain modification; got {events:?}"
+    );
+
+    // Re-load + re-slice + sample: the bumped height now reflects the modification.
+    let prefabs: std::collections::HashMap<PrefabId, Prefab> = std::collections::HashMap::new();
+    let reloaded = load_chunk(&scene_dir, coord).unwrap();
+    let rt = slice_chunk(&reloaded, &prefabs).unwrap();
+    let h = height_at(&rt, 5.0, 7.0).expect("in-domain sample");
+    let quantum_m = 2.0 * TERRAIN_VR / f32::from(u16::MAX);
+    assert!(
+        (h - 12.0).abs() <= 2.0 * quantum_m,
+        "expected ~12.0 after hot-reload, got {h}"
     );
 }

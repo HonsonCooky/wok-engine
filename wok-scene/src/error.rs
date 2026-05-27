@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use pantry::serde_json;
 
-use crate::ids::PrefabId;
+use crate::ids::{ChunkCoord, PrefabId};
 
 /// Errors produced by `slice_chunk`. Slicing is fail-fast: one error aborts the whole chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +16,14 @@ pub enum SliceError {
         placement_index: usize,
         shape_index: usize,
         reason: String,
+    },
+    /// Merging a chunk's authored terrain surface tags with its prefab surface tags would
+    /// produce a `surface_tag_table` larger than `u16::MAX` entries. Unreachable for any
+    /// realistic chunk; surfaced rather than panicked so authoring tools can report it.
+    TerrainSurfaceTableOverflow {
+        coord: ChunkCoord,
+        prefab_tag_count: usize,
+        terrain_tag_count: usize,
     },
 }
 
@@ -33,6 +41,16 @@ impl std::fmt::Display for SliceError {
             } => write!(
                 f,
                 "invalid shape at placement {placement_index} shape {shape_index}: {reason}"
+            ),
+            SliceError::TerrainSurfaceTableOverflow {
+                coord,
+                prefab_tag_count,
+                terrain_tag_count,
+            } => write!(
+                f,
+                "chunk ({}, {}) merged surface tag table would exceed u16::MAX entries: \
+                 {prefab_tag_count} from prefabs + {terrain_tag_count} from terrain",
+                coord.x, coord.z
             ),
         }
     }
@@ -63,6 +81,19 @@ pub enum LoadError {
         path: PathBuf,
         found: u32,
     },
+    /// The chunk JSON's `terrain.heightmap_file` points at a sibling binary that does not
+    /// exist on disk. Recovery is the editor's job: re-author or strip the dangling reference.
+    TerrainSiblingMissing {
+        chunk_path: PathBuf,
+        terrain_path: PathBuf,
+    },
+    /// The sibling heightmap binary is structurally invalid: wrong magic, unsupported version,
+    /// length mismatch with the declared resolution, surface index out of range, non-UTF-8
+    /// surface tag, or trailing bytes after the expected end.
+    TerrainMalformed {
+        terrain_path: PathBuf,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for LoadError {
@@ -84,6 +115,23 @@ impl std::fmt::Display for LoadError {
                 "unsupported _format {found} in {} (expected 1)",
                 path.display()
             ),
+            LoadError::TerrainSiblingMissing {
+                chunk_path,
+                terrain_path,
+            } => write!(
+                f,
+                "chunk {} references missing terrain sibling {}",
+                chunk_path.display(),
+                terrain_path.display()
+            ),
+            LoadError::TerrainMalformed {
+                terrain_path,
+                reason,
+            } => write!(
+                f,
+                "malformed terrain binary {}: {reason}",
+                terrain_path.display()
+            ),
         }
     }
 }
@@ -93,7 +141,10 @@ impl std::error::Error for LoadError {
         match self {
             LoadError::Io { source, .. } => Some(source),
             LoadError::Parse { source, .. } => Some(source),
-            LoadError::MissingFormat { .. } | LoadError::UnsupportedVersion { .. } => None,
+            LoadError::MissingFormat { .. }
+            | LoadError::UnsupportedVersion { .. }
+            | LoadError::TerrainSiblingMissing { .. }
+            | LoadError::TerrainMalformed { .. } => None,
         }
     }
 }

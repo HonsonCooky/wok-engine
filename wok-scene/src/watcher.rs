@@ -129,8 +129,22 @@ fn classify(content_root: &Path, path: &Path, removed: bool) -> Option<FileEvent
             Some(FileEvent::LightStateChanged(path.to_owned()))
         }
         ["scenes", scene_name, filename] => {
-            let stem = json_stem(filename)?;
             let scene_dir = content_root.join("scenes").join(scene_name);
+            // v0.2.0: heightmap sibling binaries coalesce into ChunkChanged with the parsed
+            // coord. No separate variant - the consumer treats a heightmap touch the same
+            // way it treats a chunk JSON touch (re-load, re-slice). A removed binary still
+            // emits ChunkChanged (the JSON may have been updated to drop the reference and
+            // the consumer's re-load is what reconciles).
+            if let Some(stem) = heightmap_stem(filename) {
+                return Some(match parse_chunk_stem(stem) {
+                    Some(coord) => FileEvent::ChunkChanged { scene_dir, coord },
+                    None => FileEvent::Error(format!(
+                        "heightmap file {} has unparseable name (expected `{{i}}_{{j}}.heightmap.bin`)",
+                        path.display()
+                    )),
+                });
+            }
+            let stem = json_stem(filename)?;
             if filename.eq_ignore_ascii_case("scene.json") {
                 Some(FileEvent::SceneManifestChanged(path.to_owned()))
             } else {
@@ -148,6 +162,24 @@ fn classify(content_root: &Path, path: &Path, removed: bool) -> Option<FileEvent
             }
         }
         _ => None,
+    }
+}
+
+/// Return the chunk-stem (filename minus the `.heightmap.bin` suffix) if the file matches
+/// the heightmap pattern under ASCII case-insensitive matching, otherwise `None`. Filenames
+/// like `foo.HEIGHTMAP.BIN` are recognized identically to `foo.heightmap.bin` so the watcher
+/// behaves consistently on case-insensitive filesystems.
+fn heightmap_stem(filename: &str) -> Option<&str> {
+    const SUFFIX_LEN: usize = ".heightmap.bin".len();
+    if filename.len() <= SUFFIX_LEN {
+        return None;
+    }
+    let split_at = filename.len() - SUFFIX_LEN;
+    let (stem, ext) = filename.split_at(split_at);
+    if ext.eq_ignore_ascii_case(".heightmap.bin") {
+        Some(stem)
+    } else {
+        None
     }
 }
 

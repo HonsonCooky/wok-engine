@@ -17,8 +17,17 @@ pub fn save_scene_manifest(scene: &Scene, scene_dir: &Path) -> Result<(), SaveEr
     save_versioned(scene, &scene_dir.join("scene.json"))
 }
 
-/// Save a chunk as `scene_dir/{chunk.coord.x}_{chunk.coord.z}.json`.
+/// Save a chunk as `scene_dir/{chunk.coord.x}_{chunk.coord.z}.json`. If `chunk.terrain` is
+/// `Some`, the sibling binary is written FIRST at `scene_dir/{terrain.heightmap_file}` and
+/// then the JSON; the ordering ensures a successful JSON write always references a binary
+/// that exists on disk. A crash between the two leaves an updated binary referenced by an
+/// old or absent JSON, which the next save overwrites cleanly (plan section 9, "Atomic save
+/// crash recovery").
 pub fn save_chunk(scene_dir: &Path, chunk: &Chunk) -> Result<(), SaveError> {
+    if let Some(terrain) = chunk.terrain.as_ref() {
+        let sibling_path = scene_dir.join(&terrain.heightmap_file);
+        crate::authored::terrain::write_sibling(terrain, &sibling_path)?;
+    }
     save_versioned(
         chunk,
         &scene_dir.join(format!("{}_{}.json", chunk.coord.x, chunk.coord.z)),
