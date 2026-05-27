@@ -10,9 +10,13 @@
 pub use pantry;
 pub use wok_scene;
 
+pub mod config;
 pub mod error;
+pub mod primitives;
 pub mod registry;
+pub mod storage;
 
+pub use config::{ContentConfig, SurfaceTagPalette};
 pub use error::{AssetKind, LoadError, RegistryError, SaveError, SnapshotError, TransitionError};
 pub use registry::{
     AnimationEntry, AnimationReadEntry, AnimationSerial, AssetStatus, AudioEntry, AudioReadEntry,
@@ -20,3 +24,4 @@ pub use registry::{
     MeshReadEntry, MeshSerial, Registry, RegistryReadView, UsageSite, VoiceEntry, VoiceReadEntry,
     VoiceSerial,
 };
+pub use storage::{MeshCpu, MeshVertex};
