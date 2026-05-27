@@ -24,4 +24,4 @@ pub use registry::{
     MeshReadEntry, MeshSerial, Registry, RegistryReadView, UsageSite, VoiceEntry, VoiceReadEntry,
     VoiceSerial,
 };
-pub use storage::{MeshCpu, MeshVertex};
+pub use storage::{MeshCpu, MeshGpu, MeshVertex};

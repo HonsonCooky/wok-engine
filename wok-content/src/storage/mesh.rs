@@ -8,8 +8,13 @@
 //! Phase A step 3 introduces `MeshCpu` and `MeshVertex` so primitives can produce them.
 //! Step 4 adds `MeshGpu` and the upload helpers.
 
+use std::sync::Arc;
+
 use pantry::bytemuck;
 use pantry::math::Aabb;
+use pantry::wgpu;
+
+use crate::error::LoadError;
 
 /// One vertex of a CPU mesh. `repr(C)` + bytemuck `Pod`/`Zeroable` lets the slice be reused
 /// as a wgpu buffer payload without re-packing.
@@ -70,6 +75,62 @@ impl MeshCpu {
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
     }
+}
+
+/// GPU-uploaded mesh. `vertex_buffer` and `index_buffer` are owned by this struct; when the
+/// struct drops, the buffers drop. Plan section 1.5 keeps buffer ownership in wok-content
+/// (wok-render holds pipelines and bind groups, never buffers).
+///
+/// Phase 4 registry meshes are immortal (plan section 9.4) - one `MeshGpu` per primitive
+/// kind times tessellation, never released; terrain meshes are slot-owned and follow Drop
+/// semantics (plan section 9.17). Both lifetimes are encoded in where the `MeshGpu` lives,
+/// not in the type itself - the type is just "owned GPU buffers."
+#[derive(Debug)]
+pub struct MeshGpu {
+    pub vertex_buffer: wgpu::Buffer,
+    pub index_buffer: wgpu::Buffer,
+    pub index_count: u32,
+    pub bounding_aabb: Aabb,
+}
+
+/// Upload a `MeshCpu` to the GPU. Phase A creates the vertex and index buffers with
+/// `BufferUsages::VERTEX | INDEX` (plus `COPY_DST` reserved for future streaming uploads).
+/// Failure returns `LoadError::Gpu` with the wgpu error message; wgpu buffer creation can
+/// in principle fail (device lost, OOM), so the surface is fallible even for tiny meshes.
+pub fn upload(
+    device: &Arc<wgpu::Device>,
+    _queue: &Arc<wgpu::Queue>,
+    cpu: &MeshCpu,
+    label: &str,
+) -> Result<MeshGpu, LoadError> {
+    // wgpu::Device::create_buffer expects a descriptor + later `write_buffer`. We use the
+    // wgpu::util::DeviceExt::create_buffer_init helper to fold the init-with-data path into
+    // one call. That helper lives in `wgpu::util`, which pantry re-exports through `wgpu`.
+    use wgpu::util::DeviceExt;
+
+    let vertex_label = format!("{label}.vertex");
+    let index_label = format!("{label}.index");
+
+    let vertex_bytes: &[u8] = bytemuck::cast_slice(&cpu.vertices);
+    let index_bytes: &[u8] = bytemuck::cast_slice(&cpu.indices);
+
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&vertex_label),
+        contents: vertex_bytes,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&index_label),
+        contents: index_bytes,
+        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+    });
+
+    Ok(MeshGpu {
+        vertex_buffer,
+        index_buffer,
+        index_count: cpu.indices.len() as u32,
+        bounding_aabb: cpu.bounding_aabb,
+    })
 }
 
 fn compute_aabb(vertices: &[MeshVertex]) -> Aabb {
