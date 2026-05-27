@@ -1,0 +1,44 @@
+{
+  "_format": 1,
+  "id": "room-walls",
+  "default_state": "default",
+  "states": [
+    {
+      "name": "default",
+      "shapes": [
+        {
+          "primitive": { "kind": "cube", "half_extents": [8.0, 2.0, 0.25] },
+          "transform": { "pos": [0.0, 2.0, -8.0] },
+          "is_hitbox": true,
+          "is_visible": true,
+          "surface_tag": "stone",
+          "visual_color": [0.6, 0.6, 0.62]
+        },
+        {
+          "primitive": { "kind": "cube", "half_extents": [8.0, 2.0, 0.25] },
+          "transform": { "pos": [0.0, 2.0, 8.0] },
+          "is_hitbox": true,
+          "is_visible": true,
+          "surface_tag": "stone",
+          "visual_color": [0.6, 0.6, 0.62]
+        },
+        {
+          "primitive": { "kind": "cube", "half_extents": [0.25, 2.0, 8.0] },
+          "transform": { "pos": [-8.0, 2.0, 0.0] },
+          "is_hitbox": true,
+          "is_visible": true,
+          "surface_tag": "stone",
+          "visual_color": [0.6, 0.6, 0.62]
+        },
+        {
+          "primitive": { "kind": "cube", "half_extents": [0.25, 2.0, 8.0] },
+          "transform": { "pos": [8.0, 2.0, 0.0] },
+          "is_hitbox": true,
+          "is_visible": true,
+          "surface_tag": "stone",
+          "visual_color": [0.6, 0.6, 0.62]
+        }
+      ]
+    }
+  ]
+}

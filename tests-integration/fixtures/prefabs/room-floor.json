@@ -1,0 +1,20 @@
+{
+  "_format": 1,
+  "id": "room-floor",
+  "default_state": "default",
+  "states": [
+    {
+      "name": "default",
+      "shapes": [
+        {
+          "primitive": { "kind": "plane", "half_extents": [8.0, 8.0] },
+          "transform": { "pos": [0.0, 0.0, 0.0] },
+          "is_hitbox": true,
+          "is_visible": true,
+          "surface_tag": "stone",
+          "visual_color": [0.55, 0.55, 0.55]
+        }
+      ]
+    }
+  ]
+}

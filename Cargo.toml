@@ -2,4 +2,5 @@
 resolver = "3"
 members = [
     "wok-scene",
+    "wok-content",
 ]
