@@ -312,6 +312,7 @@ fn chunk_round_trips() {
                 state: LightStateRef::new(slug("warehouse-office"), 7),
             },
         }],
+        terrain: None,
     };
     round_trip(&c);
 }
@@ -333,6 +334,7 @@ fn chunk_with_all_eagerness_values_round_trips() {
             light_state: LightStateRef::new(slug("warehouse-day"), 3),
             placements: Vec::new(),
             regions: Vec::new(),
+            terrain: None,
         };
         round_trip(&c);
     }

@@ -12,7 +12,7 @@ pub mod watcher;
 
 pub use authored::{
     Chunk, ChunkEagerness, ChunkMetadata, Prefab, PrefabPlacement, PrefabState, RegionMarker,
-    RegionPurpose, Scene, Shape, ShapePrimitive,
+    RegionPurpose, Scene, Shape, ShapePrimitive, TerrainData,
 };
 pub use error::{LoadError, SaveError, SliceError};
 pub use ids::{

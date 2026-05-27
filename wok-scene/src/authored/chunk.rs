@@ -4,6 +4,7 @@ use pantry::serde::{Deserialize, Serialize};
 use crate::ids::{ChunkCoord, LightStateRef, PrefabId};
 
 use super::streaming::ChunkMetadata;
+use super::terrain::TerrainData;
 
 /// One placed prefab instance inside a chunk. Transform is chunk-local; world coordinates
 /// are obtained by composing with `chunk.coord.to_world_offset()` at consumer sites.
@@ -53,6 +54,12 @@ pub struct RegionMarker {
 
 /// One authored chunk. The on-disk `_format` integer is a file-level concern handled by
 /// `load`/`save`; the struct does not carry it.
+///
+/// `terrain` is the v0.2.0 heightmap addition. The JSON only ever carries the
+/// `heightmap_file` reference (see `authored::terrain::TerrainData` for the split between JSON
+/// and the sibling binary). Chunks authored before v0.2.0 omit the field entirely; loading
+/// them produces `terrain: None`, and re-saving produces JSON byte-identical to the v0.1.0
+/// shape (the `skip_serializing_if` honors the absence).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(crate = "pantry::serde", deny_unknown_fields)]
 pub struct Chunk {
@@ -61,4 +68,6 @@ pub struct Chunk {
     pub light_state: LightStateRef,
     pub placements: Vec<PrefabPlacement>,
     pub regions: Vec<RegionMarker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terrain: Option<TerrainData>,
 }

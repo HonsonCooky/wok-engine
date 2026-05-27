@@ -63,6 +63,19 @@ pub enum LoadError {
         path: PathBuf,
         found: u32,
     },
+    /// The chunk JSON's `terrain.heightmap_file` points at a sibling binary that does not
+    /// exist on disk. Recovery is the editor's job: re-author or strip the dangling reference.
+    TerrainSiblingMissing {
+        chunk_path: PathBuf,
+        terrain_path: PathBuf,
+    },
+    /// The sibling heightmap binary is structurally invalid: wrong magic, unsupported version,
+    /// length mismatch with the declared resolution, surface index out of range, non-UTF-8
+    /// surface tag, or trailing bytes after the expected end.
+    TerrainMalformed {
+        terrain_path: PathBuf,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for LoadError {
@@ -84,6 +97,23 @@ impl std::fmt::Display for LoadError {
                 "unsupported _format {found} in {} (expected 1)",
                 path.display()
             ),
+            LoadError::TerrainSiblingMissing {
+                chunk_path,
+                terrain_path,
+            } => write!(
+                f,
+                "chunk {} references missing terrain sibling {}",
+                chunk_path.display(),
+                terrain_path.display()
+            ),
+            LoadError::TerrainMalformed {
+                terrain_path,
+                reason,
+            } => write!(
+                f,
+                "malformed terrain binary {}: {reason}",
+                terrain_path.display()
+            ),
         }
     }
 }
@@ -93,7 +123,10 @@ impl std::error::Error for LoadError {
         match self {
             LoadError::Io { source, .. } => Some(source),
             LoadError::Parse { source, .. } => Some(source),
-            LoadError::MissingFormat { .. } | LoadError::UnsupportedVersion { .. } => None,
+            LoadError::MissingFormat { .. }
+            | LoadError::UnsupportedVersion { .. }
+            | LoadError::TerrainSiblingMissing { .. }
+            | LoadError::TerrainMalformed { .. } => None,
         }
     }
 }

@@ -49,9 +49,19 @@ pub fn load_scene_manifest(scene_dir: &Path) -> Result<Scene, LoadError> {
     load_versioned::<Scene>(&scene_dir.join("scene.json"))
 }
 
-/// Load the chunk file at `scene_dir/{coord.x}_{coord.z}.json`.
+/// Load the chunk file at `scene_dir/{coord.x}_{coord.z}.json`. If the chunk references a
+/// sibling terrain heightmap, read it from `scene_dir/{chunk.terrain.heightmap_file}` and
+/// populate the in-memory `TerrainData` fields. A missing sibling is reported as
+/// `LoadError::TerrainSiblingMissing`; a malformed sibling is reported as
+/// `LoadError::TerrainMalformed`.
 pub fn load_chunk(scene_dir: &Path, coord: ChunkCoord) -> Result<Chunk, LoadError> {
-    load_versioned::<Chunk>(&scene_dir.join(format!("{}_{}.json", coord.x, coord.z)))
+    let chunk_path = scene_dir.join(format!("{}_{}.json", coord.x, coord.z));
+    let mut chunk: Chunk = load_versioned(&chunk_path)?;
+    if let Some(terrain) = chunk.terrain.as_mut() {
+        let sibling_path = scene_dir.join(&terrain.heightmap_file);
+        crate::authored::terrain::read_sibling_into(terrain, &chunk_path, &sibling_path)?;
+    }
+    Ok(chunk)
 }
 
 /// Read a file, validate its `_format`, strip the field, and deserialize the remainder as

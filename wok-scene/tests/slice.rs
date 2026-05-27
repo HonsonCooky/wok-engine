@@ -124,6 +124,7 @@ fn fixture_chunk(coord: ChunkCoord, eagerness: ChunkEagerness) -> Chunk {
             },
         ],
         regions: Vec::new(),
+        terrain: None,
     }
 }
 
@@ -173,6 +174,7 @@ fn make_chunk_with_one_placement() -> Chunk {
             instance_tag: None,
         }],
         regions: Vec::new(),
+        terrain: None,
     }
 }
 
@@ -220,6 +222,7 @@ fn t02_placement_transform_stays_chunk_local() {
             instance_tag: None,
         }],
         regions: Vec::new(),
+        terrain: None,
     };
     let rt = slice_chunk(&chunk, &prefabs).unwrap();
     let translation = rt.visible[0].local_transform.w_axis.truncate();
@@ -281,6 +284,7 @@ fn t03_composition_is_placement_times_shape() {
             instance_tag: None,
         }],
         regions: Vec::new(),
+        terrain: None,
     };
     let rt = slice_chunk(&chunk, &prefabs).unwrap();
     let p = rt.visible[0].local_transform.transform_point3(Vec3::ZERO);
@@ -495,6 +499,7 @@ fn t11_surface_tag_interning_is_fifo_with_reuse() {
             instance_tag: None,
         }],
         regions: Vec::new(),
+        terrain: None,
     };
     let rt = slice_chunk(&chunk, &prefabs).unwrap();
     assert_eq!(rt.surface_tag_table, vec!["wood", "metal"]);
@@ -556,6 +561,7 @@ fn t12_region_purposes_round_trip_into_runtime_regions() {
                 },
             },
         ],
+        terrain: None,
     };
     let rt = slice_chunk(&chunk, &prefabs).unwrap();
     assert_eq!(rt.regions.len(), 3);

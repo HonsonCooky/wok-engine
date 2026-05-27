@@ -147,6 +147,7 @@ fn full_workflow_load_and_slice() {
             },
         ],
         regions: Vec::new(),
+        terrain: None,
     };
     save_chunk(&scene_dir, &chunk).unwrap();
 
@@ -248,6 +249,7 @@ fn workflow_hot_reload() {
             instance_tag: None,
         }],
         regions: Vec::new(),
+        terrain: None,
     };
     save_chunk(&scene_dir, &chunk).unwrap();
 
