@@ -1,184 +1,172 @@
 # Project Canon
 
-Project-level decisions that don't fit naturally into per-crate plans
-or the high-level design. Two kinds of content live here: workflow
-and orchestration rules, and cross-crate decisions or compass framings
-without a more natural home.
-
-If a decision belongs in a single crate's plan, it goes there. If it
-adds or changes an engine principle, update the high-level design.
-This doc is for the residue — decisions that span the project but
-aren't naturally homed elsewhere.
+Workflow rules, working principles, and cross-crate decisions that
+don't fit in the HLD or multiplayer model.
 
 ## Roles
 
-**Orchestrators** — Harrison plus the design-lead AI conversation.
-Cross-crate decisions, handoff briefs, plan reviews, final
-validation. Maintain canonical documents.
+**Orchestrator/designer** — Harrison plus a design-lead AI
+conversation (typically Claude). Source of truth for the engine's
+design. Owns the canonical documents (HLD, multiplayer model, this
+canon). Drafts implementation handoff briefs directly.
 
-**Per-crate planners** — separate AI conversations, one per crate.
-Own only their crate's detailed plan. Receive a handoff brief from
-orchestrators; deliver v1; iterate with orchestrators; final plan
-hands to implementation. They trust the orchestrators on cross-crate
-constraints; they do not re-litigate them.
+**Implementer (Claude Code)** — separate sessions. Takes a brief
+from the orchestrator and produces working code in checkpoint
+cadence. Defers back when problems exceed the brief or when an
+issue is cross-cutting.
 
-**Implementers (Claude Code)** — separate sessions. Take a finalized
-per-crate plan and produce working code in checkpoint cadence. Defer
-back to a planner conversation when problems exceed the plan's
-coverage. Defer to orchestrators when an issue is cross-cutting.
+There is no per-crate planner role. Orchestrator drafts briefs for
+CC directly, scoped tightly enough that a single CC session can
+absorb and execute them.
 
 ## Artifacts
 
-- `high-level-design.md` — engine philosophy, dependency graph,
-  principles.
-- `multiplayer-model.md` — the parallel-paths approach. Game-design
-  doc, not engine architecture.
-- Per-crate plans (`wok-<crate>-plan.md`) — detailed plan for each
-  `wok-*` crate.
-- Handoff briefs — orchestrator's prompt to a per-crate planner.
-  The contract for what to take as given vs what to figure out.
-- Plan-vs-reality memos — at each phase boundary in implementation,
-  a memo comparing shipped code to the plan. Backwards-looking ones
-  may be added retroactively where useful.
-- This document.
+- `high-level-design.md` — engine philosophy, principles, crates,
+  dependency graph, data flow, validation.
+- `multiplayer-model.md` — parallel-paths approach for games that
+  opt into multiplayer. Game-design doc.
+- This document — workflow, working principles, cross-crate
+  decisions.
 
-## Cross-conversation protocol
+Handoff briefs and plan-vs-reality reflections live in the
+conversation that produced them; not canonical.
 
-Conversations identify with tags: `wok-content-planner`,
-`wok-physics-planner`, `claude-code`, and so on. New tags are coined
-as new conversations begin.
+## Handoff briefs
 
-Prompts from one conversation to another are copy-pasteable code
-blocks containing a routing header (`[PASTE INTO: <tag>]`) and a
-reply instruction (`[from: <tag>]` at the top of the response, on
-its own line). Harrison is the human relay; the headers let the
-orchestrator conversation identify replies without Harrison labeling
-them each time.
+Orchestrator → CC handoffs are scoped task assignments sized for
+one CC session. A brief contains:
+
+- **Scope** — the specific chunk of work; bounded for absorption
+  without external context.
+- **References** — pointers to canonical documents the brief draws
+  from (typically HLD + this canon).
+- **Outcome criteria** — what "done" looks like: tests passing,
+  public API implemented, file structure created, expected behavior
+  demonstrated.
+- **Out-of-scope notes** — explicit boundaries on what NOT to
+  build. CC interprets silence as license; explicit non-scope
+  prevents this.
+
+Harrison relays: orchestrator drafts here → Harrison copies to CC
+session → CC executes and reports → Harrison relays results back.
 
 ## Decision discipline
 
-If a decision is load-bearing for downstream work and doesn't already
-live in a canonical document, write it into one. Conversational
-consensus is fragile — a fresh AI session restarted from canon will
-not remember anything agreed verbally. The "if it's load-bearing, it
-gets written" rule protects against drift.
+Load-bearing decisions go into canonical documents. Conversational
+consensus is fragile; a fresh AI session will not remember anything
+agreed verbally.
 
-Be intentional. Not every decision needs explicit mention. The test
-is "would a fresh orchestrator session need this to do its job
-correctly, AND is it not already in another canonical doc?" If yes
-to both, it lands somewhere.
+Test: would a fresh orchestrator session need this to do its job
+correctly, AND is it not already in another canonical doc? If yes
+to both, write it down.
+
+## Working method
+
+Design happens crate by crate; the HLD is a living anchor. HLD
+updates only when *earned by discovery* (a forbidden edge was
+missed; a primitive needs a type a crate doesn't expose), not by
+preference. Preference-driven changes are churn.
+
+For each design area, two lists: **locked decisions** and
+**explicitly left-to-game**. Scheduling deferrals (e.g., wok-anim
+deferred until placeholder animation needs more than transform
+tweens) are locked decisions about scope. Revisit criteria attach
+to locked decisions, not a third category.
 
 ## Compass
 
-The engine exists so that Claude Code and Harrison can build games
-together. The mental model: **engine creates content; game connects
-content.** The engine handles content creation infrastructure —
-primitives, asset pipelines, scene and terrain authoring,
-deterministic simulation, cel rendering — and inherits a small set of
-opinionated "only one implementation" features that emerge from its
-constraints (cel shading is the visual style, 32-chunk cap, single
-shadow map). Games compose that content into specific gameplay,
-business logic, and story; they don't redo what the engine does.
+Mental model: **engine creates content; game connects content.** The
+engine handles content creation infrastructure (primitives, asset
+pipelines, scene and terrain authoring, deterministic math, cel
+rendering) and inherits a small set of opinionated "only one
+implementation" features (cel shading, 32-chunk cap, single shadow
+map). Games compose content into specific gameplay, business logic,
+story; they own entity state and simulation loops.
 
-This sharpens "primitives, not features" (high-level design): when a
-design trade-off exists, choose the option that lets a future game's
-session spend less context on engine concerns. Game-specific systems
-being rebuilt per-game is acceptable.
+Sharpens HLD principle #5: when a design trade-off exists, choose
+the option that lets a future game's session spend less context on
+engine concerns. Game-specific systems being rebuilt per-game is
+acceptable.
 
-**Scope:** the engine targets discrete-level AND open-world games, all
-built from deterministic content. Procedural world generation is out
-of scope — that's a different engine. Development setup: a single
-laptop (initially a Dell XPS 14 9440) and a two-person team with AI
-collaboration.
+**Scope:** discrete-level AND open-world games, all from
+deterministic content. Procedural world generation is out of scope.
+Development: single laptop (initially a Dell XPS 14 9440),
+two-person team with AI collaboration.
 
 ## Error handling
 
 Crate-boundary error types use `thiserror`. Errors propagate through
 `Result<T, E>` and `?`. Library crates do not use `anyhow`; the game
-application may use `anyhow` internally if it wants.
+application may use `anyhow` internally.
 
-Each crate defines its own error enum exposing only the failure modes
-external consumers need to distinguish. Internal errors are wrapped
-or converted at the boundary so external consumers see a stable
-surface even when internal implementation changes.
+Each crate defines its own error enum exposing only the failure
+modes external consumers need to distinguish. Internal errors are
+wrapped at the boundary so external consumers see a stable surface.
 
-Pattern: one `Error` enum per crate (e.g., `wok_scene::LoadError`,
-`wok_content::RegistryError`), each variant carrying the context the
-caller needs to handle or report the failure. Multiple narrow error
-types in a single crate are fine when they're genuinely independent
-(e.g., `LoadError` vs `SliceError` in wok-scene); avoid one God-enum
-that mixes unrelated failure domains.
+One `Error` enum per crate by default (e.g., `wok_scene::LoadError`,
+`wok_registry::RegistryError`). Multiple narrow types in a single
+crate are fine when genuinely independent (e.g., `LoadError` vs
+`SliceError`); avoid one God-enum mixing unrelated failure domains.
 
 ## Logging
 
-Logging uses the `tracing` crate, structured with spans. Levels
-follow tracing's conventions:
+Logging uses `tracing`, structured with spans. Levels:
 
-- `trace` — high-frequency or low-value detail (per-tick state,
+- `trace` — high-frequency / low-value detail (per-tick state,
   per-frame timing).
-- `debug` — development-time visibility (chunk lifecycle events,
-  asset uploads, registry mutations).
-- `info` — noteworthy state changes (scene loaded, snapshot
-  captured, hot reload applied).
+- `debug` — development-time visibility (chunk lifecycle, asset
+  uploads, registry mutations).
+- `info` — noteworthy state changes (scene loaded, chunk
+  transitioned to loaded, hot reload applied).
 
 Warnings and errors do NOT use logging. They surface through
-`Result<T, E>` and propagate to the caller. If a library crate finds
-itself reaching for `tracing::warn!` or `tracing::error!`, that's a
-signal the failure mode should be in the error enum instead.
+`Result<T, E>`. If a library crate reaches for `tracing::warn!` or
+`tracing::error!`, the failure mode should be in the error enum
+instead.
 
-The game application configures the tracing subscriber and decides
-what to do with events (write to file, print to console, ship to
-telemetry). Libraries just emit events; they don't configure
-subscribers themselves.
+The game application configures the tracing subscriber. Libraries
+just emit events.
 
 ## Determinism contract
 
-The Level 2 deterministic replay harness (HLD §4) requires every
-engine crate to honor a determinism contract. Centralized here so
-future sessions have one reference rather than reconstructing it from
-scattered notes across crate plans.
+Required for HLD §4 Level 2 deterministic replay.
 
-**Required of every engine crate:**
+**Every engine crate:**
 
-- Simulation must not read wall-clock time. Time is passed as
-  `dt: f32` (or similar) parameters.
-- Randomness must use seeded RNG. Seeds are inputs, never implicit.
+- No wall-clock reads. Time passed as `dt: f32` (or similar)
+  parameters.
+- Seeded RNG only. Seeds are inputs, never implicit.
 - Asset loading does not affect simulation timing. Chunk
-  transformations produce identical arrays from identical inputs,
-  regardless of when or where they load.
-- HashMap-based serialization sorts before write. HashMap iteration
-  order is nondeterministic; any output destined for disk or
-  cross-client comparison must impose a stable order.
+  transformations produce identical arrays from identical inputs.
+- HashMap-based serialization sorts before write.
 
-**Required of wok-physics specifically:**
+**wok-physics specifically:**
 
-- Fixed-timestep integration. Integration step parameterized by `dt`;
-  never reads wall-clock.
-- No parallel reductions in inner loops (collision narrow-phase,
-  integration). Order of accumulation affects floating-point results.
-- Position-independence holds: same actor inputs + same chunk data
-  produce the same trajectory regardless of the chunk's world
-  position.
+- Integration and collision functions deterministic given same
+  inputs and `dt`.
+- No parallel reductions in collision narrow-phase inner loops
+  (order affects floating-point results).
+- Position-independence: same actor inputs + same chunk data → same
+  collision query result regardless of chunk's world position.
 
-**Permitted parallelism (does not break determinism):**
+The game's simulation loop composes these primitives on a fixed
+timestep to produce deterministic gameplay.
 
-- Rendering inner loops. Output is not part of simulation state.
-- Content processing (mesh generation, light baking). Output is
-  byte-identical regardless of parallelization order when implemented
-  correctly (each work unit's output is independent of others'
-  intermediate states).
-- Cross-chunk work in wok-content (when parallelizing `slice_chunk`
-  across chunks). Per-chunk slicing is internally sequential; across
-  chunks is free to parallelize.
+**Permitted parallelism:**
 
-**Testing:** the Level 2 harness exercises a scripted input sequence
-over N simulation steps and compares dumped state to a stored
-expected dump. Any crate breaking the contract surfaces as a Level 2
-test failure. Each crate also includes its own determinism tests at
-Level 1 against narrower fixtures.
+- Rendering inner loops (output not part of simulation state).
+- Content processing (mesh generation, light baking — outputs
+  byte-identical regardless of parallelization order when each work
+  unit's output is independent of others' intermediate states).
+- Cross-chunk work in wok-content (per-chunk transformation is
+  internally sequential; across chunks is free to parallelize).
+
+**Testing:** Level 2 harness (game-owned) exercises a scripted
+input sequence over N simulation steps and compares dumped state to
+a stored expected dump. Each crate also includes its own
+determinism tests at Level 1.
 
 ## Cross-crate decisions
 
-*(Currently empty. Entries land here as cross-crate decisions emerge
-from orchestration work that don't fit naturally into the sections
-above.)*
+*(Currently empty. Entries land here when cross-crate decisions
+emerge that don't fit elsewhere.)*
