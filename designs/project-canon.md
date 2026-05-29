@@ -5,12 +5,12 @@ don't fit in the HLD or multiplayer model.
 
 ## Roles
 
-**Orchestrator/designer** — Harrison plus a design-lead AI
+**Orchestrator/designer** - Harrison plus a design-lead AI
 conversation (typically Claude). Source of truth for the engine's
 design. Owns the canonical documents (HLD, multiplayer model, this
 canon). Drafts implementation handoff briefs directly.
 
-**Implementer (Claude Code)** — separate sessions. Takes a brief
+**Implementer (Claude Code)** - separate sessions. Takes a brief
 from the orchestrator and produces working code in checkpoint
 cadence. Defers back when problems exceed the brief or when an
 issue is cross-cutting.
@@ -21,11 +21,11 @@ absorb and execute them.
 
 ## Artifacts
 
-- `high-level-design.md` — engine philosophy, principles, crates,
+- `high-level-design.md` - engine philosophy, principles, crates,
   dependency graph, data flow, validation.
-- `multiplayer-model.md` — parallel-paths approach for games that
+- `multiplayer-model.md` - parallel-paths approach for games that
   opt into multiplayer. Game-design doc.
-- This document — workflow, working principles, cross-crate
+- This document - workflow, working principles, cross-crate
   decisions.
 
 Handoff briefs and plan-vs-reality reflections live in the
@@ -33,22 +33,22 @@ conversation that produced them; not canonical.
 
 ## Handoff briefs
 
-Orchestrator → CC handoffs are scoped task assignments sized for
+Orchestrator -> CC handoffs are scoped task assignments sized for
 one CC session. A brief contains:
 
-- **Scope** — the specific chunk of work; bounded for absorption
+- **Scope** - the specific chunk of work; bounded for absorption
   without external context.
-- **References** — pointers to canonical documents the brief draws
+- **References** - pointers to canonical documents the brief draws
   from (typically HLD + this canon).
-- **Outcome criteria** — what "done" looks like: tests passing,
+- **Outcome criteria** - what "done" looks like: tests passing,
   public API implemented, file structure created, expected behavior
   demonstrated.
-- **Out-of-scope notes** — explicit boundaries on what NOT to
+- **Out-of-scope notes** - explicit boundaries on what NOT to
   build. CC interprets silence as license; explicit non-scope
   prevents this.
 
-Harrison relays: orchestrator drafts here → Harrison copies to CC
-session → CC executes and reports → Harrison relays results back.
+Harrison relays: orchestrator drafts here -> Harrison copies to CC
+session -> CC executes and reports -> Harrison relays results back.
 
 ## Decision discipline
 
@@ -104,7 +104,7 @@ modes external consumers need to distinguish. Internal errors are
 wrapped at the boundary so external consumers see a stable surface.
 
 One `Error` enum per crate by default (e.g., `wok_scene::LoadError`,
-`wok_registry::RegistryError`). Multiple narrow types in a single
+`wok_mesh::MeshError`). Multiple narrow types in a single
 crate are fine when genuinely independent (e.g., `LoadError` vs
 `SliceError`); avoid one God-enum mixing unrelated failure domains.
 
@@ -112,11 +112,11 @@ crate are fine when genuinely independent (e.g., `LoadError` vs
 
 Logging uses `tracing`, structured with spans. Levels:
 
-- `trace` — high-frequency / low-value detail (per-tick state,
+- `trace` - high-frequency / low-value detail (per-tick state,
   per-frame timing).
-- `debug` — development-time visibility (chunk lifecycle, asset
-  uploads, registry mutations).
-- `info` — noteworthy state changes (scene loaded, chunk
+- `debug` - development-time visibility (chunk lifecycle, asset
+  uploads, content scans).
+- `info` - noteworthy state changes (scene loaded, chunk
   transitioned to loaded, hot reload applied).
 
 Warnings and errors do NOT use logging. They surface through
@@ -129,7 +129,7 @@ just emit events.
 
 ## Determinism contract
 
-Required for HLD §4 Level 2 deterministic replay.
+Required for HLD Section 4 Level 2 deterministic replay.
 
 **Every engine crate:**
 
@@ -146,7 +146,7 @@ Required for HLD §4 Level 2 deterministic replay.
   inputs and `dt`.
 - No parallel reductions in collision narrow-phase inner loops
   (order affects floating-point results).
-- Position-independence: same actor inputs + same chunk data → same
+- Position-independence: same actor inputs + same chunk data -> same
   collision query result regardless of chunk's world position.
 
 The game's simulation loop composes these primitives on a fixed
@@ -155,7 +155,7 @@ timestep to produce deterministic gameplay.
 **Permitted parallelism:**
 
 - Rendering inner loops (output not part of simulation state).
-- Content processing (mesh generation, light baking — outputs
+- Content processing (mesh generation, light baking - outputs
   byte-identical regardless of parallelization order when each work
   unit's output is independent of others' intermediate states).
 - Cross-chunk work in wok-content (per-chunk transformation is
