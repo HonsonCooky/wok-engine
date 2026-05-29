@@ -142,12 +142,19 @@ Required for HLD Section 4 Level 2 deterministic replay.
 
 **wok-physics specifically:**
 
-- Integration and collision functions deterministic given same
-  inputs and `dt`.
+- Integration and collision functions are deterministic given the
+  same inputs, `dt`, and build: identical input sequences reproduce
+  bitwise. This is the property the Level 2 replay harness relies on.
 - No parallel reductions in collision narrow-phase inner loops
   (order affects floating-point results).
-- Position-independence: same actor inputs + same chunk data -> same
-  collision query result regardless of chunk's world position.
+- Position-independence: simulation runs in chunk-local coordinates,
+  so the same actor inputs and chunk data give the same collision
+  result regardless of the chunk's world position. In floating point
+  that is exact for the qualitative result (contact axis and
+  direction) and holds to float precision for magnitudes; chunk-local
+  coordinates are what keep the error bounded. It is not bitwise
+  across world positions, and we do not adopt fixed-point to make it
+  so.
 
 The game's simulation loop composes these primitives on a fixed
 timestep to produce deterministic gameplay.

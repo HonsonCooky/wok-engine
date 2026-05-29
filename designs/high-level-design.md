@@ -77,7 +77,9 @@ independent in shape.
 - **`wok-platform`** - Window + surface, GPU device (wgpu), input
   event polling, gamepads (gilrs), audio output (cpal), frame loop
   driver, OS theme. Re-exports wgpu / winit / bytemuck / cpal / gilrs
-  so consumers pin one source of truth. glam is pinned at the
+  so consumers pin one source of truth. pollster is an internal
+  dependency used to block on async wgpu device init; it is not
+  re-exported. glam is pinned at the
   workspace level (used by wok-scene for Transform and Aabb, not by
   wok-platform). Scope rule: if every interactive application needs it
   regardless of what it does, it belongs here; if only some do, it
@@ -105,7 +107,14 @@ Ten library crates, in dependency order.
   `is_hitbox` and `is_visible`
   flags - three meaningful combinations: solid placeholder (both),
   trigger volume (hitbox only), visual-only placeholder (visible
-  only). At chunk load, shapes are sliced into per-system arrays
+  only). Primitives are unit-sized and positioned by the transform:
+  the unit cube spans +/-0.5m per axis (a 1m cube), so a placement's
+  scale reads directly as size in metres; ellipsoid, cylinder, and
+  capsule are the radius-0.5 shapes inscribed in it, and plane is the
+  unit quad in the xz plane at y=0. This convention is shared:
+  wok-physics collision bounds and wok-mesh primitive meshes must
+  both honor it, or colliders and drawn meshes disagree. At chunk
+  load, shapes are sliced into per-system arrays
   (visible, hitbox, trigger). Asset replacement happens at the state
   level. Pure data and serde; no runtime logic, no GPU.
 
@@ -252,11 +261,13 @@ named by slug.
 ## 2. Dependency Graph
 
 Topological order, lowest first. Each crate may depend only on the
-listed crates.
+listed crates. Built crates (wok-platform, wok-scene, wok-physics)
+list their actual dependencies; not-yet-built crates list the
+permission ceiling and get tightened to real usage as they land.
 
 - **`wok-platform`** - no internal dependencies.
-- **`wok-scene`** - `wok-platform`.
-- **`wok-physics`** - `wok-platform`, `wok-scene`.
+- **`wok-scene`** - no internal dependencies (pure data, owns its math).
+- **`wok-physics`** - `wok-scene`.
 - **`wok-anim`** - `wok-platform`, `wok-scene`.
 - **`wok-mesh`** - `wok-platform`, `wok-scene`.
 - **`wok-content`** - `wok-platform`, `wok-scene`, `wok-mesh`.
