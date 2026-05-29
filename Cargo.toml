@@ -1,5 +1,5 @@
 [workspace]
-members = ["wok-platform", "wok-scene"]
+members = ["wok-platform", "wok-scene", "wok-physics"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -9,7 +9,6 @@ cpal = "0.15"
 gilrs = "0.11"
 notify = "8"
 glam = "0.29"
-log = "0.4"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

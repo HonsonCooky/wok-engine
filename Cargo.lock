@@ -3015,13 +3015,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
+name = "wok-physics"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "wok-scene",
+]
+
+[[package]]
 name = "wok-platform"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "cpal",
  "gilrs",
- "log",
  "pollster",
  "wgpu",
  "winit",
@@ -3036,7 +3043,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "wok-platform",
 ]
 
 [[package]]

@@ -38,7 +38,6 @@ unnecessary_wraps                 = "allow"
 unused_self                       = "allow"
 
 [dependencies]
-wok-platform = { path = "../wok-platform" }
 glam.workspace = true
 notify.workspace = true
 serde.workspace = true

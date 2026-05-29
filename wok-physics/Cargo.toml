@@ -1,26 +1,19 @@
 [package]
-name = "wok-platform"
+name = "wok-physics"
 version = "0.1.0"
 edition = "2024"
 
 [lints.clippy]
-# Pedantic gives us strong defaults; the allows below tune it down to "actually useful"
-# rather than "every stylistic preference clippy has".
+# Same lint posture as wok-platform / wok-scene: pedantic on, with the same set of stylistic and
+# domain-specific noise allowed. Keep the crates in sync so house style is one decision, not many.
 pedantic                          = { level = "warn", priority = -1 }
 
-# Casts: clippy::pedantic flags every `as` conversion that could theoretically lose
-# information. In graphics + platform code we constantly cast usize/u32/i32/f32/f64
-# between vertex counts, screen coords, color channels, and event timestamps - all
-# bounded by domain. Re-enable any of these if we add code paths that handle untrusted
-# external sizes (file inputs, network frames, user-supplied counts).
 cast_lossless                     = "allow"
 cast_possible_truncation          = "allow"
 cast_possible_wrap                = "allow"
 cast_precision_loss               = "allow"
 cast_sign_loss                    = "allow"
 
-# Style noise: these flag patterns we've made deliberate calls on and don't want to keep
-# defending in review. None of them point at bugs.
 collapsible_if                    = "allow"
 default_trait_access              = "allow"
 doc_lazy_continuation             = "allow"
@@ -45,9 +38,5 @@ unnecessary_wraps                 = "allow"
 unused_self                       = "allow"
 
 [dependencies]
-winit.workspace = true
-wgpu.workspace = true
-cpal.workspace = true
-gilrs.workspace = true
-pollster.workspace = true
-bytemuck.workspace = true
+wok-scene = { path = "../wok-scene" }
+glam.workspace = true
