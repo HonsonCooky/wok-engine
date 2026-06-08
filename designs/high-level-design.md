@@ -113,7 +113,18 @@ Ten library crates, in dependency order.
   capsule are the radius-0.5 shapes inscribed in it, and plane is the
   unit quad in the xz plane at y=0. This convention is shared:
   wok-physics collision bounds and wok-mesh primitive meshes must
-  both honor it, or colliders and drawn meshes disagree. At chunk
+  both honor it, or colliders and drawn meshes disagree. wok-scene
+  owns the canonical definition (the unit half-extent and a Primitive's
+  `unit_aabb`); wok-physics and wok-mesh reference it rather than
+  restating it. The
+  convention faithfully represents only shapes closed under
+  non-uniform scale (cube, ellipsoid, plane); capsule and cylinder are
+  placeholder-grade at unit scale, since a unit capsule inscribed in
+  the cube collapses to the radius-0.5 sphere. The player's real
+  capsule collider is parameterized directly in wok-physics, not via
+  this convention. Giving capsule or cylinder primitives true
+  proportions later means adding shape parameters here and revisiting
+  collision bounds in lockstep. At chunk
   load, shapes are sliced into per-system arrays
   (visible, hitbox, trigger). Asset replacement happens at the state
   level. Pure data and serde; no runtime logic, no GPU.
@@ -269,7 +280,8 @@ permission ceiling and get tightened to real usage as they land.
 - **`wok-scene`** - no internal dependencies (pure data, owns its math).
 - **`wok-physics`** - `wok-scene`.
 - **`wok-anim`** - `wok-platform`, `wok-scene`.
-- **`wok-mesh`** - `wok-platform`, `wok-scene`.
+- **`wok-mesh`** - `wok-scene` (MeshGpu and its wok-platform dep
+  arrive with the renderer).
 - **`wok-content`** - `wok-platform`, `wok-scene`, `wok-mesh`.
 - **`wok-audio`** - `wok-platform`, `wok-scene`.
 - **`wok-light`** - `wok-platform`, `wok-scene`, `wok-physics`.

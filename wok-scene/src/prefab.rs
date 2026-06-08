@@ -14,9 +14,10 @@
 //! `is_hitbox = false, is_visible = false` is degenerate but not forbidden here; tooling in
 //! `wok-shell` is the place to warn about it.
 
+use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
-use crate::math::Transform;
+use crate::math::{Aabb, Transform};
 use crate::refs::{MeshRef, SurfaceTag};
 
 /// Unit-shape primitives. Size and placement come from the parent `Shape`'s transform; these
@@ -28,6 +29,38 @@ pub enum Primitive {
     Cylinder,
     Capsule,
     Plane,
+}
+
+/// Half-extent of a unit primitive on each axis it occupies. This is the single source of truth for
+/// the placeholder-primitive size convention shared across the engine: with it at 0.5 the unit `Cube`
+/// is a literal 1m cube, so a placement's scale reads directly as size in metres. wok-physics
+/// collision bounds and wok-mesh primitive meshes both read this constant (and [`Primitive::unit_aabb`])
+/// rather than restating it, so colliders and drawn meshes cannot drift apart. See
+/// `designs/high-level-design.md`, wok-scene section.
+pub const UNIT_HALF_EXTENT: f32 = 0.5;
+
+impl Primitive {
+    /// The primitive's axis-aligned bounding box at unit size, centred at the origin: the box the
+    /// parent shape's transform is applied to. This is the canonical statement of the unit-primitive
+    /// convention. Every volumetric primitive (`Cube`, `Ellipsoid`, `Cylinder`, `Capsule`) is
+    /// inscribed in the unit cube, so its box spans `+/-`[`UNIT_HALF_EXTENT`] on each axis; `Plane` is
+    /// flat (zero thickness in `y`), the `+/-`[`UNIT_HALF_EXTENT`] square at `y = 0`.
+    ///
+    /// A unit `Capsule` inscribed in the cube collapses to the radius-[`UNIT_HALF_EXTENT`] sphere (its
+    /// body height is zero); that consequence is intended, and documented where the capsule mesh is
+    /// generated. Giving capsule or cylinder true proportions later means adding shape parameters and
+    /// revisiting this box in lockstep.
+    pub fn unit_aabb(&self) -> Aabb {
+        match self {
+            Primitive::Cube | Primitive::Ellipsoid | Primitive::Cylinder | Primitive::Capsule => {
+                Aabb::new(Vec3::splat(-UNIT_HALF_EXTENT), Vec3::splat(UNIT_HALF_EXTENT))
+            }
+            Primitive::Plane => Aabb::new(
+                Vec3::new(-UNIT_HALF_EXTENT, 0.0, -UNIT_HALF_EXTENT),
+                Vec3::new(UNIT_HALF_EXTENT, 0.0, UNIT_HALF_EXTENT),
+            ),
+        }
+    }
 }
 
 /// A single shape within a prefab state.
@@ -85,6 +118,7 @@ impl Prefab {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     use crate::math::Transform;
@@ -124,6 +158,22 @@ mod tests {
     fn primitive_serializes_as_bare_string() {
         let json = serde_json::to_string(&Primitive::Capsule).unwrap();
         assert_eq!(json, r#""Capsule""#);
+    }
+
+    // ---- Primitive::unit_aabb (the canonical unit-primitive convention) ----
+
+    #[test]
+    fn unit_aabb_matches_the_convention() {
+        // Every volumetric primitive is inscribed in the unit cube; the plane is that square
+        // flattened to zero thickness in y. These are the exact values wok-physics and wok-mesh both
+        // read, so the comparison is exact: there is no trig here, hence no epsilon.
+        let unit_cube = Aabb::new(Vec3::splat(-UNIT_HALF_EXTENT), Vec3::splat(UNIT_HALF_EXTENT));
+        for p in [Primitive::Cube, Primitive::Ellipsoid, Primitive::Cylinder, Primitive::Capsule] {
+            assert_eq!(p.unit_aabb(), unit_cube, "{p:?} should be the unit cube");
+        }
+        let plane = Primitive::Plane.unit_aabb();
+        assert_eq!(plane.min, Vec3::new(-UNIT_HALF_EXTENT, 0.0, -UNIT_HALF_EXTENT));
+        assert_eq!(plane.max, Vec3::new(UNIT_HALF_EXTENT, 0.0, UNIT_HALF_EXTENT));
     }
 
     // ---- Shape ----

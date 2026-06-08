@@ -67,7 +67,7 @@ pub mod smoothing;
 pub mod sweep;
 pub mod terrain;
 
-pub use bounds::{UNIT_HALF_EXTENT, aabb_center, aabb_half_extents, local_aabb, world_aabb};
+pub use bounds::{aabb_center, aabb_half_extents, world_aabb};
 pub use camera::{boom_direction, boom_point, spring_arm, terrain_floor};
 pub use capsule::Capsule;
 pub use collision::{Contact, aabb_contact, aabb_overlap, resolve_statics};

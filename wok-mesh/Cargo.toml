@@ -1,0 +1,43 @@
+[package]
+name = "wok-mesh"
+version = "0.1.0"
+edition = "2024"
+
+[lints.clippy]
+# Same lint posture as the sibling crates (wok-platform / wok-scene / wok-physics): pedantic on,
+# with the same set of stylistic and domain-specific noise allowed. Keep the crates in sync so
+# house style is one decision, not many.
+pedantic                          = { level = "warn", priority = -1 }
+
+cast_lossless                     = "allow"
+cast_possible_truncation          = "allow"
+cast_possible_wrap                = "allow"
+cast_precision_loss               = "allow"
+cast_sign_loss                    = "allow"
+
+collapsible_if                    = "allow"
+default_trait_access              = "allow"
+doc_lazy_continuation             = "allow"
+doc_markdown                      = "allow"
+items_after_statements            = "allow"
+many_single_char_names            = "allow"
+match_same_arms                   = "allow"
+match_wildcard_for_single_variants = "allow"
+missing_errors_doc                = "allow"
+missing_panics_doc                = "allow"
+must_use_candidate                = "allow"
+needless_lifetimes                = "allow"
+redundant_closure_for_method_calls = "allow"
+return_self_not_must_use          = "allow"
+similar_names                     = "allow"
+single_match_else                 = "allow"
+struct_excessive_bools            = "allow"
+too_many_arguments                = "allow"
+too_many_lines                    = "allow"
+uninlined_format_args             = "allow"
+unnecessary_wraps                 = "allow"
+unused_self                       = "allow"
+
+[dependencies]
+wok-scene = { path = "../wok-scene" }
+glam.workspace = true

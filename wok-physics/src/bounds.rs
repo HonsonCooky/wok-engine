@@ -1,20 +1,19 @@
-//! Geometry prep: the unit-primitive convention, and reducing a transformed primitive to an AABB.
+//! Geometry prep: reducing a transformed primitive to a world-space AABB.
 //!
 //! wok-scene's primitives ([`Primitive`]) are dimensionless unit shapes; the parent shape's
 //! transform supplies their size and placement. To collide them in the AABB-only pass, the caller
 //! needs each sliced hitbox (a primitive plus a `Mat4`) as a world-space [`Aabb`]; [`world_aabb`]
 //! does that reduction.
 //!
-//! ## Unit-primitive convention (cross-crate)
+//! ## Unit-primitive convention (owned by wok-scene)
 //!
-//! A unit primitive is inscribed in the axis-aligned cube spanning `-UNIT_HALF_EXTENT..=+
-//! UNIT_HALF_EXTENT` on each axis, centred at the origin. With [`UNIT_HALF_EXTENT`] = 0.5 the
-//! `Cube` is a literal 1m cube, so a placement's scale reads directly as the placeholder's size in
-//! metres (scale 3 -> a 3m box), which is the intuitive knob for placeholder-first authoring.
-//! `Ellipsoid`, `Cylinder` and `Capsule` are the unit sphere / cylinder / capsule inscribed in
-//! that same cube (radius 0.5), so their conservative box is the cube too; `Plane` is the flat
-//! 1m x 1m square at y = 0. This is the engine's placeholder-primitive convention and wok-mesh's
-//! primitive generation must match it, or collision boxes and drawn meshes will disagree.
+//! The convention - the unit half-extent and each primitive's unit bounds - is defined once in
+//! wok-scene (`wok_scene::UNIT_HALF_EXTENT` and `Primitive::unit_aabb`; see the wok-scene section of
+//! `designs/high-level-design.md`). [`world_aabb`] reads it directly via `Primitive::unit_aabb`, not
+//! by restating it, so collision bounds and wok-mesh's drawn meshes cannot drift apart. In short: a
+//! unit primitive is inscribed in the cube centred at the origin, so the `Cube` is a literal 1m cube
+//! (scale 3 -> a 3m box), `Ellipsoid` / `Cylinder` / `Capsule` are the unit shapes inscribed in that
+//! cube (their conservative box is the cube too), and `Plane` is the flat 1m x 1m square at y = 0.
 //!
 //! Because every volumetric primitive shares the unit cube as its bound, the AABB-only pass treats
 //! them identically; the per-primitive shape (a sphere is not its box) only starts to matter at the
@@ -23,37 +22,17 @@
 use glam::Vec3;
 use wok_scene::{Aabb, Mat4, Primitive};
 
-/// Half-extent of a unit primitive on each axis it occupies. See the module docs: this is the
-/// engine's placeholder-primitive size convention, shared with wok-mesh.
-pub const UNIT_HALF_EXTENT: f32 = 0.5;
-
-/// The local-space (untransformed) bounding box of a unit primitive.
-///
-/// Every volumetric primitive (`Cube`, `Ellipsoid`, `Cylinder`, `Capsule`) is inscribed in the
-/// unit cube, so its conservative box is that cube. `Plane` is flat: zero thickness in y.
-pub fn local_aabb(primitive: Primitive) -> Aabb {
-    match primitive {
-        Primitive::Cube | Primitive::Ellipsoid | Primitive::Cylinder | Primitive::Capsule => {
-            Aabb::new(Vec3::splat(-UNIT_HALF_EXTENT), Vec3::splat(UNIT_HALF_EXTENT))
-        }
-        Primitive::Plane => Aabb::new(
-            Vec3::new(-UNIT_HALF_EXTENT, 0.0, -UNIT_HALF_EXTENT),
-            Vec3::new(UNIT_HALF_EXTENT, 0.0, UNIT_HALF_EXTENT),
-        ),
-    }
-}
-
 /// Conservative world-space (or chunk-local: the matrix decides the frame) AABB of a transformed
 /// primitive. Pass a sliced hitbox's `primitive` and `transform` to get the box the AABB pass uses
 /// in its place.
 ///
-/// Computed by transforming the eight corners of the primitive's [`local_aabb`] and taking their
-/// component-wise min and max. This stays correct under rotation and non-uniform scale: the result
-/// is the tightest axis-aligned box around the transformed local box, which in turn contains the
-/// primitive (it is inscribed in that box). Conservative, never an under-estimate, so the AABB pass
-/// cannot tunnel through a reduced hitbox.
+/// Computed by transforming the eight corners of the primitive's [`Primitive::unit_aabb`] (wok-scene's
+/// canonical unit bounds) and taking their component-wise min and max. This stays correct under
+/// rotation and non-uniform scale: the result is the tightest axis-aligned box around the transformed
+/// local box, which in turn contains the primitive (it is inscribed in that box). Conservative, never
+/// an under-estimate, so the AABB pass cannot tunnel through a reduced hitbox.
 pub fn world_aabb(primitive: Primitive, transform: Mat4) -> Aabb {
-    let local = local_aabb(primitive);
+    let local = primitive.unit_aabb();
     let corners = [
         Vec3::new(local.min.x, local.min.y, local.min.z),
         Vec3::new(local.max.x, local.min.y, local.min.z),
@@ -95,28 +74,6 @@ pub(crate) fn aabb_translated(b: &Aabb, by: Vec3) -> Aabb {
 mod tests {
     use super::*;
     use wok_scene::Transform;
-
-    // ---- local_aabb ----
-
-    #[test]
-    fn volumetric_primitives_share_the_unit_cube() {
-        let cube = Aabb::new(Vec3::splat(-0.5), Vec3::splat(0.5));
-        for p in [
-            Primitive::Cube,
-            Primitive::Ellipsoid,
-            Primitive::Cylinder,
-            Primitive::Capsule,
-        ] {
-            assert_eq!(local_aabb(p), cube, "primitive {p:?}");
-        }
-    }
-
-    #[test]
-    fn plane_is_flat_in_y() {
-        let a = local_aabb(Primitive::Plane);
-        assert_eq!(a.min, Vec3::new(-0.5, 0.0, -0.5));
-        assert_eq!(a.max, Vec3::new(0.5, 0.0, 0.5));
-    }
 
     // ---- world_aabb ----
 

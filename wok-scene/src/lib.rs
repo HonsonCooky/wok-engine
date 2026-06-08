@@ -36,7 +36,7 @@ pub use heightmap::{
 pub use heightmap_io::{load_heightmap, save_heightmap};
 pub use io::{load_chunk, load_prefab, load_scene, save_chunk, save_prefab, save_scene};
 pub use math::{Aabb, Mat4, Transform};
-pub use prefab::{Prefab, PrefabState, Primitive, Shape};
+pub use prefab::{Prefab, PrefabState, Primitive, Shape, UNIT_HALF_EXTENT};
 pub use refs::{InstanceId, LightStateRef, MeshRef, PrefabRef, SurfaceTag};
 pub use scene::{Region, Scene, StreamingDefaults};
 pub use slice::{Hitbox, SliceError, SlicedChunk, Trigger, VisibleItem, slice_chunk};
