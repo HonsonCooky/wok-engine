@@ -1,5 +1,5 @@
 [workspace]
-members = ["wok-platform", "wok-scene", "wok-physics", "wok-mesh"]
+members = ["wok-platform", "wok-scene", "wok-physics", "wok-mesh", "wok-light"]
 resolver = "3"
 
 [workspace.dependencies]

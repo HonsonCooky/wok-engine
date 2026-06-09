@@ -1,7 +1,7 @@
 # Global Instructions
 - Only use ASCII / US Standard Keyboard characters in all output. No emojis, no Unicode symbols, no special characters
   outside the printable ASCII range (0x20-0x7E).
-- Never use double dashes (--) or em dashes in prose or comments. Use a single hyphen, a colon, or rewrite the sentence.
+- Never use double dashes (--) or em dashes in prose or comments. Use a single hyphen, a colon, or rewrite the sentence. Exception: ASCII divider comments in code (e.g. // ---- name ----) are formatting, not prose, and are allowed.
 - Wrap prose in documents and comments at 120 characters. This is my preferred default line width.
 - Never install new programs, packages, or dependencies without asking first.
 # Philosophy
