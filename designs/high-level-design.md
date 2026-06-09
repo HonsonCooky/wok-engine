@@ -1,444 +1,124 @@
-# Engine Design - High-Level
+# wok-engine - High-Level Design
 
-A modular monolith Rust workspace for 3D action, platformer, and
-open-world games at humble vertex counts. Target hardware: Steam
-Deck and developer laptops.
+## Approach
 
-Three layers, each may depend only on layers below:
+The bet is programming-first. Most engines exist to take code out of the pipeline: you assemble components, wire nodes, fill in variable sheets, and the game becomes a configuration. wok-engine takes the opposite trade. It is a toolbox, not a framework that removes programming: it owns the wheels no one should reinvent (windowing, the GPU, collision, scene data, audio, lighting), and the game is written on top as code. Development is asset-decoupled: the game runs against placeholder shapes and a scan of the project yields the list of assets still to be made, so content and code proceed in parallel.
 
-- **Platform** (`wok-platform`) - cross-platform substrate (window,
-  GPU, audio, input, frame loop, OS theme).
-- **Wok** - opinionated 3D engine; ten library crates.
-- **Game** (`<game>`) - owns the main loop, entity state, and
-  simulation loops; composes Wok's primitives. A separate downstream
-  project that depends on the engine, not a member of the engine
-  workspace. The engine is reusable across games; each game is its
-  own project.
+## Shape
 
----
+wok-engine is a 3D engine for one class of game: action, platformer, and open-world at modest fidelity. It is not general and does not do 2D. The narrow surface follows from a precise mission, but the target is a class of games rather than a single one: a substrate wider than one title and narrower than a general engine.
+
+wok-engine is a Rust workspace, a modular monolith of small crates that form one engine. It targets developer laptops, with the Steam Deck as a secondary target; PS2-era vertex counts are a complexity-reduction choice, not a hardware ceiling.
+
+Two layers, and the dependency points one way only:
+
+- **wok-engine** - the toolbox: a set of crates with the platform substrate (window, GPU, audio, input, the frame loop) at the bottom and the 3D libraries above it. Reusable across games.
+- **applications** - separate consumers that compose engine primitives; the engine never depends on any of them, so each is replaceable. Two exist today: the wok editor, which authors content and is co-developed in the workspace as the reference application, and the game, which runs the content and is its own downstream project.
+
+The one hard rule: the engine never reaches up into an application. Everything else about how the crates relate falls out of the principles.
 
 ## Principles
 
-**1. Placeholder-first authoring.** Games built on primitive shapes;
-real meshes, voice, music, animations plug in later, referenced by
-name and resolved from the content folder when present. Terrain is
-heightmap data per chunk at 1m x 1m resolution; the heightmap is
-the data, not a placeholder.
+**1. Placeholder-first.** Games are built on primitive shapes; real meshes, voice, music, and animation plug in later, referenced by name and resolved from the content folder when present. Terrain is heightmap data per chunk at 1m x 1m resolution; the heightmap is the data, not a placeholder.
 
-**2. Earn its place.** Every subsystem justifies complexity against
-scope and modest hardware. No nanite, no research rendering, no
-PhD-grade techniques. When two designs deliver the same outcome,
-the simpler wins.
+**2. Earn its place.** Every subsystem justifies its complexity against scope and modest hardware. No nanite, no research rendering, no PhD-grade techniques. When two designs reach the same outcome, the simpler one wins. The engine does the few things its kind of game needs, and refuses the rest.
 
-**3. Authoring versus runtime separation.** Editing data structures
-and runtime data structures are different. Transformations happen
-at load/save time, never per frame.
+**3. Authoring and runtime are separate.** The data you edit and the data you run are different shapes. Transformations happen at load and save time, never per frame.
 
-**4. Built for one target.** The renderer has exactly one
-configuration. Higher-end machines run the same game with
-thermal/framerate headroom, not visual richness. Hardware
-adaptation that doesn't change what's rendered (resolution,
-framerate cap, audio output device) is allowed.
+**4. One target.** The renderer has a single configuration. Hardware adaptation that does not change what is rendered (resolution, framerate cap, audio device) is allowed; a stronger machine runs the same game with headroom, not richer visuals.
 
-**5. Math and infrastructure in the engine; state and loops in the
-game.** Engine provides pure math primitives (collision queries,
-pose blending, lighting), data models, and infrastructure (file
-I/O, GPU upload, asset-name resolution, chunk lifecycle, hot reload,
-authoring shell). Entity state (actors, game cameras, animation
-playback drivers, save format, multiplayer transport) lives in
-game code. Engine pools exist only for engine-resource budgets
-(dynamic light pool for renderer limits, voice pool for mixer
-limits); entity pools (actors) live game-side. Features with
-well-known game-side patterns belong to game code: save/load UI,
-settings menus, HUD, input remapping, networking, localization,
-achievements, dialog trees, inventory, quest tracking, mod support,
-tutorials, audio routing policy.
+**5. The engine provides tools; the game owns state and loops.** The engine provides pure math (collision queries, pose blending, lighting), data models, and infrastructure (file I/O, GPU upload, asset-name resolution, chunk lifecycle, hot reload). Entity state and the loops that drive it (actors, game cameras, animation drivers, save format, multiplayer transport) live in the game. Engine pools exist only for engine-resource budgets (the dynamic light pool, the voice pool); entity pools live game-side. Anything with a well-known game-side pattern belongs to the game: save and load UI, settings, HUD, input remapping, networking, localization, achievements, dialog trees, inventory, quest tracking, mod support, tutorials, audio routing.
 
-**6. Determinism is a contract.** Every engine crate honors the
-determinism contract specified in `project-canon.md`. Load-bearing
-for replay, save/load, and multiplayer.
+**6. Determinism is a contract.** Every engine crate honors the determinism contract in `project-canon.md`, load-bearing for replay, save/load, and multiplayer.
 
-**7. Code structured for AI implementation.** Built primarily by
-Claude Code from prose plans. Small contracts at crate boundaries,
-explicit data flow (no buried coupling), error types that surface
-failure modes locally, target < 400 lines per file. Implicit
-assumptions are where AI implementation drifts; explicit boundaries
-prevent it.
+**7. Built to be implemented by Claude Code.** The engine is built primarily by Claude Code from prose plans, so its boundaries are explicit: small contracts at crate edges, data flow on the surface rather than buried in coupling, error types that surface failure where it happens, and a target of under 400 lines per file.
 
----
+## Crates
 
-## 1. Constituent Crates
+A crate earns its boundary by being substantial in scope or independent in shape. Listed in dependency order, substrate first. The built crates carry real detail; for the unbuilt ones the responsibility and concepts are fixed here, and the tuning and mechanism are settled in each crate's plan when it is built.
 
-A crate earns its boundary by being substantial in scope or
-independent in shape.
+- **`wok-platform`** - the substrate at the bottom of the engine: window and surface, GPU device (wgpu), input polling, gamepads (gilrs), audio output (cpal), the frame loop, OS theme. It re-exports wgpu, winit, bytemuck, cpal, and gilrs so every consumer pins one source of truth. The scope rule: window, GPU, audio, input, and the frame loop are needed by every interactive application, so they belong here; scene graphs, game models, mesh tools, and lighting are needed by only some, so they do not.
 
-### Platform
+- **`wok-scene`** - scene and prefab data: chunked scenes, prefabs, region markers (fog and lighting zones), JSON serde, and a file watcher for hot reload. Asset references are by name, resolved to files at load; the only generated identity is a per-scene monotonic instance id on each placement, which game logic and triggers point at. There is no serial registry: content is the source of truth, and dead or missing references are found by scanning. Chunks are 128m x 128m. Prefabs have named states (default, open, destroyed), each a list of shapes; a shape is a primitive (cube, ellipsoid, cylinder, capsule, plane) with a transform, an optional surface tag, and is_hitbox / is_visible flags, giving solid, trigger-only, or visual-only placeholders. Primitives are unit-sized and positioned by the transform (the unit cube spans +/-0.5m, so scale reads as metres); wok-scene owns the canonical definition of this convention (the unit half-extent and a `Primitive`'s `unit_aabb`), and wok-physics bounds and wok-mesh meshes reference it so colliders and drawn geometry agree. Capsule and cylinder are placeholder-grade at unit scale. At chunk load, shapes are sliced into per-system arrays (visible, hitbox, trigger). Pure data and serde; no runtime logic, no GPU.
 
-- **`wok-platform`** - Window + surface, GPU device (wgpu), input
-  event polling, gamepads (gilrs), audio output (cpal), frame loop
-  driver, OS theme. Re-exports wgpu / winit / bytemuck / cpal / gilrs
-  so consumers pin one source of truth. pollster is an internal
-  dependency used to block on async wgpu device init; it is not
-  re-exported. glam is pinned at the
-  workspace level (used by wok-scene for Transform and Aabb, not by
-  wok-platform). Scope rule: if every interactive application needs it
-  regardless of what it does, it belongs here; if only some do, it
-  doesn't. Window, GPU, audio, input, frame loop - every application.
-  Scene graphs, game models, mesh utilities, lighting - only some.
-  The platform layer stops at the first set.
+  Terrain is a per-chunk heightmap at 1m x 1m resolution (129 x 129 cells), +/-32m vertical, u16-quantized to millimetre precision, stored in a sibling binary. Per-cell surface tags use the same intern-table pattern as shape tags. Sampling functions (`height_at`, `normal_at`, `surface_at`) live here.
 
-### Wok
+- **`wok-physics`** - pure math for moving things through 3D space: collision primitives (capsule, AABB, ellipsoid, heightmap, with swept queries and slide resolution), gravity integration as a function, and camera math (orbit transform, spring-arm calculation). All pure: inputs to outputs, no actor pool, no integration loop. The game holds actors and calls these functions; the editor calls the same functions for placement, picking, and snapping.
 
-Ten library crates, in dependency order.
+- **`wok-mesh`** - mesh runtime data: `MeshCpu` and `MeshGpu` types, primitive mesh generation, terrain mesh generation from wok-scene's heightmap (smooth normals from gradients, per-vertex colour from surface tags), GPU upload paths, and a glTF loader when real meshes arrive. Resolves mesh names to buffers at load.
 
-- **`wok-scene`** - Scene and prefab data: chunked scenes, prefabs,
-  region markers (fog and lighting zones), JSON serde, file watcher
-  for hot reload. Asset references (mesh, audio, animation, voice,
-  lighting state) are by name, resolved to files at load. The only
-  generated identity is a per-scene instance id: a monotonic serial
-  on each prefab placement (drives editor labels like `oak_tree_42`
-  and lets game logic and triggers point at one specific instance).
-  No serial registry; content is the source of truth, and dead or
-  missing references are found by scanning. Chunks are 128m x 128m
-  (engine constant). Prefabs
-  have named states (default, open, destroyed); each state is a list
-  of shapes. A shape is a primitive (cube, ellipsoid, cylinder,
-  capsule, plane) with transform, an optional surface tag, and
-  `is_hitbox` and `is_visible`
-  flags - three meaningful combinations: solid placeholder (both),
-  trigger volume (hitbox only), visual-only placeholder (visible
-  only). Primitives are unit-sized and positioned by the transform:
-  the unit cube spans +/-0.5m per axis (a 1m cube), so a placement's
-  scale reads directly as size in metres; ellipsoid, cylinder, and
-  capsule are the radius-0.5 shapes inscribed in it, and plane is the
-  unit quad in the xz plane at y=0. This convention is shared:
-  wok-physics collision bounds and wok-mesh primitive meshes must
-  both honor it, or colliders and drawn meshes disagree. wok-scene
-  owns the canonical definition (the unit half-extent and a Primitive's
-  `unit_aabb`); wok-physics and wok-mesh reference it rather than
-  restating it. The
-  convention faithfully represents only shapes closed under
-  non-uniform scale (cube, ellipsoid, plane); capsule and cylinder are
-  placeholder-grade at unit scale, since a unit capsule inscribed in
-  the cube collapses to the radius-0.5 sphere. The player's real
-  capsule collider is parameterized directly in wok-physics, not via
-  this convention. Giving capsule or cylinder primitives true
-  proportions later means adding shape parameters here and revisiting
-  collision bounds in lockstep. At chunk
-  load, shapes are sliced into per-system arrays
-  (visible, hitbox, trigger). Asset replacement happens at the state
-  level. Pure data and serde; no runtime logic, no GPU.
+- **`wok-anim`** - pure animation math (pose blending, timeline evaluation), consumed by a game-owned playback driver. Animation affects appearance, not movement, so it needs nothing from physics. Deferred until placeholders need more than transform tweens.
 
-  **Terrain.** Per-chunk heightmap, 1m x 1m resolution (129 x 129
-  cells, shared-edge convention), +/-32m vertical, u16-quantized to
-  millimeter precision. Heightmap data lives in a sibling binary
-  (`0_0.heightmap.bin` alongside `0_0.json`). Per-cell surface tags
-  use the same intern-table pattern as shape surface tags. Sampling
-  functions (`height_at`, `normal_at`, `surface_at`) live here -
-  pure functions live with their data type.
+- **`wok-content`** - chunk lifecycle and streaming: it computes the desired loaded set from scene topology plus player position, transforms chunks (composing wok-scene's slicer and wok-mesh terrain) on a background worker, and evicts them. Three eagerness modes: Eager (loads in radius), Lazy (loads on request), Vista (loaded for rendering but excluded from simulation, collision, and triggers). For triggers, wok-content owns the volume data per chunk, wok-physics owns the overlap math, and the game owns event routing.
 
-- **`wok-physics`** - Pure math for moving things through 3D space.
-  Collision primitives (capsule, AABB, ellipsoid, heightmap; swept
-  queries with slide resolution), gravity integration as a function,
-  camera math (orbit transform, spring-arm calculation). All pure:
-  inputs -> outputs. No actor pool, no integration loop. The game
-  holds actors and calls these functions; the editor calls the same
-  functions for placement, snap-to-surface, picking, overlap
-  detection.
+- **`wok-audio`** - audio playback: an engine-owned voice pool, 3D positioning, and category buses configured by the game. Positioning takes a `Vec3` and the game passes actor positions in, so it needs nothing from physics. Reverb, environmental effects, music sequencing, and routing policy are game-side.
 
-- **`wok-anim`** - Pure animation math: pose blending, layered
-  blending, timeline evaluation, animation event resolution. Game
-  owns the playback driver. Animation affects appearance, not
-  movement - no feedback into simulation. Implementation deferred
-  until placeholder animation needs more than transform tweens.
+- **`wok-light`** - the lighting data model (animatable, switchable at runtime), an offline static-light bake, and an engine-owned dynamic light pool. The bake queries geometry through wok-physics raycasts.
 
-- **`wok-mesh`** - Mesh runtime data: `MeshCpu` / `MeshGpu` types,
-  primitive mesh generation (cube, sphere, cylinder, capsule,
-  plane), terrain mesh generation from wok-scene's heightmap with
-  smooth normals from heightmap gradients and per-vertex color
-  variation from surface tags, GPU upload paths, GLTF loader (when
-  real meshes arrive). Resolves mesh names to concrete buffers at
-  load.
+- **`wok-sequence`** - cutscene and scripted-sequence data and pure evaluators; the driver that ticks a timeline is game code, and the authoring UI is in the editor.
 
-- **`wok-content`** - Chunk lifecycle and streaming. Chunk loading
-  state machine (pending -> loading -> loaded -> unloading); streaming
-  algorithm (engine-owned, declarative - scenes describe topology
-  via chunk metadata, engine computes desired loaded set from that
-  plus player position); background worker thread (`std::thread` +
-  `mpsc`) for chunk transformations; Vista enforcement (chunks
-  loaded for rendering but excluded from simulation, collision,
-  trigger evaluation); hard cap of 32 chunks (engine constant); LRU
-  eviction with priority weighting. Calls wok-scene's slicer and
-  wok-mesh for terrain mesh, and resolves asset names to loaded data
-  at load.
-  Eagerness modes: Eager (loads in radius), Lazy (loads on request),
-  Vista (loaded but partially active). Eagerness transitions are
-  flag flips, not reloads. Data-parallel internal work uses `rayon`.
+- **`wok-render`** - the renderer: a forward pipeline, a single shadow map pass, lighting passes over wok-light's baked and dynamic data, a parametric gradient sky, fog, and post-process. It consumes wok-scene, wok-anim, wok-light, wok-mesh, and wok-content, and the game supplies the render list each frame. Visual commitments:
+  - **Cel shading.** Lighting quantized into discrete bands with rim light for silhouettes; per-scene tunables for band count (2-8), rim, ambient floor, and fog. Terrain uses the same pipeline.
+  - **Alpha cutout transparency only.** No sorted blending; water, glass, smoke, and effects use stylized cutout.
+  - **Fog always on.** Fog distance sets render distance; fog colour drives the sky's horizon.
+  - **Parametric gradient sky.** A horizon-to-zenith gradient from the lighting state, a sun disc, optional stars and a cloud plane; no sky textures.
+  - **One shadow map per frame.** The scene or lighting state declares the active shadow source; baked lights bake shadows in, dynamic lights do not cast. Shadow accuracy earns extra Level 3 coverage.
 
-  Triggers: wok-content owns volume data per chunk; wok-physics owns
-  overlap math; game owns event routing.
+- **content conventions and integrity** - an engine concern, not the editor's. The engine fixes opinionated naming and folder conventions, and that small predictable surface is what lets references resolve by name with no registry and what any tool can scan. The tooling: per-scene reference checks, a missing-assets scan (the to-build list), and a project-wide deep scan for dead references, orphans, and empty slots. The editor and anything else consume it; none owns it. Whether it is its own crate or part of the content-resolution crate settles when it is built.
 
-- **`wok-audio`** - Audio playback. Voice pool with stable handles
-  (engine-owned because it manages a mixer resource budget),
-  distance attenuation and stereo panning for 3D positioning,
-  category buses (master, music, sfx, voice - categories configured
-  by game), audio buffer storage. Resolves audio cue names to source
-  files at load. Audio positioning takes
-  `Vec3`; game composes actor positions and passes them in. Reverb
-  zones, environmental effects, music sequencing, audio routing
-  policy are game-side.
+The applications sit above the engine, each a separate consumer:
 
-- **`wok-light`** - Lighting data model with animation curves
-  (animatable over time, switchable at runtime), offline static-
-  light bake (precomputes baked light and ambient occlusion into
-  vertex data or lightmaps, including terrain queried via
-  wok-scene's sampling functions), budgeted dynamic light pool
-  (engine-owned because it manages a renderer resource budget - the
-  renderer can only handle N dynamic lights per frame).
-  Importance-weighted with reserved player slots. Bake step queries
-  geometry via wok-physics raycasts.
+- **the wok editor** (`wok`) - the GUI for authoring content. It composes engine primitives, including the same wok-physics queries the game uses for picking and snapping, and surfaces the content scan as its missing-assets and integrity views; it owns no engine logic. Co-developed in the workspace as the reference application (the `wok` binary), and replaceable without the engine noticing.
+- **`<game>`** - all game-specific runtime logic: the actor pool and its fixed-timestep loop (calling wok-physics math), game cameras (calling wok-physics camera math), the player controller, save/load composed over per-crate accessors, multiplayer transport (per `multiplayer-model.md`), and routing of triggers, effects, and audio cues into the engine's systems. Content lives under the game's content folder, produced by the editor; asset source files live alongside, named by slug.
 
-- **`wok-sequence`** - Cutscene and scripted-sequence data: timeline
-  data, camera path data, animation event timing, dialog and audio
-  cue timing. Data model and pure evaluators here. The driver that
-  ticks a timeline and pumps events is game code. Authoring UI lives
-  in wok-shell.
+## Dependencies
 
-- **`wok-render`** - Renderer. Forward pipeline, single shadow map
-  pass, lighting passes (consuming wok-light's baked + dynamic
-  data), parametric gradient sky, fog, post-process. Consumes
-  wok-scene, wok-anim, wok-light, wok-mesh, wok-content. Game
-  supplies the render list each frame; wok-render doesn't read
-  actor pools. Commitments:
+The dependency graph is whatever the crates that exist actually use; a crate's dependencies are not declared before the crate exists. Three rules govern it, enforced by the toolchain rather than by review:
 
-  - **Cel shading.** Lighting quantized into discrete bands with
-    smoothstep transitions, plus rim light for silhouettes.
-    Per-scene tunables: band count (2-8, default 4), transition
-    softness, rim intensity, ambient floor color, fog parameters.
-    Terrain uses the same pipeline; heightmap-gradient normals yield
-    smooth shading on faceted geometry.
-  - **Alpha cutout transparency only.** No sorted blending, no OIT.
-    Water, glass, smoke, effects use stylized cutout.
-  - **Fog always on.** Parameters animated per lighting state; fog
-    distance sets render distance. Fog color drives sky's horizon
-    color.
-  - **Parametric gradient sky.** Vertical gradient horizon -> zenith
-    from lighting state; sun disc billboard; optional fading stars;
-    optional animated cloud plane. No sky textures.
-  - **One shadow map per frame.** Scene or lighting state declares
-    the active shadow source. Single-cascade projection sized to
-    active chunk set; default 2048x2048, tunable. PCF soft edges.
-    Baked lights bake shadows into the lightmap at bake time;
-    dynamic pool lights don't cast shadows. Shadow code earns
-    heavier Level 3 fixture coverage across sun angles and scene
-    depths - highest-gotcha surface in the renderer.
+1. The engine never depends on an application. The game is a separate project, and the editor is a binary that no library can depend on.
+2. wok-scene depends on no other engine crate. It is pure data and owns its own math, so everything else can build on it without pulling the world in.
+3. No cycles.
 
-- **`wok-shell`** - Authoring shell: egui integration, panel layout,
-  viewport management, command palette, terrain painting tools
-  (sculpt height, paint surface tags, cross-chunk paint),
-  light/dark theme switching with OS-aware live switching, dockable
-  panels. Uses wok-physics primitives for editor spatial queries
-  (snap-to-surface, picking, overlap detection, drag along surface)
- - same primitives the game uses, no special-casing. Owns the
-  content-integrity tooling that the no-registry model relies on:
-  cheap per-scene reference checks while editing (a placement or
-  trigger whose target instance or asset name does not resolve is
-  flagged locally), a missing-assets view (scan references against
-  the content folder to produce the creative to-build list), and an
-  on-demand project-wide deep scan that verifies every reference and
-  reports dead references, orphaned files, and empty slots with
-  cleanup options. All of it is plain content scanning; an in-memory
-  index may cache results but content stays authoritative. Binary
-  entry at `wok-shell/src/bin/wok.rs` produces the `wok` executable.
-
-### Game
-
-- **`<game>`** - All game-specific runtime logic: actor pool and
-  fixed-timestep integration loop (calls wok-physics math), game
-  cameras (calls wok-physics camera math), animation playback
-  drivers, save/load format and composition over per-crate
-  accessors, multiplayer transport (per multiplayer-model), physics
-  tuning, player controller, input mapping, trigger event routing,
-  effect routing through wok-light's pool, audio cue routing through
-  wok-audio, HUD, menus. Binary entry at `<game>/src/main.rs`.
-
-Game content (scenes, prefabs, lighting curves, audio cue tables)
-lives under `<game>/content/`, produced by the Wok editor. Asset
-source files (meshes, audio, animations, voice) live alongside,
-named by slug.
-
----
-
-## 2. Dependency Graph
-
-Topological order, lowest first. Each crate may depend only on the
-listed crates. Built crates (wok-platform, wok-scene, wok-physics)
-list their actual dependencies; not-yet-built crates list the
-permission ceiling and get tightened to real usage as they land.
+Everything else follows from the principles and the crate descriptions above. What exists today, lowest first:
 
 - **`wok-platform`** - no internal dependencies.
-- **`wok-scene`** - no internal dependencies (pure data, owns its math).
+- **`wok-scene`** - no internal dependencies.
 - **`wok-physics`** - `wok-scene`.
-- **`wok-anim`** - `wok-platform`, `wok-scene`.
-- **`wok-mesh`** - `wok-scene` (MeshGpu and its wok-platform dep
-  arrive with the renderer).
-- **`wok-content`** - `wok-platform`, `wok-scene`, `wok-mesh`.
-- **`wok-audio`** - `wok-platform`, `wok-scene`.
-- **`wok-light`** - `wok-platform`, `wok-scene`, `wok-physics`.
-- **`wok-sequence`** - `wok-platform`, `wok-scene`, `wok-anim`,
-  `wok-light`, `wok-audio`.
-- **`wok-render`** - `wok-platform`, `wok-scene`, `wok-anim`,
-  `wok-light`, `wok-mesh`, `wok-content`.
-- **`wok-shell`** - `wok-platform` and all `wok-*` library crates.
-- **`<game>`** - `wok-platform` and all `wok-*` library crates. A
-  separate project depending on the engine, not a workspace member;
-  listed here to record the dependency direction.
+- **`wok-mesh`** - `wok-scene`.
 
-### Forbidden edges
+As later crates land, each takes on what it genuinely uses under the three rules, and this list grows to match.
 
-First three are Cargo-enforced; remainder are review-enforced.
+## Data flow
 
-1. No `wok-*` or `<game>` depends on `wok-platform` internals
-   beyond its public API.
-2. No `wok-*` depends on `<game>`.
-3. `wok-scene` depends on no other `wok-*`.
-4. `wok-render` does not depend on `wok-sequence` or `wok-shell`.
-5. `wok-content` does not depend on `wok-render`, `wok-physics`,
-   `wok-light`, `wok-sequence`, or `wok-audio`.
-6. `wok-audio` does not depend on `wok-physics`. Audio positioning
-   takes `Vec3`; game passes actor positions in.
-7. `wok-anim` does not depend on `wok-physics`. Pose math is pure;
-   game owns the driver and composes with actor state.
-8. `wok-mesh` does not depend on `wok-content`, `wok-physics`,
-   `wok-light`, `wok-sequence`, or `wok-audio`.
-9. No cycles.
+The engine is a library: the game owns the main loop, holds entity state, and calls into engine functions. Authored content is the starting values the editor produces, and every piece passes through four states:
 
----
+1. **Authored on disk.** JSON files (prefabs, scenes, lighting states) plus sibling binary heightmaps; asset source files named by slug, referenced by name.
+2. **Authored in memory.** Deserialized through wok-scene loaders. The editor mutates this form; the game reads it.
+3. **Runtime arrays.** Produced by `wok-content::transform_chunk`, composing wok-scene slicing, asset-name resolution, and wok-mesh terrain generation. The authored form is no longer referenced.
+4. **Per-frame state.** Computed each frame from the runtime arrays (culling, contacts, lighting interpolation). Not durable.
 
-## 3. Data Flow
-
-Wok is a library. Game owns the main loop, holds entity state, and
-calls into Wok's functions.
-
-Every piece of authored content passes through four states:
-
-1. **Authored on disk.** JSON files; prefabs as stateful shape
-   lists, scenes as chunked prefab placements with lighting and
-   region metadata, lighting states as animation curves, terrain as
-   sibling binary heightmap files. Asset source files live in the
-   content folder, named by slug; references are by name.
-2. **Authored in memory.** Deserialized via `wok-scene` loaders.
-   Editor mutates; game reads.
-3. **Runtime arrays.** Produced by `wok-content::transform_chunk`
-   (composes wok-scene slicing, asset-name resolution, wok-mesh
-   terrain generation). Authored form no longer referenced.
-4. **Per-frame state.** Computed each frame from runtime arrays
-   (frustum culling, collision contacts, lighting interpolation).
-   Not durable.
-
-Data flows downward only. Runtime never writes to authored.
-
-### Transitions
+Data flows downward only; runtime never writes back to authored.
 
 | Transition | Crate(s) | Triggered by |
 |---|---|---|
-| Disk -> Authored memory | `wok-scene::load_*` | Game when needed |
-| Authored memory -> Disk | `wok-scene::save_*` | Editor save |
-| Authored memory -> Runtime arrays | `wok-content::transform_chunk` | Game requests chunk load |
-| Runtime arrays -> Per-frame state | Each system's frame function | Game's main loop |
-| Runtime arrays -> Disposed | `wok-content::release_chunk` | Game requests chunk unload |
+| Disk to authored memory | `wok-scene::load_*` | Game, when needed |
+| Authored memory to disk | `wok-scene::save_*` | Editor save |
+| Authored memory to runtime arrays | `wok-content::transform_chunk` | Game requests chunk load |
+| Runtime arrays to per-frame state | each system's frame function | Game's main loop |
+| Runtime arrays to disposed | `wok-content::release_chunk` | Game requests chunk unload |
 
-Transformation can run synchronously or on the background worker.
+**Persistent state.** The engine has no opinion on save format or world persistence; it exposes per-crate accessors for current state, and the game composes a save from those plus its own. Cross-unload persistence (dropped items, defeated enemies) is game-side, since actors live in the game's pool rather than chunk arrays. Multiplayer is game-layer composition over engine primitives (see `multiplayer-model.md`); the engine never sees the network.
 
-### Persistent state
+**Hot reload.** wok-scene's file watcher detects authored-data changes; the game polls each frame and decides how to respond, typically by re-transforming affected chunks. Hot reload is authored-to-runtime only.
 
-The engine has no opinion on save format, multiplayer transport, or
-world persistence. The engine exposes per-crate accessors for
-current state (dynamic light pool from wok-light, voice pool from
-wok-audio, chunk membership from wok-content, etc.). The game
-composes a save file from those plus its own state (actors,
-cameras, game logic). Save format, version handling, content-
-version checks are game-side.
-
-**Across-chunk-unload persistence** (dropped items remain, defeated
-enemies stay defeated): game maintains a sidecar file alongside
-authored data, queried during chunk load to override placements and
-gate spawner-trigger firing. Actor entities persist naturally
-because they live in the game's pool, not in chunk runtime arrays.
-
-**Multiplayer**: see `multiplayer-model.md`. Game-layer composition
-over engine primitives. Wok never sees the network.
-
-### Hot reload
-
-wok-scene's file watcher detects authored-data changes. Game polls
-each frame and decides how to respond (typically by requesting
-affected chunks be re-transformed). Hot reload is authored -> runtime
-only.
-
----
-
-## 4. Validation
+## Validation
 
 Three levels.
 
-### Level 1: Unit tests (`cargo test`)
+**Level 1: unit tests (`cargo test`).** Each crate covers its own determinism and core invariants: serde round-trips and slicing determinism for wok-scene, primitive queries and integration determinism for wok-physics, mesh determinism for wok-mesh, the scan's dead, missing, and orphan detection, and so on as each crate lands.
 
-Per-crate commitments:
+**Level 2: deterministic replay harness.** Game-owned, since the loops are game-side; the engine provides deterministic primitives and each crate's Level 1 covers its own determinism. A workspace-level integration target loads a known scene, drives a scripted input sequence over N steps, dumps observable state each step, and compares against a stored expected dump. (It currently seeds from wok-physics's tests and moves to its own home once the renderer gives it something to watch.)
 
-- **wok-scene** - JSON round-trip per type; shape-slicing
-  determinism; heightmap round-trip; sampling-function fixtures;
-  per-scene instance-id allocation (monotonic, no reuse).
-- **wok-physics** - every primitive query against fixture geometry;
-  integration determinism; camera math fixtures.
-- **wok-anim** - pose blending and timeline evaluation fixtures.
-- **wok-mesh** - primitive mesh determinism; terrain mesh
-  determinism; GPU upload path with mockable device.
-- **wok-content** - chunk loading state machine; streaming algorithm
-  against synthetic scenes; Vista enforcement; worker protocol
-  round-trip.
-- **wok-audio** - voice pool allocation/eviction; mixing math
-  against fixtures; cue resolution by name.
-- **wok-light** - bake determinism; light pool eviction.
-- **wok-sequence** - timeline evaluation against fixtures.
-- **wok-render** - pipeline assembly and shader compilation. Visual
-  correctness at Level 3.
-- **wok-shell** - panel layout, command palette routing, and
-  reference-scan correctness (dead, missing, and orphan detection
-  against fixture content trees).
-- **wok-platform** - mockable platform abstractions.
+**Level 3: screenshot diff.** Load a known scene with known lighting, place the camera at a known position, render one frame, and compare against a stored reference within a small tolerance for GPU vendor variance. The shadow pass gets extra coverage across sun angles and scene depths.
 
-### Level 2: Deterministic replay harness
-
-Game-owned, since loops are game-side. Engine provides deterministic
-primitives; each crate's Level 1 covers its own determinism.
-Workspace-level integration tests in `wok-engine/tests-integration/`
-exercise composition through a minimal test game loop:
-
-1. Load known authored scene.
-2. Spawn actors at known positions.
-3. Drive scripted input sequence over N steps.
-4. Dump observable state at each step.
-5. Compare against stored expected dump.
-
-### Level 3: Screenshot diff
-
-1. Load known scene with known lighting.
-2. Place camera at known position.
-3. Render one frame.
-4. Compare against stored reference, pixel-by-pixel with small
-   tolerance for GPU vendor variance.
-
-Baseline covers each rendering pass; shadow pass gets extra fixture
-coverage across sun angles and scene depths.
-
-### Out of scope
-
-- **Hardware-specific GPU bugs.** Require running on affected
-  hardware; CI doesn't catch unless CI runs there.
-- **Visual quality judgments.** Screenshot diff catches regression
-  from known-good, not whether known-good is good.
-- **Performance regressions.** Deferred until the engine runs a real
-  scene end-to-end. Then perf becomes a continuous concern
-  baselined against dev hardware (laptops first, Steam Deck second);
-  no separate harness.
+**Out of scope.** Hardware-specific GPU bugs need the affected hardware. Visual quality judgments are not testable: the diff catches regression from a known-good frame, not whether that frame is any good. Performance is deferred until the engine runs a real scene end to end, then baselined against dev hardware (laptops first, Steam Deck second).
