@@ -33,6 +33,7 @@ use crate::constants::{
 use crate::content::LoadedContent;
 use crate::follow::{self, FollowCamera};
 use crate::intent::{Intent, map_input};
+use crate::jump::JumpLatch;
 use crate::sim::{self, Player, StepInput};
 use crate::world::{World, chunk_origin};
 
@@ -97,6 +98,8 @@ pub struct TasteApp {
     player: Player,
     /// The sim state one fixed step behind `player`: the other end of the draw interpolation.
     player_prev: Player,
+    /// Pending jump press, latched across frames until a fixed step consumes it (`crate::jump`).
+    jump: JumpLatch,
     camera: FollowCamera,
     clock: FixedClock,
     size: (u32, u32),
@@ -124,6 +127,7 @@ impl TasteApp {
             world,
             player,
             player_prev: player,
+            jump: JumpLatch::new(),
             camera,
             clock: FixedClock::new(SIM_DT, MAX_STEPS_PER_FRAME),
             size: (0, 0),
@@ -132,12 +136,17 @@ impl TasteApp {
     }
 
     /// Run this frame's fixed steps. The camera yaw is resolved into a move direction once per
-    /// frame (the camera turns at frame rate, between steps it is constant), and the jump edge is
-    /// consumed by the first step so a multi-step catch-up frame cannot bounce twice on one press.
+    /// frame (the camera turns at frame rate, between steps it is constant). The jump edge goes
+    /// through the latch (`crate::jump`): it survives a frame that runs zero steps, fires on the
+    /// first grounded step inside the buffer window, and is consumed there, so a multi-step
+    /// catch-up frame still cannot bounce twice on one press.
     fn simulate(&mut self, intent: &Intent, steps: u32) {
+        if intent.jump {
+            self.jump.press();
+        }
         let move_dir = sim::move_direction(self.camera.yaw, intent.move_forward, intent.move_right);
-        for i in 0..steps {
-            let input = StepInput { move_dir, jump: intent.jump && i == 0 };
+        for _ in 0..steps {
+            let input = StepInput { move_dir, jump: self.jump.consume(self.player.grounded) };
             self.player_prev = self.player;
             self.player = sim::step(self.player, input, &self.world);
         }

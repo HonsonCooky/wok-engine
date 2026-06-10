@@ -172,7 +172,7 @@ fn sample_light() -> LightState {
         ambient: Vec3::new(0.12, 0.12, 0.16),
         fog: Fog { color: Vec3::new(0.65, 0.70, 0.80), start: 60.0, end: 260.0 },
         sky: SkyGradient { horizon: Vec3::new(0.65, 0.70, 0.80), zenith: Vec3::new(0.25, 0.45, 0.85) },
-        cel: CelParams { band_count: 16, transition_softness: 0.08, rim_intensity: 0.35 },
+        cel: CelParams { band_count: 32, transition_softness: 0.08, rim_intensity: 0.35 },
     }
 }
 

@@ -56,8 +56,9 @@ pub struct SkyGradient {
 }
 
 /// Cel-shading tunables. `band_count` is how many discrete lighting bands the renderer quantizes
-/// into (the HLD pins the authored range at 2 to 8; not enforced here). `transition_softness` is
-/// the width of the blend between bands, `rim_intensity` the strength of the silhouette rim light.
+/// into, authored per scene with no upper clamp (per the HLD, low counts read as cel and high
+/// counts as smooth shading; not enforced here). `transition_softness` is the width of the blend
+/// between bands, `rim_intensity` the strength of the silhouette rim light.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CelParams {

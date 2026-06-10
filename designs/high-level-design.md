@@ -58,7 +58,7 @@ A crate earns its boundary by being substantial in scope or independent in shape
 - **`wok-sequence`** - cutscene and scripted-sequence data and pure evaluators; the driver that ticks a timeline is game code, and the authoring UI is in the editor.
 
 - **`wok-render`** - the renderer: a forward pipeline, a single shadow map pass, lighting passes over wok-light's baked and dynamic data, a parametric gradient sky, fog, and post-process. It consumes wok-scene, wok-anim, wok-light, wok-mesh, and wok-content, and the game supplies the render list each frame. Visual commitments:
-  - **Cel shading.** Lighting quantized into discrete bands with rim light for silhouettes; per-scene tunables for band count (2-8), rim, ambient floor, and fog. Terrain uses the same pipeline.
+  - **Banded lighting, authored per scene.** Lighting quantized into discrete bands with smoothstep transitions and rim light for silhouettes. Band count is an authored per-scene value with no upper clamp: low counts (2-8) read as cel, high counts (16+) read as smooth shading. The current authored look is smooth (32 bands); the band machinery, rim, ambient floor, and fog are the mechanism at any count. Terrain uses the same pipeline.
   - **Alpha cutout transparency only.** No sorted blending; water, glass, smoke, and effects use stylized cutout.
   - **Fog always on.** Fog distance sets render distance; fog colour drives the sky's horizon.
   - **Parametric gradient sky.** A horizon-to-zenith gradient from the lighting state, a sun disc, optional stars and a cloud plane; no sky textures.
@@ -87,7 +87,7 @@ Everything else follows from the principles and the crate descriptions above. Wh
 - **`wok-physics`** - `wok-scene`.
 - **`wok-mesh`** - `wok-scene`, `wok-platform` (taken when MeshGpu landed with the renderer).
 - **`wok-content`** - `wok-scene`, `wok-mesh`.
-- **`wok-render`** - `wok-platform`, `wok-mesh`, `wok-light`, `wok-scene` (taken when the shadow pass landed: the frame API's shadow region is wok-scene's `Aabb`).
+- **`wok-render`** - `wok-platform`, `wok-mesh`, `wok-light`, `wok-scene` (taken with the shadow pass, for the canonical Aabb).
 
 As later crates land, each takes on what it genuinely uses under the three rules, and this list grows to match.
 

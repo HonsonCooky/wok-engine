@@ -7,7 +7,7 @@
 //!
 //! Sanitizing happens here, once per frame, rather than per fragment in the shader: the sun
 //! direction is normalized (wok-light documents it may arrive unnormalized), the band count is
-//! floored at 2 so the band divisor stays positive (the HLD authors bands in 2..=8), the
+//! floored at 2 so the band divisor stays positive (the HLD sets no upper clamp), the
 //! transition softness is kept strictly positive so the band smoothstep's edges never coincide,
 //! and the fog end is kept strictly past its start so the fog divisor is never zero.
 

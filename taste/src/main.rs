@@ -26,6 +26,7 @@ mod content;
 mod diagnose;
 mod follow;
 mod intent;
+mod jump;
 #[cfg(test)]
 mod replay;
 mod sim;

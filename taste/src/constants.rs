@@ -43,6 +43,13 @@ pub const MOVE_SPEED: f32 = 6.0;
 /// Upward velocity granted by a jump, in m/s. With this gravity it clears about 1.3m at the apex.
 pub const JUMP_VELOCITY: f32 = 8.0;
 
+/// How long a jump press stays buffered waiting for ground, in seconds of simulation time. A
+/// press up to this long before landing fires on the landing step instead of being swallowed by
+/// an airborne one (`crate::jump`). Around 100ms is the feel-polish standard: long enough that a
+/// press timed against the visible landing always lands, short enough that a stale press never
+/// fires a visibly delayed jump.
+pub const JUMP_BUFFER_S: f32 = 0.10;
+
 /// How far above the terrain surface the player spawns, in metres: high enough that the opening
 /// moments show gravity and the landing.
 pub const SPAWN_HEIGHT: f32 = 10.0;
