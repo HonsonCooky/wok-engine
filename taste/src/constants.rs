@@ -141,11 +141,13 @@ pub const MOUSE_LOOK_SENSITIVITY: f32 = 0.0063;
 ///
 /// Mouse verdict, after a second pass: vertical flipped (dragging down raises the camera),
 /// horizontal base (dragging right turns the view right - the full both-axis flip overcorrected).
-/// Stick verdict: the base mapping as it always was.
+/// Stick verdict, after its own second pass: vertical flipped too (pushing forward lowers the
+/// camera), horizontal base. The two devices landed on the same shape, but by separate verdicts;
+/// the pairs stay per device so the next pass can move one without dragging the other.
 pub const MOUSE_INVERT_X: bool = false;
 pub const MOUSE_INVERT_Y: bool = true;
 pub const STICK_INVERT_X: bool = false;
-pub const STICK_INVERT_Y: bool = false;
+pub const STICK_INVERT_Y: bool = true;
 
 // ---- gamepad ----
 

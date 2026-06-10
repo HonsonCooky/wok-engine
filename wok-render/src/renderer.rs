@@ -52,6 +52,21 @@ pub struct LineSegment {
     pub color: Vec3,
 }
 
+/// Depth policy for one [`Renderer::render_lines`] call. The two modes are one depth-compare
+/// function apart (LessEqual vs Always; neither writes depth), which is why this is a parameter
+/// and not a second method: the variation is an argument's worth of pipeline state, and a
+/// parameter makes every call site state whether its lines are scene-anchored or x-ray.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DepthMode {
+    /// Depth-tested against the frame's geometry: hidden lines hide. For world-anchored cues
+    /// that should behave like scene elements (markers, reticles).
+    Tested,
+    /// Drawn regardless of the depth buffer (compare Always, still no depth write): the whole
+    /// line lands even behind geometry. For diagnostics describing structure the geometry
+    /// occludes - a hitbox cage is useless if it hides behind the surface it describes.
+    XRay,
+}
+
 /// The forward renderer: depth buffer, frame uniforms, per-draw storage, and the sky and mesh
 /// pipelines. One per render target size; create with [`Renderer::new`] against the target's
 /// texture format and keep [`Renderer::resize`] in step with the target.
@@ -76,9 +91,13 @@ pub struct Renderer {
     draw_group: wgpu::BindGroup,
     draw_capacity: usize,
     draw_stride: u64,
-    line_pipeline: wgpu::RenderPipeline,
-    line_buffer: wgpu::Buffer,
-    line_capacity: usize,
+    // Line state is per [`DepthMode`], indexed by `DepthMode as usize`. Separate buffers are
+    // load-bearing, not just tidy: `queue.write_buffer` executes at submit, before any recorded
+    // pass runs, so a frame drawing both modes through one encoder would have a shared buffer's
+    // second write clobber what the first pass draws.
+    line_pipelines: [wgpu::RenderPipeline; 2],
+    line_buffers: [wgpu::Buffer; 2],
+    line_capacities: [usize; 2],
 }
 
 impl Renderer {
@@ -109,7 +128,17 @@ impl Renderer {
             pipeline::mesh_pipeline(device, surface_format, &frame_layout, &draw_layout, &shadow_layout);
         let sky_pipeline = pipeline::sky_pipeline(device, surface_format, &frame_layout);
         let shadow_pipeline = pipeline::shadow_pipeline(device, &frame_layout, &draw_layout);
-        let line_pipeline = pipeline::line_pipeline(device, surface_format, &frame_layout);
+        // Indexed by `DepthMode as usize`: Tested then XRay.
+        let line_pipelines = [
+            pipeline::line_pipeline(
+                device, surface_format, &frame_layout,
+                "wok_render_line_pipeline", wgpu::CompareFunction::LessEqual,
+            ),
+            pipeline::line_pipeline(
+                device, surface_format, &frame_layout,
+                "wok_render_line_xray_pipeline", wgpu::CompareFunction::Always,
+            ),
+        ];
         let depth_view = pipeline::depth_texture(device, width, height);
 
         let shadow_view = pipeline::shadow_texture(device, shadow_map_size);
@@ -163,9 +192,12 @@ impl Renderer {
             draw_group,
             draw_capacity: INITIAL_DRAW_CAPACITY,
             draw_stride,
-            line_pipeline,
-            line_buffer: line_buffer(device, INITIAL_LINE_CAPACITY),
-            line_capacity: INITIAL_LINE_CAPACITY,
+            line_pipelines,
+            line_buffers: [
+                line_buffer(device, INITIAL_LINE_CAPACITY),
+                line_buffer(device, INITIAL_LINE_CAPACITY),
+            ],
+            line_capacities: [INITIAL_LINE_CAPACITY; 2],
         }
     }
 
@@ -293,11 +325,14 @@ impl Renderer {
 
     /// Draw debug `lines` over the frame [`Renderer::render`] just produced, into the same
     /// `target` through the same `encoder`. Call it after `render` in the same frame: the pass
-    /// loads the forward pass's color and depth instead of clearing, so lines are depth-tested
-    /// against the frame's geometry (hidden lines hide), and the camera uniform `render` uploaded
-    /// is the one the lines project through. Lines are unlit, unfogged, and outside the shadow
-    /// pass entirely: they neither cast nor receive. The vertex buffer is reused across frames
-    /// and rewritten per call, growing like the draw buffer when a frame's list outgrows it.
+    /// loads the forward pass's color and depth instead of clearing, so `depth` decides what the
+    /// frame's geometry does to the lines ([`DepthMode::Tested`] hides hidden lines,
+    /// [`DepthMode::XRay`] draws through), and the camera uniform `render` uploaded is the one
+    /// the lines project through. Lines are unlit, unfogged, and outside the shadow pass
+    /// entirely: they neither cast nor receive. Each mode owns a vertex buffer, reused across
+    /// frames and rewritten per call (growing like the draw buffer), so a frame may submit one
+    /// call of each mode through one encoder; a second call of the same mode in one frame would
+    /// overwrite the first's vertices before either pass runs.
     pub fn render_lines(
         &mut self,
         device: &wgpu::Device,
@@ -305,13 +340,15 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         lines: &[LineSegment],
+        depth: DepthMode,
     ) {
         if lines.is_empty() {
             return;
         }
-        if lines.len() > self.line_capacity {
-            self.line_capacity = lines.len().next_power_of_two();
-            self.line_buffer = line_buffer(device, self.line_capacity);
+        let slot = depth as usize;
+        if lines.len() > self.line_capacities[slot] {
+            self.line_capacities[slot] = lines.len().next_power_of_two();
+            self.line_buffers[slot] = line_buffer(device, self.line_capacities[slot]);
         }
 
         let mut floats: Vec<f32> = Vec::with_capacity(lines.len() * 12);
@@ -321,7 +358,7 @@ impl Renderer {
                 line.end.x, line.end.y, line.end.z, line.color.x, line.color.y, line.color.z,
             ]);
         }
-        queue.write_buffer(&self.line_buffer, 0, bytemuck::cast_slice(&floats));
+        queue.write_buffer(&self.line_buffers[slot], 0, bytemuck::cast_slice(&floats));
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("wok_render_line_pass"),
@@ -341,9 +378,9 @@ impl Renderer {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        pass.set_pipeline(&self.line_pipeline);
+        pass.set_pipeline(&self.line_pipelines[slot]);
         pass.set_bind_group(0, &self.frame_group, &[]);
-        pass.set_vertex_buffer(0, self.line_buffer.slice(..));
+        pass.set_vertex_buffer(0, self.line_buffers[slot].slice(..));
         pass.draw(0..lines.len() as u32 * 2, 0..1);
     }
 }

@@ -19,11 +19,14 @@ use wok_scene::Aabb;
 use crate::constants::{PLAYER_RADIUS, PLAYER_SEGMENT};
 use crate::world::World;
 
-/// Hitbox cages: a saturated green nothing in the scene palette uses (the terrain's green is muted).
-const HITBOX_COLOR: Vec3 = Vec3::new(0.15, 1.0, 0.3);
+/// Hitbox cages: pure green at full saturation. The overlay draws x-ray (through the geometry it
+/// describes), so a cage line lands on lit surface of any color and must out-shout all of it;
+/// nothing in the scene palette is pure green (the terrain's green is muted).
+const HITBOX_COLOR: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 
-/// The player capsule cage: bright yellow, readable over the bean's signal orange.
-const CAPSULE_COLOR: Vec3 = Vec3::new(1.0, 0.95, 0.2);
+/// The player capsule cage: pure yellow at full saturation, readable over the bean's signal
+/// orange even when the x-ray draw puts the cage on top of the body.
+const CAPSULE_COLOR: Vec3 = Vec3::new(1.0, 1.0, 0.0);
 
 /// The look-ahead reticle: a neutral grey, present without shouting (it is framing feedback, not a
 /// gameplay crosshair).

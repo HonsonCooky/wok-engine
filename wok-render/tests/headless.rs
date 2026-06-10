@@ -7,7 +7,7 @@ use glam::{Mat4, Vec3};
 use wok_light::{CelParams, Fog, LightState, SkyGradient, Sun};
 use wok_mesh::MeshGpu;
 use wok_platform::wgpu;
-use wok_render::{Camera, LineSegment, RenderItem, Renderer};
+use wok_render::{Camera, DepthMode, LineSegment, RenderItem, Renderer};
 use wok_scene::Aabb;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -58,8 +58,8 @@ fn renderer_builds_without_validation_errors() {
 }
 
 /// Render one frame into an offscreen texture and read the RGBA8 pixels back, with `lines`
-/// overlaid after the meshes when any are given. SIZE is chosen so a row (SIZE * 4 bytes) already
-/// meets wgpu's 256-byte copy row alignment.
+/// overlaid after the meshes (under `depth`'s policy) when any are given. SIZE is chosen so a
+/// row (SIZE * 4 bytes) already meets wgpu's 256-byte copy row alignment.
 fn render_frame(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -69,6 +69,7 @@ fn render_frame(
     shadow_region: Aabb,
     items: &[RenderItem],
     lines: &[LineSegment],
+    depth: DepthMode,
 ) -> Vec<u8> {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("smoke_target"),
@@ -91,7 +92,7 @@ fn render_frame(
     let mut encoder =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("smoke") });
     renderer.render(device, queue, &mut encoder, &view, camera, light, shadow_region, items);
-    renderer.render_lines(device, queue, &mut encoder, &view, lines);
+    renderer.render_lines(device, queue, &mut encoder, &view, lines, depth);
     encoder.copy_texture_to_buffer(
         texture.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
@@ -132,7 +133,9 @@ fn render_smoke_sky_gradient_and_geometry_land() {
     let light = LightState::default();
     let region = Aabb::new(Vec3::splat(-3.0), Vec3::splat(3.0));
 
-    let sky_only = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &[], &[]);
+    let sky_only = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &[], &[], DepthMode::Tested,
+    );
 
     // Structural property 1: the sky pass produced a vertical gradient, not a uniform clear.
     let first = &sky_only[0..4];
@@ -148,7 +151,9 @@ fn render_smoke_sky_gradient_and_geometry_land() {
         mesh: &cube,
         color: Vec3::new(1.0, 0.1, 0.1),
     }];
-    let with_cube = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &items, &[]);
+    let with_cube = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &items, &[], DepthMode::Tested,
+    );
     let differing = sky_only
         .chunks_exact(4)
         .zip(with_cube.chunks_exact(4))
@@ -228,7 +233,9 @@ fn shadow_smoke_a_floating_cube_darkens_the_plane_behind_it() {
     ];
     let region = Aabb::new(Vec3::new(-12.0, -0.5, -12.0), Vec3::new(12.0, 4.5, 12.0));
 
-    let pixels = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &items, &[]);
+    let pixels = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &items, &[], DepthMode::Tested,
+    );
 
     // The cube (2m wide, bottom at 2m, top at 4m) under a 45 degree sun shadows the plane across
     // x in roughly [1, 5]; (3.5, 0, 0) sits inside that band and clear of the cube's screen
@@ -274,8 +281,17 @@ fn line_pipeline_builds_without_validation_errors() {
     let region = Aabb::new(Vec3::splat(-3.0), Vec3::splat(3.0));
     let _frame = render_frame(
         &device, &queue, &mut renderer, &camera, &LightState::default(), region, &[], &lines,
+        DepthMode::Tested,
     );
     assert_no_validation_error(&device, "render_lines");
+
+    // The x-ray variant records and submits cleanly too: same shader, the other depth compare.
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let _frame = render_frame(
+        &device, &queue, &mut renderer, &camera, &LightState::default(), region, &[], &lines,
+        DepthMode::XRay,
+    );
+    assert_no_validation_error(&device, "render_lines x-ray");
 }
 
 #[test]
@@ -295,14 +311,17 @@ fn line_smoke_a_line_lands_its_pixels_in_its_own_color() {
     let light = LightState::default();
     let region = Aabb::new(Vec3::splat(-3.0), Vec3::splat(3.0));
 
-    let without = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &[], &[]);
+    let without = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &[], &[], DepthMode::Tested,
+    );
     let lines = [LineSegment {
         start: Vec3::new(-3.0, 0.0, 0.0),
         end: Vec3::new(3.0, 0.0, 0.0),
         color: Vec3::new(1.0, 0.0, 0.0),
     }];
-    let with =
-        render_frame(&device, &queue, &mut renderer, &camera, &light, region, &[], &lines);
+    let with = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &[], &lines, DepthMode::Tested,
+    );
 
     let line_pixels = without
         .chunks_exact(4)
@@ -319,5 +338,68 @@ fn line_smoke_a_line_lands_its_pixels_in_its_own_color() {
     );
     for px in line_pixels {
         assert_eq!(&px[0..3], &[255, 0, 0], "line pixel is not the authored color: {px:?}");
+    }
+}
+
+#[test]
+fn xray_smoke_a_line_behind_a_mesh_still_lands_its_pixels() {
+    // The mode pair's whole point, exercised from both sides: a red line entirely inside a cube's
+    // screen footprint and behind it in depth must vanish depth-tested (the control: occlusion
+    // works) and land its pixels verbatim x-ray (compare Always reads no depth).
+    let (device, queue) = device();
+    let mut renderer = Renderer::new(&device, FORMAT, SIZE, SIZE);
+
+    let eye = Vec3::new(0.0, 0.0, 6.0);
+    let camera = Camera {
+        view_proj: Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 400.0)
+            * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y),
+        eye,
+    };
+    let light = LightState::default();
+    let region = Aabb::new(Vec3::splat(-3.0), Vec3::splat(3.0));
+
+    // The 2m cube spans [-1, 1]^3; the line sits at z = -2 (behind its back face) and spans only
+    // half its width, so from the camera on +Z the cube's footprint covers the line completely.
+    let cube = MeshGpu::upload(&device, &wok_mesh::cube());
+    let items = [RenderItem {
+        transform: Mat4::from_scale(Vec3::splat(2.0)),
+        mesh: &cube,
+        color: Vec3::splat(0.8),
+    }];
+    let lines = [LineSegment {
+        start: Vec3::new(-0.5, 0.0, -2.0),
+        end: Vec3::new(0.5, 0.0, -2.0),
+        color: Vec3::new(1.0, 0.0, 0.0),
+    }];
+
+    let cube_only = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &items, &[], DepthMode::Tested,
+    );
+    let tested = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &items, &lines, DepthMode::Tested,
+    );
+    assert_eq!(
+        cube_only, tested,
+        "a fully occluded depth-tested line changed pixels; the occlusion control is broken"
+    );
+
+    let xray = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &items, &lines, DepthMode::XRay,
+    );
+    let line_pixels = cube_only
+        .chunks_exact(4)
+        .zip(xray.chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .map(|(_, b)| b)
+        .collect::<Vec<_>>();
+    // The 1m line is 8m from the eye; under the 60 degree fov that projects to roughly a tenth of
+    // the SIZE-wide frame. Require a generous fraction so the assertion stays structural.
+    assert!(
+        line_pixels.len() > (SIZE / 16) as usize,
+        "only {} pixels changed; the x-ray line did not land through the cube",
+        line_pixels.len()
+    );
+    for px in line_pixels {
+        assert_eq!(&px[0..3], &[255, 0, 0], "x-ray line pixel is not the authored color: {px:?}");
     }
 }

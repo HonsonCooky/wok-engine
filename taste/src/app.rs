@@ -14,8 +14,9 @@
 //! chunk-origin composition of terrain and placements, plus one item the editor does not have - the
 //! player, a true capsule mesh generated at the collider's exact dimensions (`wok_mesh::capsule_mesh`
 //! paired with `Capsule::upright`) in a color nothing else uses. F1 toggles the hitbox overlay
-//! (`crate::debug`): every static hitbox AABB and the player capsule as line cages, drawn through
-//! the renderer's debug line pass after the meshes.
+//! (`crate::debug`): every static collider and the player capsule as line cages, drawn x-ray
+//! through the renderer's debug line pass after the meshes so the cages read through the very
+//! geometry they describe.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -27,7 +28,7 @@ use wok_mesh::{MeshGpu, capsule_mesh, primitive_mesh};
 use wok_platform::winit::keyboard::NamedKey;
 use wok_platform::winit::window::CursorGrabMode;
 use wok_platform::{App, FrameCtx, Platform, gfx};
-use wok_render::{Camera, RenderItem, Renderer};
+use wok_render::{Camera, DepthMode, RenderItem, Renderer};
 use wok_scene::{Aabb, ChunkCoord, Primitive, SurfaceTag, VisibleItem};
 
 use crate::clock::FixedClock;
@@ -236,20 +237,30 @@ impl TasteApp {
             self.shadow_region,
             &items,
         );
-        // One line-pass submission carries both overlays: the F1 hitbox cages and the look-ahead
-        // reticle (a small cross at the camera's aim point, `SHOW_RETICLE`).
-        let mut lines =
-            if self.debug_hitboxes { debug::debug_lines(&self.world, view_pos) } else { Vec::new() };
-        if SHOW_RETICLE {
-            debug::reticle_lines(self.camera.look_target(), &mut lines);
-        }
-        if !lines.is_empty() {
+        // Two line-pass submissions, one per depth policy. The F1 hitbox cages draw x-ray: they
+        // describe colliders the drawn geometry encloses, so depth-tested they hide behind the
+        // very surfaces they diagnose. The look-ahead reticle stays depth-tested: it is a
+        // world-anchored framing cue, and reading through hills would lie about where it sits.
+        if self.debug_hitboxes {
             renderer.render_lines(
                 &ctx.platform.device,
                 &ctx.platform.queue,
                 &mut frame.encoder,
                 &frame.view,
-                &lines,
+                &debug::debug_lines(&self.world, view_pos),
+                DepthMode::XRay,
+            );
+        }
+        if SHOW_RETICLE {
+            let mut reticle = Vec::new();
+            debug::reticle_lines(self.camera.look_target(), &mut reticle);
+            renderer.render_lines(
+                &ctx.platform.device,
+                &ctx.platform.queue,
+                &mut frame.encoder,
+                &frame.view,
+                &reticle,
+                DepthMode::Tested,
             );
         }
         frame.finish(ctx.platform);

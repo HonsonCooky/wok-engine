@@ -262,15 +262,18 @@ pub(crate) fn shadow_pipeline(
     })
 }
 
-/// The debug line pipeline: LineList topology, unlit vertex color out, drawn after the meshes in
-/// the frame's forward pass output. Depth-tested against the depth the mesh pass wrote (hidden
-/// geometry hides its lines too) but compared LessEqual and not written: a line traced exactly on
-/// a surface - an AABB edge on a box face - must not lose the tie to the face that defines it,
-/// and lines have no later pass to occlude. No culling: a line has no winding.
+/// A debug line pipeline: LineList topology, unlit vertex color out, drawn after the meshes in
+/// the frame's forward pass output. `depth_compare` is the one state the renderer's two line
+/// modes differ in: LessEqual depth-tests against the depth the mesh pass wrote (hidden geometry
+/// hides its lines, but a line traced exactly on a surface - an AABB edge on a box face - keeps
+/// the tie to the face that defines it), and Always ignores the depth buffer for x-ray overlays.
+/// Neither writes depth: lines have no later pass to occlude. No culling: a line has no winding.
 pub(crate) fn line_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     frame_layout: &wgpu::BindGroupLayout,
+    label: &str,
+    depth_compare: wgpu::CompareFunction,
 ) -> wgpu::RenderPipeline {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("wok_render_line_shader"),
@@ -282,7 +285,7 @@ pub(crate) fn line_pipeline(
         push_constant_ranges: &[],
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("wok_render_line_pipeline"),
+        label: Some(label),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &module,
@@ -297,7 +300,7 @@ pub(crate) fn line_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: false,
-            depth_compare: wgpu::CompareFunction::LessEqual,
+            depth_compare,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),

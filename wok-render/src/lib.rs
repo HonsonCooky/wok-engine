@@ -18,9 +18,11 @@
 //!
 //! After the frame, a caller may overlay debug lines: [`Renderer::render_lines`] draws a list of
 //! [`LineSegment`]s (world-space endpoints plus a flat color) through the same camera, unlit and
-//! unfogged, depth-tested against the frame's geometry, outside the shadow pass entirely. A
-//! diagnostic overlay, not a scene element; it exists so applications can draw hitboxes and other
-//! invisible structure without inventing degenerate meshes.
+//! unfogged, outside the shadow pass entirely. The caller's [`DepthMode`] decides whether the
+//! lines depth-test against the frame's geometry (world-anchored cues) or draw through it (x-ray
+//! diagnostics: a hitbox cage must read even behind the surface it describes). A diagnostic
+//! overlay, not a scene element; it exists so applications can draw hitboxes and other invisible
+//! structure without inventing degenerate meshes.
 //!
 //! ## The shadow map
 //!
@@ -65,4 +67,4 @@ mod renderer;
 mod shadow;
 mod uniforms;
 
-pub use renderer::{Camera, DEFAULT_SHADOW_MAP_SIZE, LineSegment, RenderItem, Renderer};
+pub use renderer::{Camera, DEFAULT_SHADOW_MAP_SIZE, DepthMode, LineSegment, RenderItem, Renderer};

@@ -11,9 +11,9 @@
 //! there is no held-button gate. Keyboard and gamepad coexist by summation: an idle device
 //! contributes zero, so whichever moved last is what the player feels, with no device-switching
 //! state. The two look devices differ in kind - the mouse reports a displacement, the stick a held
-//! rate - so the stick is integrated by the frame dt; and they differ in feel - the play-test
-//! verdicts came back opposite - so each device carries its own inversion pair (`MOUSE_INVERT_*`,
-//! `STICK_INVERT_*`), applied per device before the sum.
+//! rate - so the stick is integrated by the frame dt; and feel is judged per device - each
+//! play-test verdict lands on one device alone - so each carries its own inversion pair
+//! (`MOUSE_INVERT_*`, `STICK_INVERT_*`), applied per device before the sum.
 
 use glam::Vec2;
 use wok_platform::gilrs::Button;
@@ -298,10 +298,10 @@ mod tests {
 
     #[test]
     fn the_right_stick_orbits_as_a_rate_integrated_by_dt() {
-        // The stick verdict: the base view-turn mapping, unchanged. Rightward deflection turns the
-        // view right (negative yaw delta), and the contribution is proportional to dt because
-        // deflection is a held rate. This must stay pinned while the mouse is flipped: the
-        // inversion pairs are per device.
+        // The stick's horizontal verdict: the base view-turn mapping. Rightward deflection turns
+        // the view right (negative yaw delta), and the contribution is proportional to dt because
+        // deflection is a held rate. This must stay pinned while the stick's vertical is flipped:
+        // the inversion is per axis as well as per device.
         let one = map_input(&input_with_pad(pad((0.0, 0.0), (1.0, 0.0), false)), DT);
         assert!((one.look_delta.x - -(STICK_LOOK_RATE * DT)).abs() < 1e-6, "got {:?}", one.look_delta);
 
@@ -310,12 +310,12 @@ mod tests {
     }
 
     #[test]
-    fn a_forward_stick_push_raises_the_camera() {
-        // The stick's vertical pin, separate from the mouse's: pushing the right stick forward
-        // (negative y in the platform's screen convention) raises the camera - a positive pitch
-        // delta under the base mapping's sign.
+    fn a_forward_stick_push_lowers_the_camera() {
+        // The stick's vertical pin, separate from the mouse's: the flipped verdict means pushing
+        // the right stick forward (negative y in the platform's screen convention) lowers the
+        // camera - a negative pitch delta, the inverse of the base mapping's sign.
         let look = map_input(&input_with_pad(pad((0.0, 0.0), (0.0, -1.0), false)), DT).look_delta;
-        assert!(look.y > 0.0, "a forward push should raise the camera (positive pitch): {look:?}");
+        assert!(look.y < 0.0, "a forward push should lower the camera (negative pitch): {look:?}");
     }
 
     #[test]
