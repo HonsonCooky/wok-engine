@@ -108,10 +108,13 @@ pub const CAMERA_TARGET_LIFT: f32 = 0.35;
 /// Minimum height the camera keeps above the terrain surface under it, in metres.
 pub const CAMERA_TERRAIN_MARGIN: f32 = 0.4;
 
-/// How far past the anchor, along the camera's view forward, the look-at point sits, in metres.
-/// Looking at the anchor itself centres the player and wastes the frame's lower half on ground
-/// already travelled; leading the view drops the player to low-centre and spends the frame on
-/// where they are going. Eye, orbit, and arm math are untouched: this only re-aims the view.
+/// How far past the anchor, along the camera's horizontal forward, the look-at point sits at
+/// level pitch, in metres. Looking at the anchor itself centres the player and wastes the frame's
+/// lower half on ground already travelled; leading the view drops the player to low-centre and
+/// spends the frame on where they are going. The live lead scales by cos(pitch)
+/// (`FollowCamera::look_target`): a fixed lead under a steep downward pitch pushes the player off
+/// the screen's bottom edge, so a vertical view aims back at the anchor and centres the player.
+/// Eye, orbit, and arm math are untouched: this only re-aims the view.
 pub const LOOK_AHEAD_M: f32 = 4.0;
 
 /// Vertical trim on the look-at point, in metres, for fine framing on top of the lead. Zero until

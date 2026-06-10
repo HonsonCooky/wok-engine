@@ -14,7 +14,7 @@
 //!     eye      = boom_point(anchor, dir, arm)
 //!     position = terrain_floor(eye)                                        vertical clamp; if it engaged,
 //!     pitch, arm <- recomputed from position - anchor                      the clamp writes the orbit back
-//!     aim      = anchor + horizontal_forward * LOOK_AHEAD_M (+ lift)       the view leads ahead (render only)
+//!     aim      = anchor + horizontal_forward * LOOK_AHEAD_M * cos(pitch) (+ lift)   the view leads ahead (render only)
 //!
 //! The anchor is the boom's hanging point: the player's draw position plus the look-target lift,
 //! trailed with one short smooth, vertical included so jumps and falls track. The arm asymmetry is
@@ -83,23 +83,27 @@ impl FollowCamera {
         }
     }
 
-    /// The point the camera aims at: the anchor led `LOOK_AHEAD_M` along the camera's horizontal
-    /// forward (the yaw direction at zero pitch, the same "forward" movement resolves against),
-    /// trimmed by `LOOK_AHEAD_LIFT_M`. The lead must be horizontal: along the pitched boom axis
-    /// the aim stays collinear with the eye and anchor and the framing would not change at all.
-    /// Led flat, the eye-to-aim ray passes over the anchor, so the player drops to low-centre and
-    /// the pitch the player holds decides how strongly. The eye, orbit, and arm math never see
+    /// The point the camera aims at: the anchor led `LOOK_AHEAD_M * cos(pitch)` along the
+    /// camera's horizontal forward (the yaw direction at zero pitch, the same "forward" movement
+    /// resolves against), trimmed by `LOOK_AHEAD_LIFT_M`. The lead must be horizontal: along the
+    /// pitched boom axis the aim stays collinear with the eye and anchor and the framing would
+    /// not change at all. Led flat, the eye-to-aim ray passes over the anchor, so the player
+    /// drops to low-centre and the pitch the player holds decides how strongly - which is also
+    /// why the lead scales by cos(pitch): a fixed horizontal lead under a steep downward pitch
+    /// drags the player to the screen's bottom edge, so level views lead in full and a vertical
+    /// view aims back at the anchor, centring the player. The eye, orbit, and arm math never see
     /// this point.
     pub fn look_target(&self) -> Vec3 {
         let ahead = -boom_direction(self.yaw, 0.0);
-        self.anchor + ahead * LOOK_AHEAD_M + Vec3::Y * LOOK_AHEAD_LIFT_M
+        self.anchor + ahead * (LOOK_AHEAD_M * self.pitch.cos()) + Vec3::Y * LOOK_AHEAD_LIFT_M
     }
 
     /// The combined view-projection matrix, looking from the camera at its look-ahead target, with
     /// the far plane supplied per frame (fog distance sets render distance, per the HLD).
     /// `perspective_rh` maps depth to `0..=1`, wgpu's clip-space convention. Should eye and target
-    /// ever coincide (a zero look-ahead on a fully collapsed boom) the look direction degenerates;
-    /// fall back to the boom's own axis so the matrix stays finite.
+    /// ever coincide (a vertical pitch scales the lead away entirely; on a fully collapsed boom
+    /// the eye then sits on the anchor) the look direction degenerates; fall back to the boom's
+    /// own axis so the matrix stays finite.
     pub fn view_proj(&self, aspect: f32, far: f32) -> Mat4 {
         let forward = (self.look_target() - self.position)
             .try_normalize()
@@ -344,13 +348,14 @@ mod tests {
 
     #[test]
     fn the_view_leads_ahead_of_the_anchor() {
-        // The look-ahead framing: the aim point sits LOOK_AHEAD_M past the anchor along the
-        // camera's horizontal forward, lifted by the trim, and the view really looks from the eye
-        // through that point - the player frames low-centre, the view leads ahead.
+        // The look-ahead framing: the aim point sits LOOK_AHEAD_M * cos(pitch) past the anchor
+        // along the camera's horizontal forward, lifted by the trim, and the view really looks
+        // from the eye through that point - the player frames low-centre, the view leads ahead.
         let target = Vec3::new(64.0, 5.0, 64.0);
         let cam = FollowCamera::spawn(target);
         let ahead = -boom_direction(cam.yaw, 0.0);
-        let expected = cam.anchor + ahead * LOOK_AHEAD_M + Vec3::Y * LOOK_AHEAD_LIFT_M;
+        let expected =
+            cam.anchor + ahead * (LOOK_AHEAD_M * cam.pitch.cos()) + Vec3::Y * LOOK_AHEAD_LIFT_M;
         assert!((cam.look_target() - expected).length() < 1e-6, "aim = {:?}", cam.look_target());
 
         // The view matrix maps the aim point onto the view axis: in view space the camera looks
@@ -367,6 +372,28 @@ mod tests {
         // And the anchor (the player, near enough) now sits below the view axis: low-centre.
         let anchor_in_view = view.transform_point3(cam.anchor);
         assert!(anchor_in_view.y < -0.1, "the player should frame below centre: {anchor_in_view:?}");
+    }
+
+    #[test]
+    fn the_lead_scales_with_pitch_and_a_vertical_view_centres_the_player() {
+        // The cos(pitch) ends of the scaling. Level: the lead pins at the full LOOK_AHEAD_M, the
+        // framing as it always was. Vertical: the look target pins back onto the anchor, so a
+        // steep downward pitch can no longer push the player off the screen's bottom edge. The
+        // pitch clamp (PITCH_MAX 1.35 rad) keeps play short of vertical; the pin is the limit
+        // the scaling approaches as the clamp's ceiling rises.
+        let mut cam = FollowCamera::spawn(Vec3::new(64.0, 5.0, 64.0));
+
+        cam.pitch = 0.0;
+        let lead = cam.look_target() - cam.anchor - Vec3::Y * LOOK_AHEAD_LIFT_M;
+        assert!((lead.length() - LOOK_AHEAD_M).abs() < 1e-6, "level pitch should lead in full: {lead:?}");
+
+        cam.pitch = std::f32::consts::FRAC_PI_2;
+        let aim = cam.look_target() - Vec3::Y * LOOK_AHEAD_LIFT_M;
+        assert!(
+            (aim - cam.anchor).length() < 1e-6,
+            "a straight-down view should aim at the anchor: {aim:?} vs {:?}",
+            cam.anchor
+        );
     }
 
     #[test]
