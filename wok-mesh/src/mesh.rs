@@ -2,8 +2,8 @@
 //!
 //! A [`Vertex`] carries the minimum cel-shaded rendering needs: a position and an outward normal.
 //! No UV, colour, or per-vertex surface attribute yet (see the crate docs: the renderer's vertex
-//! format is not pinned). Indices are `u32`: it is the format the eventual wgpu upload wants and it
-//! does not cap mesh size, so loaded meshes (GLTF, later) never force a widening.
+//! format is not pinned). Indices are `u32`: it is the format the wgpu upload (`crate::gpu`) wants
+//! and it does not cap mesh size, so loaded meshes (GLTF, later) never force a widening.
 //!
 //! Triangles use one consistent winding across the whole crate: counter-clockwise front faces with
 //! the normal pointing out of the surface, so downstream backface culling and lighting are correct

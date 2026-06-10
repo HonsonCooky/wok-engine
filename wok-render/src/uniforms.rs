@@ -1,0 +1,146 @@
+//! CPU-side packing of the GPU uniform blocks.
+//!
+//! Each function lowers an engine-side type into the flat `f32` array whose byte layout matches
+//! the corresponding WGSL struct (see `src/shaders/common.wgsl` and `mesh.wgsl`). Everything is
+//! vec4-aligned by construction: WGSL's uniform address space aligns vec3 fields to 16 bytes, so
+//! the arrays pack scalars into the fourth lane of a related vector instead of carrying padding.
+//!
+//! Sanitizing happens here, once per frame, rather than per fragment in the shader: the sun
+//! direction is normalized (wok-light documents it may arrive unnormalized), the band count is
+//! floored at 2 so the band divisor stays positive (the HLD authors bands in 2..=8), the
+//! transition softness is kept strictly positive so the band smoothstep's edges never coincide,
+//! and the fog end is kept strictly past its start so the fog divisor is never zero.
+
+use glam::{Mat3, Mat4, Vec3};
+use wok_light::LightState;
+
+use crate::renderer::Camera;
+
+// Byte sizes of the corresponding WGSL uniform structs.
+pub(crate) const CAMERA_UNIFORM_SIZE: u64 = 144; // two mat4 plus one vec4
+pub(crate) const LIGHT_UNIFORM_SIZE: u64 = 96; // six vec4
+pub(crate) const DRAW_UNIFORM_SIZE: u64 = 144; // two mat4 plus one vec4
+
+// Floors for the shader's two divisions; small enough to read as "hard edge" and "no fog band"
+// while keeping the math finite.
+const MIN_SOFTNESS: f32 = 1.0e-3;
+const MIN_FOG_SPAN: f32 = 1.0e-3;
+
+/// Pack `camera` into the WGSL `Camera` block: view-projection, its inverse (for the sky pass's
+/// unprojection), and the eye position. A non-invertible view-projection is the caller's bug; the
+/// inverse is not checked here.
+pub(crate) fn camera_floats(camera: &Camera) -> [f32; 36] {
+    let mut out = [0.0; 36];
+    out[0..16].copy_from_slice(&camera.view_proj.to_cols_array());
+    out[16..32].copy_from_slice(&camera.view_proj.inverse().to_cols_array());
+    out[32..35].copy_from_slice(&camera.eye.to_array());
+    out
+}
+
+/// Pack `light` into the WGSL `Light` block, sanitizing as documented on the module.
+pub(crate) fn light_floats(light: &LightState) -> [f32; 24] {
+    let sun_dir = light.sun.direction.try_normalize().unwrap_or(Vec3::NEG_Y);
+    let bands = light.cel.band_count.max(2) as f32;
+    let softness = light.cel.transition_softness.clamp(MIN_SOFTNESS, 1.0);
+    let fog_start = light.fog.start;
+    let fog_end = light.fog.end.max(fog_start + MIN_FOG_SPAN);
+
+    let mut out = [0.0; 24];
+    pack(&mut out, 0, sun_dir, bands);
+    pack(&mut out, 4, light.sun.color, softness);
+    pack(&mut out, 8, light.ambient, light.cel.rim_intensity);
+    pack(&mut out, 12, light.fog.color, fog_start);
+    pack(&mut out, 16, light.sky.horizon, fog_end);
+    pack(&mut out, 20, light.sky.zenith, 0.0);
+    out
+}
+
+/// Pack one render item's per-draw block: the model matrix, its normal matrix, and the flat base
+/// color. The normal matrix is the inverse-transpose of the model's linear part, so normals stay
+/// perpendicular to surfaces under non-uniform scale; computed once per draw here rather than per
+/// vertex in the shader. A singular model matrix is the caller's bug, as with the camera.
+pub(crate) fn draw_floats(transform: Mat4, color: Vec3) -> [f32; 36] {
+    let normal = Mat4::from_mat3(Mat3::from_mat4(transform).inverse().transpose());
+    let mut out = [0.0; 36];
+    out[0..16].copy_from_slice(&transform.to_cols_array());
+    out[16..32].copy_from_slice(&normal.to_cols_array());
+    out[32..35].copy_from_slice(&color.to_array());
+    out
+}
+
+fn pack(out: &mut [f32], at: usize, v: Vec3, w: f32) {
+    out[at..at + 4].copy_from_slice(&[v.x, v.y, v.z, w]);
+}
+
+#[cfg(test)]
+#[allow(clippy::float_cmp)]
+mod tests {
+    use super::*;
+    use wok_light::{CelParams, Fog, SkyGradient, Sun};
+
+    fn light() -> LightState {
+        LightState {
+            sun: Sun { direction: Vec3::new(0.0, -2.0, 0.0), color: Vec3::new(1.0, 0.9, 0.8) },
+            ambient: Vec3::new(0.1, 0.2, 0.3),
+            fog: Fog { color: Vec3::new(0.5, 0.6, 0.7), start: 10.0, end: 100.0 },
+            sky: SkyGradient { horizon: Vec3::new(0.7, 0.7, 0.7), zenith: Vec3::new(0.2, 0.4, 0.9) },
+            cel: CelParams { band_count: 4, transition_softness: 0.1, rim_intensity: 0.5 },
+        }
+    }
+
+    #[test]
+    fn float_counts_match_the_declared_byte_sizes() {
+        let camera = Camera { view_proj: Mat4::IDENTITY, eye: Vec3::ZERO };
+        assert_eq!(camera_floats(&camera).len() as u64 * 4, CAMERA_UNIFORM_SIZE);
+        assert_eq!(light_floats(&light()).len() as u64 * 4, LIGHT_UNIFORM_SIZE);
+        assert_eq!(draw_floats(Mat4::IDENTITY, Vec3::ZERO).len() as u64 * 4, DRAW_UNIFORM_SIZE);
+    }
+
+    #[test]
+    fn camera_packs_view_proj_then_inverse_then_eye() {
+        let view_proj = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
+        let camera = Camera { view_proj, eye: Vec3::new(4.0, 5.0, 6.0) };
+        let floats = camera_floats(&camera);
+        assert_eq!(&floats[0..16], &view_proj.to_cols_array());
+        assert_eq!(&floats[16..32], &view_proj.inverse().to_cols_array());
+        assert_eq!(&floats[32..36], &[4.0, 5.0, 6.0, 0.0]);
+    }
+
+    #[test]
+    fn light_normalizes_the_sun_direction() {
+        let floats = light_floats(&light());
+        // Input direction (0, -2, 0) normalizes to (0, -1, 0); band count rides in the w lane.
+        assert_eq!(&floats[0..4], &[0.0, -1.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn light_sanitizes_degenerate_inputs() {
+        let mut state = light();
+        state.sun.direction = Vec3::ZERO;
+        state.cel.band_count = 0;
+        state.cel.transition_softness = 0.0;
+        state.fog.end = state.fog.start; // zero span
+        let floats = light_floats(&state);
+        assert_eq!(&floats[0..3], &[0.0, -1.0, 0.0]); // zero direction falls back to straight down
+        assert_eq!(floats[3], 2.0); // band count floored at 2
+        assert_eq!(floats[7], MIN_SOFTNESS); // softness floored above zero
+        assert_eq!(floats[19], state.fog.start + MIN_FOG_SPAN); // fog end pushed past start
+    }
+
+    #[test]
+    fn draw_normal_matrix_is_the_inverse_transpose() {
+        // Non-uniform scale (2, 1, 1): the normal matrix must scale x by 1/2, not 2, so a normal
+        // on a stretched surface tilts the correct way.
+        let floats = draw_floats(Mat4::from_scale(Vec3::new(2.0, 1.0, 1.0)), Vec3::ONE);
+        assert_eq!(floats[16], 0.5); // normal matrix column 0, row 0
+        assert_eq!(floats[21], 1.0); // column 1, row 1
+        assert_eq!(floats[26], 1.0); // column 2, row 2
+    }
+
+    #[test]
+    fn packing_is_deterministic() {
+        assert_eq!(light_floats(&light()), light_floats(&light()));
+        let m = Mat4::from_rotation_y(0.37);
+        assert_eq!(draw_floats(m, Vec3::ONE), draw_floats(m, Vec3::ONE));
+    }
+}

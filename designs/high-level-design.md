@@ -83,8 +83,11 @@ Everything else follows from the principles and the crate descriptions above. Wh
 
 - **`wok-platform`** - no internal dependencies.
 - **`wok-scene`** - no internal dependencies.
+- **`wok-light`** - no internal dependencies.
 - **`wok-physics`** - `wok-scene`.
-- **`wok-mesh`** - `wok-scene`.
+- **`wok-mesh`** - `wok-scene`, `wok-platform` (taken when MeshGpu landed with the renderer).
+- **`wok-content`** - `wok-scene`, `wok-mesh`.
+- **`wok-render`** - `wok-platform`, `wok-mesh`, `wok-light`.
 
 As later crates land, each takes on what it genuinely uses under the three rules, and this list grows to match.
 

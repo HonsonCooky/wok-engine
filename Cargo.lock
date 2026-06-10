@@ -3039,6 +3039,8 @@ name = "wok-mesh"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "pollster",
+ "wok-platform",
  "wok-scene",
 ]
 
@@ -3060,6 +3062,18 @@ dependencies = [
  "pollster",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "wok-render"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "pollster",
+ "wok-light",
+ "wok-mesh",
+ "wok-platform",
+ "wok-scene",
 ]
 
 [[package]]

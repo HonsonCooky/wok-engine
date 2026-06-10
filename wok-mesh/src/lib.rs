@@ -1,11 +1,11 @@
-//! wok-mesh: CPU mesh data and generation.
+//! wok-mesh: mesh data, generation, and GPU upload.
 //!
-//! The geometry layer the renderer will eventually draw, kept to its pure CPU half here: a mesh
-//! data type ([`MeshCpu`]) plus generators that produce one from the engine's placeholder
-//! primitives and from a chunk's terrain heightmap. No GPU, no wgpu, no rendering: `MeshGpu` and
-//! buffer upload are deferred until wok-render has something to draw, which keeps this crate pure,
-//! fully testable, and dependent only on wok-scene (plus glam). Mesh-name resolution and a GLTF
-//! loader arrive with real assets, also later.
+//! The geometry layer the renderer draws, in two halves. The pure CPU half: a mesh data type
+//! ([`MeshCpu`]) plus generators that produce one from the engine's placeholder primitives and
+//! from a chunk's terrain heightmap; deterministic, fully testable without a GPU, and dependent
+//! only on wok-scene (plus glam). The GPU half: [`MeshGpu`] and the upload path (`crate::gpu`),
+//! which is where the crate takes its wok-platform dependency for the pinned wgpu re-export.
+//! Mesh-name resolution and a GLTF loader arrive with real assets, later.
 //!
 //! ## Two producers, one data type
 //!
@@ -40,14 +40,16 @@
 //! Generation is deterministic: identical inputs produce a bitwise-identical [`MeshCpu`]. Every
 //! generator is a fixed sequence of arithmetic with no RNG, no wall-clock and no parallelism. Mesh
 //! data feeds rendering, not simulation, so this is not strictly required by the replay harness, but
-//! it is cheap and keeps the tests exact.
+//! it is cheap and keeps the tests exact. Upload (`crate::gpu`) is rendering-side residency and not
+//! part of simulation state.
 //!
 //! ## Errors
 //!
-//! There are none: generation is total over valid inputs. A degenerate tessellation parameter (zero
-//! segments or rings) is clamped to the coarsest valid mesh rather than reported, and a [`Heightmap`]
-//! is already validated by its own constructor. Per `designs/project-canon.md` a `thiserror` enum is
-//! added only when a genuine failure mode exists; none does here, so the crate exposes no `Error`.
+//! There are none: generation is total over valid inputs, and upload has no reportable failure mode
+//! (see `crate::gpu`). A degenerate tessellation parameter (zero segments or rings) is clamped to
+//! the coarsest valid mesh rather than reported, and a [`Heightmap`] is already validated by its own
+//! constructor. Per `designs/project-canon.md` a `thiserror` enum is added only when a genuine
+//! failure mode exists; none does here, so the crate exposes no `Error`.
 //!
 //! [`Primitive`]: wok_scene::Primitive
 //! [`Heightmap`]: wok_scene::Heightmap
@@ -56,6 +58,7 @@ pub mod capsule;
 pub mod cube;
 pub mod cylinder;
 pub mod ellipsoid;
+pub mod gpu;
 pub mod mesh;
 pub mod primitive;
 mod surface;
@@ -65,6 +68,7 @@ pub use capsule::capsule;
 pub use cube::{cube, plane};
 pub use cylinder::cylinder;
 pub use ellipsoid::ellipsoid;
+pub use gpu::{MeshGpu, VERTEX_LAYOUT, VERTEX_STRIDE};
 pub use mesh::{MeshCpu, Vertex};
 pub use primitive::{DEFAULT_RINGS, DEFAULT_SEGMENTS, primitive_mesh};
 pub use terrain::terrain_mesh;
