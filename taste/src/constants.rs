@@ -47,8 +47,25 @@ pub const PLAYER_SEGMENT: f32 = PLAYER_HEIGHT - 2.0 * PLAYER_RADIUS;
 /// Horizontal locomotion speed in m/s, a brisk run.
 pub const MOVE_SPEED: f32 = 6.0;
 
-/// Upward velocity granted by a jump, in m/s. With this gravity it clears about 1.3m at the apex.
-pub const JUMP_VELOCITY: f32 = 8.0;
+/// Horizontal acceleration toward the intended velocity, in m/s^2, grounded with input. From rest
+/// to top speed in MOVE_SPEED / GROUND_ACCEL seconds (0.15s, nine fixed steps): quick enough to
+/// stay responsive, slow enough that starting reads as pushing off rather than snapping to speed.
+pub const GROUND_ACCEL: f32 = 40.0;
+
+/// Horizontal deceleration toward rest, in m/s^2, grounded with no input. A touch stronger than
+/// the acceleration so stopping reads planted rather than slippery: top speed to rest in 0.12s.
+pub const GROUND_FRICTION: f32 = 50.0;
+
+/// Airborne multiplier on the steering acceleration. A jump keeps its launch momentum: enough
+/// steering to adjust a landing, not enough to reverse direction mid-air. Friction never applies
+/// airborne - with no input the velocity is ballistic (policy in `crate::sim::step`: air friction
+/// pinned bodies onto crate corners, the last mid-air halt).
+pub const AIR_CONTROL: f32 = 0.3;
+
+/// Upward velocity granted by a jump, in m/s. With this gravity it clears about 1.9m at the apex
+/// (v^2 / 2g; apex scales with velocity squared, so the 1.5x apex verdict is a sqrt(1.5) bump on
+/// the launch velocity, 8.0 -> 9.8).
+pub const JUMP_VELOCITY: f32 = 9.8;
 
 /// How long a jump press stays buffered waiting for ground, in seconds of simulation time. A
 /// press up to this long before landing fires on the landing step instead of being swallowed by
@@ -91,24 +108,44 @@ pub const CAMERA_TARGET_LIFT: f32 = 0.35;
 /// Minimum height the camera keeps above the terrain surface under it, in metres.
 pub const CAMERA_TERRAIN_MARGIN: f32 = 0.4;
 
-/// Half-life of the spring-arm length easing, in seconds: how quickly the boom recovers after an
-/// obstruction pulls it in. Short, so walls feel solid rather than spongy.
-pub const CAMERA_ARM_HALF_LIFE: f32 = 0.08;
+/// How far past the anchor, along the camera's view forward, the look-at point sits, in metres.
+/// Looking at the anchor itself centres the player and wastes the frame's lower half on ground
+/// already travelled; leading the view drops the player to low-centre and spends the frame on
+/// where they are going. Eye, orbit, and arm math are untouched: this only re-aims the view.
+pub const LOOK_AHEAD_M: f32 = 4.0;
 
-/// Half-life of the camera-position easing, in seconds: the follow lag. Shorter than the arm's so
-/// the camera never visibly trails through geometry the arm already cleared.
-pub const CAMERA_POS_HALF_LIFE: f32 = 0.05;
+/// Vertical trim on the look-at point, in metres, for fine framing on top of the lead. Zero until
+/// a play-test asks otherwise.
+pub const LOOK_AHEAD_LIFT_M: f32 = 0.0;
 
-/// Mouse-look sensitivity, radians of orbit per pixel of raw motion.
-pub const LOOK_SENSITIVITY: f32 = 0.0035;
+/// Half-life of the anchor's tracking smooth, in seconds: the one lag anywhere in the camera,
+/// applied to the point the boom hangs from. Vertical included, so jumps and falls track instead
+/// of the player drifting off-frame. Orbit angles are never smoothed; this is follow lag only.
+pub const CAMERA_TRACK_SMOOTH: f32 = 0.10;
 
-/// Look inversion toggles, applied to the mouse and the right stick alike. With both false (the
-/// third-person default): dragging or pushing right turns the view right (the boom swings the
-/// opposite way around the player), and pushing forward raises the camera to look down on the
-/// player. Set one to true to flip that axis; feel is a constant here, not a code hunt through the
-/// input mapping.
-pub const LOOK_INVERT_X: bool = false;
-pub const LOOK_INVERT_Y: bool = false;
+/// Half-life of the arm's recovery toward the desired boom once an obstruction clears, in seconds.
+/// Obstruction clamps the arm inward instantly (a wall is a hard fact, and easing into it would
+/// show the camera inside geometry); recovery is slow so the boom drifts back out rather than
+/// whipping, and grazing a corner does not pump the camera in and out.
+pub const CAMERA_ARM_RECOVER: f32 = 0.40;
+
+/// Mouse-look sensitivity, radians of orbit per pixel of raw motion. Mouse only: the stick is a
+/// rate device with its own STICK_LOOK_RATE. Raised 1.8x from the first playable's 0.0035 on the
+/// mouse verdict: turning around took too much desk.
+pub const MOUSE_LOOK_SENSITIVITY: f32 = 0.0063;
+
+/// Look inversion toggles, one pair per device: the play-test verdicts came back different for
+/// the mouse and the stick, so the inversion is policy per device, not shared. The base mapping
+/// (all false) turns the view with the motion: rightward input turns the view right (the boom
+/// swings the opposite way around the player), and pushing forward raises the camera to look down.
+///
+/// Mouse verdict, after a second pass: vertical flipped (dragging down raises the camera),
+/// horizontal base (dragging right turns the view right - the full both-axis flip overcorrected).
+/// Stick verdict: the base mapping as it always was.
+pub const MOUSE_INVERT_X: bool = false;
+pub const MOUSE_INVERT_Y: bool = true;
+pub const STICK_INVERT_X: bool = false;
+pub const STICK_INVERT_Y: bool = false;
 
 // ---- gamepad ----
 
@@ -132,11 +169,16 @@ pub const STICK_LOOK_RATE: f32 = 2.5;
 /// retires to an opt-in diagnostic.
 pub const DEBUG_GROUND_MARKER: bool = false;
 
-/// Default for the hitbox overlay (F1 flips it at runtime): every loaded hitbox AABB drawn as a
-/// line cage plus the player capsule as rings and verticals, through the renderer's debug line
+/// Default for the hitbox overlay (F1 flips it at runtime): every loaded hitbox collider drawn as
+/// a line cage plus the player capsule as rings and verticals, through the renderer's debug line
 /// pass. The drawn scene shows visible shapes; this shows what the simulation actually collides
 /// with, so visual-only and trigger-only placeholders stop being invisible to a play-tester.
 pub const DEBUG_HITBOXES: bool = false;
+
+/// Draw a small cross at the camera's look-at point (the look-ahead target), through the line
+/// pass. On while the look-ahead framing is being tuned: it shows exactly where the view leads,
+/// which is otherwise invisible in play.
+pub const SHOW_RETICLE: bool = true;
 
 /// Orbit pitch limits, radians. Positive pitch raises the camera (wok-physics boom convention);
 /// the floor allows a slight under-shoulder look and the ceiling stops short of straight overhead.
@@ -184,10 +226,11 @@ mod tests {
 
     #[test]
     fn a_jump_clears_something_worth_jumping() {
-        // Apex height under constant gravity: v^2 / 2g. It should clear at least a crate edge but
-        // not a pillar, or the demo's prefab walls stop being obstacles.
+        // Apex height under constant gravity: v^2 / 2g. The 1.5x verdict put it at ~1.9m: clears a
+        // man-height crate with room to feel generous, still well under the demo's tall prefabs,
+        // or they stop being obstacles.
         let apex = JUMP_VELOCITY * JUMP_VELOCITY / (2.0 * -GRAVITY.y);
-        assert!(apex > 0.5, "apex {apex} too low to feel like a jump");
+        assert!(apex > 1.5, "apex {apex} fell below the raised-jump verdict (~1.9m)");
         assert!(apex < 4.0, "apex {apex} clears the demo's tall prefabs");
     }
 
@@ -201,8 +244,21 @@ mod tests {
     fn the_boom_outreaches_its_probe_and_the_easing_is_live() {
         assert!(CAMERA_DISTANCE > CAMERA_PROBE_RADIUS, "a boom shorter than its probe never extends");
         assert!(CAMERA_PROBE_RADIUS > 0.0);
-        assert!(CAMERA_ARM_HALF_LIFE > 0.0 && CAMERA_POS_HALF_LIFE > 0.0);
-        assert!(CAMERA_POS_HALF_LIFE <= CAMERA_ARM_HALF_LIFE, "position easing should not trail the arm");
+        assert!(CAMERA_TRACK_SMOOTH > 0.0 && CAMERA_ARM_RECOVER > 0.0);
+        // Tracking must settle faster than the arm recovers: the player is framed again while the
+        // boom is still drifting back out, never the other way around.
+        assert!(CAMERA_TRACK_SMOOTH < CAMERA_ARM_RECOVER);
+    }
+
+    #[test]
+    fn acceleration_starts_fast_and_friction_stops_harder() {
+        // From rest to top speed in a fraction of a second: locomotion must stay responsive even
+        // though velocity is no longer set outright.
+        assert!(MOVE_SPEED / GROUND_ACCEL < 0.25, "too slow to top speed: reads as ice");
+        // Stopping at least as hard as starting: releasing the stick must not read slippery.
+        assert!(GROUND_FRICTION >= GROUND_ACCEL);
+        // Airborne control is real but weaker than grounded: momentum survives a jump.
+        assert!(AIR_CONTROL > 0.0 && AIR_CONTROL < 1.0);
     }
 
     #[test]
@@ -227,7 +283,7 @@ mod tests {
         assert!(MOVE_SPEED > 0.0);
         assert!(JUMP_VELOCITY > 0.0);
         assert!(SPAWN_HEIGHT > 0.0);
-        assert!(LOOK_SENSITIVITY > 0.0);
+        assert!(MOUSE_LOOK_SENSITIVITY > 0.0);
     }
 
     #[test]

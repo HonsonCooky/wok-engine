@@ -2,8 +2,9 @@
 //!
 //! This is the first instance of the HLD "Level 2 deterministic replay harness". The game that owns
 //! the loop does not exist yet, so this test crate stands in for it: it builds a small wok-scene
-//! world in code, slices it the way the game will, reduces the resulting solid hitboxes to AABBs, and
-//! drives a capsule "player" through the per-step composition the game's fixed-timestep loop will own:
+//! world in code, slices it the way the game will, classifies the resulting solid hitboxes into
+//! colliders, and drives a capsule "player" through the per-step composition the game's
+//! fixed-timestep loop will own:
 //!
 //!     set the horizontal velocity from the scripted input
 //!     -> integrate one fixed step under gravity              (wok-physics: integrate)
@@ -19,9 +20,9 @@
 use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
-use wok_physics::{Capsule, Motion, collide_and_slide, integrate, rest_on_heightmap, world_aabb};
+use wok_physics::{Capsule, Collider, Motion, classify_collider, collide_and_slide, integrate, rest_on_heightmap};
 use wok_scene::{
-    Aabb, CHUNK_GRID_DIM, CHUNK_GRID_LEN, Chunk, ChunkCoord, ChunkStreaming, Heightmap, InstanceId,
+    CHUNK_GRID_DIM, CHUNK_GRID_LEN, Chunk, ChunkCoord, ChunkStreaming, Heightmap, InstanceId,
     Placement, Prefab, PrefabRef, PrefabState, Primitive, Shape, SurfaceTag, Transform, slice_chunk,
 };
 
@@ -78,7 +79,7 @@ pub fn authored_world() -> Authored {
 }
 
 /// One fixed simulation step: the per-step composition the game will own, stood up here in the test.
-fn step(state: Motion, input: Vec3, statics: &[Aabb], terrain: &Heightmap) -> Sample {
+fn step(state: Motion, input: Vec3, statics: &[Collider], terrain: &Heightmap) -> Sample {
     // The scripted input is a desired horizontal velocity (x, z in m/s; its y is ignored). The
     // vertical velocity carries the gravity the body has accumulated while not yet grounded.
     let mut m = state;
@@ -107,11 +108,14 @@ fn step(state: Motion, input: Vec3, statics: &[Aabb], terrain: &Heightmap) -> Sa
 
 /// Drive `inputs` through the per-step composition from `start`, returning the per-step trajectory.
 ///
-/// Slices the authored chunk and reduces its solid hitboxes to AABBs on every call, so running the
-/// same scenario twice exercises `slice_chunk` plus `world_aabb` determinism, not only the physics.
+/// Slices the authored chunk and classifies its solid hitboxes into colliders on every call (the
+/// reduction the game's world build runs), so running the same scenario twice exercises
+/// `slice_chunk` plus `classify_collider` determinism, not only the physics. The fixtures are all
+/// cubes, so every collider is the same conservative box as before the round-collider step.
 pub fn simulate(world: &Authored, start: Motion, inputs: &[Vec3]) -> Vec<Sample> {
     let sliced = slice_chunk(&world.chunk, &world.prefabs).expect("authored chunk should slice cleanly");
-    let statics: Vec<Aabb> = sliced.hitboxes.iter().map(|h| world_aabb(h.primitive, h.transform)).collect();
+    let statics: Vec<Collider> =
+        sliced.hitboxes.iter().map(|h| classify_collider(h.primitive, h.transform)).collect();
 
     let mut state = start;
     let mut trajectory = Vec::with_capacity(inputs.len());

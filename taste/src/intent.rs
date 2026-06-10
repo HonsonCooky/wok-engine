@@ -6,19 +6,24 @@
 //! (snapshot and dt in, intent out), so the mapping is unit testable without a window.
 //!
 //! Bindings: WASD or the left stick for movement (analog magnitude flows through), space or the
-//! south button to jump, hold the right mouse button or deflect the right stick to orbit. Keyboard
-//! and gamepad coexist by summation: an idle device contributes zero, so whichever moved last is
-//! what the player feels, with no device-switching state. The two look devices differ in kind - the
-//! mouse reports a displacement, the stick a held rate - so the stick is integrated by the frame dt
-//! before the shared inversion convention (`LOOK_INVERT_*`) applies to both.
+//! south button to jump, the mouse or the right stick to orbit, Esc or Select/Back to quit. Mouse
+//! look is always live - the game owns the pointer (the app locks and hides the OS cursor), so
+//! there is no held-button gate. Keyboard and gamepad coexist by summation: an idle device
+//! contributes zero, so whichever moved last is what the player feels, with no device-switching
+//! state. The two look devices differ in kind - the mouse reports a displacement, the stick a held
+//! rate - so the stick is integrated by the frame dt; and they differ in feel - the play-test
+//! verdicts came back opposite - so each device carries its own inversion pair (`MOUSE_INVERT_*`,
+//! `STICK_INVERT_*`), applied per device before the sum.
 
 use glam::Vec2;
 use wok_platform::gilrs::Button;
 use wok_platform::input::InputState;
-use wok_platform::winit::event::MouseButton;
 use wok_platform::winit::keyboard::{Key, NamedKey};
 
-use crate::constants::{LOOK_INVERT_X, LOOK_INVERT_Y, LOOK_SENSITIVITY, STICK_DEADZONE, STICK_LOOK_RATE};
+use crate::constants::{
+    MOUSE_INVERT_X, MOUSE_INVERT_Y, MOUSE_LOOK_SENSITIVITY, STICK_DEADZONE, STICK_INVERT_X, STICK_INVERT_Y,
+    STICK_LOOK_RATE,
+};
 
 /// What the player asked for this frame, in the simulation's terms: movement axes relative to the
 /// camera (forward and right, resolved against the camera yaw at step time), a jump edge, and the
@@ -33,11 +38,14 @@ pub struct Intent {
     /// Space or the south button was pressed this frame (an edge, not a hold: holding does not
     /// bounce).
     pub jump: bool,
-    /// Radians of orbit to add this frame: `x` to yaw, `y` to pitch. The default mapping turns the
+    /// Radians of orbit to add this frame: `x` to yaw, `y` to pitch. The base mapping turns the
     /// view with the drag or deflection - the boom convention makes view-right a negative yaw
-    /// delta - and raises the camera as the input pushes forward; the `LOOK_INVERT_*` constants
-    /// flip an axis.
+    /// delta - and raises the camera as the input pushes forward; the per-device `MOUSE_INVERT_*`
+    /// and `STICK_INVERT_*` constants flip an axis for that device alone.
     pub look_delta: Vec2,
+    /// Esc or the gamepad's Select/Back was pressed this frame: the player asked to quit. The app
+    /// turns this into the platform's clean-shutdown request; the simulation never sees it.
+    pub quit: bool,
 }
 
 /// Map one frame's input snapshot to the player's intent. `dt` integrates the right stick's turn
@@ -54,22 +62,29 @@ pub fn map_input(input: &InputState, dt: f32) -> Intent {
     let look_stick =
         deadzone(pad.map_or(Vec2::ZERO, |p| Vec2::new(p.right_stick.0, p.right_stick.1)), STICK_DEADZONE);
 
-    let mouse = if input.mouse_held(MouseButton::Right) {
-        Vec2::new(input.mouse_motion.0 as f32, input.mouse_motion.1 as f32) * LOOK_SENSITIVITY
-    } else {
-        Vec2::ZERO
-    };
-    let look_raw = mouse + look_stick * STICK_LOOK_RATE * dt;
+    // Each device resolves to its own orbit delta - sensitivity or rate, then its own inversion
+    // pair - before the sum, so flipping the mouse cannot drag the stick's feel with it. Raw mouse
+    // motion always drives look: the pointer is the game's (locked and hidden), not a desktop
+    // cursor that might be on its way somewhere else.
+    let mouse_raw = Vec2::new(input.mouse_motion.0 as f32, input.mouse_motion.1 as f32) * MOUSE_LOOK_SENSITIVITY;
+    let mouse = Vec2::new(
+        mouse_raw.x * axis_sign(MOUSE_INVERT_X),
+        mouse_raw.y * axis_sign(MOUSE_INVERT_Y),
+    );
+    let stick_raw = look_stick * STICK_LOOK_RATE * dt;
+    let stick = Vec2::new(
+        stick_raw.x * axis_sign(STICK_INVERT_X),
+        stick_raw.y * axis_sign(STICK_INVERT_Y),
+    );
 
     Intent {
         move_forward: axis('w', 's') - move_stick.y,
         move_right: axis('d', 'a') + move_stick.x,
         jump: input.key_pressed(NamedKey::Space)
             || pad.is_some_and(|p| p.buttons_pressed.contains(&Button::South)),
-        look_delta: Vec2::new(
-            look_raw.x * axis_sign(LOOK_INVERT_X),
-            look_raw.y * axis_sign(LOOK_INVERT_Y),
-        ),
+        look_delta: mouse + stick,
+        quit: input.key_pressed(NamedKey::Escape)
+            || pad.is_some_and(|p| p.buttons_pressed.contains(&Button::Select)),
     }
 }
 
@@ -122,13 +137,22 @@ mod tests {
             keys_released: HashSet::new(),
             mouse_pos: (0.0, 0.0),
             mouse_delta: (0.0, 0.0),
-            mouse_motion: (10.0, 4.0),
+            // Still by default: mouse look is ungated now, so a moving fixture mouse would leak
+            // into every non-mouse test. The mouse tests set their own motion.
+            mouse_motion: (0.0, 0.0),
             mouse_buttons_held: HashSet::new(),
             mouse_buttons_pressed: HashSet::new(),
             mouse_buttons_released: HashSet::new(),
             scroll_delta: (0.0, 0.0),
             gamepads: vec![],
         }
+    }
+
+    /// The fixture with a moved mouse: raw motion (10, 4), rightward and downward.
+    fn input_with_mouse_motion() -> InputState {
+        let mut input = input_with(&[], false);
+        input.mouse_motion = (10.0, 4.0);
+        input
     }
 
     fn pad(left: (f32, f32), right: (f32, f32), south: bool) -> GamepadState {
@@ -177,24 +201,44 @@ mod tests {
     }
 
     #[test]
-    fn mouse_motion_is_look_only_while_right_button_is_held() {
-        let mut input = input_with(&[], false);
-        assert_eq!(map_input(&input, DT).look_delta, Vec2::ZERO);
-
-        input.mouse_buttons_held.insert(MouseButton::Right);
-        assert_ne!(map_input(&input, DT).look_delta, Vec2::ZERO);
+    fn mouse_motion_always_drives_look_and_a_still_mouse_is_silent() {
+        // No held-button gate: the pointer belongs to the game (locked and hidden), so raw motion
+        // is look with no button held, and a motionless mouse contributes exactly zero.
+        assert_ne!(map_input(&input_with_mouse_motion(), DT).look_delta, Vec2::ZERO);
+        assert_eq!(map_input(&input_with(&[], false), DT).look_delta, Vec2::ZERO);
     }
 
     #[test]
-    fn a_rightward_drag_turns_the_view_right() {
-        // View-right is a negative yaw delta: the boom swings toward -X as the view swings toward
-        // +X (wok-physics orbit convention), so rightward motion must map negative. This is the
-        // play-tested third-person feel, the opposite of the editor's fly-cam mapping.
+    fn mouse_horizontal_turns_the_view_and_vertical_is_flipped() {
+        // The settled mouse verdict: horizontal keeps the base view-turn mapping (moving right
+        // turns the view right, a negative yaw delta - the both-axis flip overcorrected), while
+        // vertical stays flipped (moving down raises the camera, a positive pitch delta).
+        let look = map_input(&input_with_mouse_motion(), DT).look_delta;
+        assert!(look.x < 0.0, "a rightward motion should turn the view right (negative yaw): {look:?}");
+        assert!(look.y > 0.0, "a downward motion should raise the camera (positive pitch): {look:?}");
+    }
+
+    #[test]
+    fn mouse_sensitivity_scales_the_motion_exactly() {
+        // The flip is a sign, never a magnitude: the delta is the raw motion times the mouse
+        // sensitivity, axis for axis.
+        let look = map_input(&input_with_mouse_motion(), DT).look_delta;
+        assert!((look.x.abs() - 10.0 * MOUSE_LOOK_SENSITIVITY).abs() < 1e-6, "got {look:?}");
+        assert!((look.y.abs() - 4.0 * MOUSE_LOOK_SENSITIVITY).abs() < 1e-6, "got {look:?}");
+    }
+
+    // ---- quitting ----
+
+    #[test]
+    fn escape_or_select_is_a_quit_edge() {
         let mut input = input_with(&[], false);
-        input.mouse_buttons_held.insert(MouseButton::Right);
-        let look = map_input(&input, DT).look_delta;
-        assert!(look.x < 0.0, "rightward motion should turn the view right (negative yaw): {look:?}");
-        assert!(look.y < 0.0, "downward motion should lower the camera (negative pitch): {look:?}");
+        assert!(!map_input(&input, DT).quit, "no quit without a press");
+        input.keys_pressed.insert(Key::Named(NamedKey::Escape));
+        assert!(map_input(&input, DT).quit, "Esc quits");
+
+        let mut gamepad = pad((0.0, 0.0), (0.0, 0.0), false);
+        gamepad.buttons_pressed.insert(Button::Select);
+        assert!(map_input(&input_with_pad(gamepad), DT).quit, "Select/Back quits");
     }
 
     // ---- deadzone math ----
@@ -254,13 +298,24 @@ mod tests {
 
     #[test]
     fn the_right_stick_orbits_as_a_rate_integrated_by_dt() {
-        // Same conventions as the mouse: rightward deflection turns the view right (negative yaw
-        // delta), and the contribution is proportional to dt because deflection is a held rate.
+        // The stick verdict: the base view-turn mapping, unchanged. Rightward deflection turns the
+        // view right (negative yaw delta), and the contribution is proportional to dt because
+        // deflection is a held rate. This must stay pinned while the mouse is flipped: the
+        // inversion pairs are per device.
         let one = map_input(&input_with_pad(pad((0.0, 0.0), (1.0, 0.0), false)), DT);
         assert!((one.look_delta.x - -(STICK_LOOK_RATE * DT)).abs() < 1e-6, "got {:?}", one.look_delta);
 
         let double = map_input(&input_with_pad(pad((0.0, 0.0), (1.0, 0.0), false)), DT * 2.0);
         assert!((double.look_delta.x - one.look_delta.x * 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_forward_stick_push_raises_the_camera() {
+        // The stick's vertical pin, separate from the mouse's: pushing the right stick forward
+        // (negative y in the platform's screen convention) raises the camera - a positive pitch
+        // delta under the base mapping's sign.
+        let look = map_input(&input_with_pad(pad((0.0, 0.0), (0.0, -1.0), false)), DT).look_delta;
+        assert!(look.y > 0.0, "a forward push should raise the camera (positive pitch): {look:?}");
     }
 
     #[test]

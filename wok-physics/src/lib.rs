@@ -42,6 +42,19 @@
 //! The camera composition (orbit, spring-arm, terrain floor, then smoothing toward the result) is
 //! again the game's to sequence and hold state for, the same split as the character controller.
 //!
+//! Part 3 (this revision) widens the static side from boxes to a small collider vocabulary, so the
+//! felt surface of a round prefab matches the drawn one:
+//!
+//! - [`collider`] - the [`Collider`] enum (`Aabb`, `Sphere`, `VertCylinder`) and
+//!   [`classify_collider`], the shared reduction from a transformed primitive to the collider it
+//!   collides as (exact round rules, conservative box fallback). Shared because the editor's
+//!   picking wants the identical answer the game's simulation uses.
+//! - [`sweep_round`] - swept capsule vs sphere (exact, closed form) and vs vertical cylinder (the
+//!   box's conservative advancement over an exact cylinder projection).
+//! - [`sweep`], [`slide`], [`camera`] - the multi-collider sweep, [`collide_and_slide`], and
+//!   [`spring_arm`] now take `&[Collider]`; AABB-only callers wrap with `Collider::from`, and box
+//!   behavior is unchanged.
+//!
 //! Determinism (canon contract): identical inputs and `dt` give identical outputs; resolution over
 //! several colliders and the iterative sweep/slide both run sequentially in a defined order, with no
 //! parallel reduction and fixed iteration caps; the collision math is position-independent (it reads
@@ -50,8 +63,9 @@
 //! inputs, and degenerate shapes (zero radius, zero-length segment or motion) are graceful no-ops
 //! rather than errors, per the brief.
 //!
-//! Deferred to later wok-physics steps (explicitly out of scope now): ellipsoid shapes and full
-//! swept capsule-vs-terrain-slope sliding are later refinements.
+//! Deferred to later wok-physics steps (explicitly out of scope now): tilted or non-uniformly
+//! scaled round colliders (they stay conservative boxes by classification), capsule prefab
+//! colliders, broadphase, and full swept capsule-vs-terrain-slope sliding.
 //!
 //! [`Aabb`]: wok_scene::Aabb
 //! [`Heightmap`]: wok_scene::Heightmap
@@ -59,20 +73,24 @@
 pub mod bounds;
 pub mod camera;
 pub mod capsule;
+pub mod collider;
 pub mod collision;
 mod geom;
 pub mod motion;
 pub mod slide;
 pub mod smoothing;
 pub mod sweep;
+pub mod sweep_round;
 pub mod terrain;
 
 pub use bounds::{aabb_center, aabb_half_extents, world_aabb};
 pub use camera::{boom_direction, boom_point, spring_arm, terrain_floor};
 pub use capsule::Capsule;
+pub use collider::{Collider, classify_collider};
 pub use collision::{Contact, aabb_contact, aabb_overlap, resolve_statics};
 pub use motion::{Motion, integrate};
 pub use slide::{SlideResult, collide_and_slide};
 pub use smoothing::smooth;
-pub use sweep::{SweptHit, sweep_capsule_aabb, sweep_capsule_aabbs};
+pub use sweep::{SweptHit, sweep_capsule_aabb, sweep_capsule_aabbs, sweep_capsule_collider, sweep_capsule_colliders};
+pub use sweep_round::{sweep_capsule_cylinder, sweep_capsule_sphere};
 pub use terrain::{TerrainRest, rest_on_heightmap, resolve_heightmap};

@@ -24,8 +24,8 @@ use glam::{Mat4, Quat, Vec3};
 use wok_content::ChunkStore;
 use wok_light::LightState;
 use wok_mesh::{MeshGpu, capsule_mesh, primitive_mesh};
-use wok_physics::world_aabb;
 use wok_platform::winit::keyboard::NamedKey;
+use wok_platform::winit::window::CursorGrabMode;
 use wok_platform::{App, FrameCtx, Platform, gfx};
 use wok_render::{Camera, RenderItem, Renderer};
 use wok_scene::{Aabb, ChunkCoord, Primitive, SurfaceTag, VisibleItem};
@@ -33,7 +33,7 @@ use wok_scene::{Aabb, ChunkCoord, Primitive, SurfaceTag, VisibleItem};
 use crate::clock::FixedClock;
 use crate::constants::{
     DEBUG_GROUND_MARKER, DEBUG_HITBOXES, MAX_STEPS_PER_FRAME, PLAYER_COLOR, PLAYER_RADIUS,
-    PLAYER_SEGMENT, SIM_DT,
+    PLAYER_SEGMENT, SHOW_RETICLE, SIM_DT,
 };
 use crate::content::LoadedContent;
 use crate::debug;
@@ -53,9 +53,9 @@ const MARKER_LIFT: f32 = 0.01;
 const MARKER_COLOR: Vec3 = Vec3::new(1.0, 0.0, 1.0);
 
 /// Vertical headroom added to the shadow region's top: the player must keep casting at the jump
-/// apex (JUMP_VELOCITY^2 / 2g is about 1.3m) plus half the placeholder's height above the tracked
+/// apex (JUMP_VELOCITY^2 / 2g is about 1.9m) plus half the capsule's height above the tracked
 /// position, even when standing on the region's highest point. Game knowledge, so it lives here
-/// rather than in the renderer's fit.
+/// rather than in the renderer's fit; the relationship is pinned by a test below.
 const SHADOW_HEADROOM_M: f32 = 3.0;
 
 /// Draw order of the primitive mesh cache; `primitive_index` must match.
@@ -124,7 +124,7 @@ impl TasteApp {
         for (chunk, heightmap) in loaded.chunks {
             store.load(chunk, heightmap, &loaded.prefabs)?;
         }
-        let mut shadow_region = scene_bounds(&store);
+        let mut shadow_region = World::scene_bounds(&store);
         shadow_region.max.y += SHADOW_HEADROOM_M;
         let world = World::from_store(&store);
         let player = sim::spawn(&world);
@@ -173,7 +173,7 @@ impl TasteApp {
         // Fog distance sets render distance (HLD); the far plane sits past full occlusion.
         let far = (self.light.fog.end * 1.2).max(50.0);
         let camera = Camera {
-            view_proj: self.camera.view_proj(camera_target(view_pos), aspect, far),
+            view_proj: self.camera.view_proj(aspect, far),
             eye: self.camera.position,
         };
 
@@ -236,13 +236,20 @@ impl TasteApp {
             self.shadow_region,
             &items,
         );
-        if self.debug_hitboxes {
+        // One line-pass submission carries both overlays: the F1 hitbox cages and the look-ahead
+        // reticle (a small cross at the camera's aim point, `SHOW_RETICLE`).
+        let mut lines =
+            if self.debug_hitboxes { debug::debug_lines(&self.world, view_pos) } else { Vec::new() };
+        if SHOW_RETICLE {
+            debug::reticle_lines(self.camera.look_target(), &mut lines);
+        }
+        if !lines.is_empty() {
             renderer.render_lines(
                 &ctx.platform.device,
                 &ctx.platform.queue,
                 &mut frame.encoder,
                 &frame.view,
-                &debug::debug_lines(&self.world, view_pos),
+                &lines,
             );
         }
         frame.finish(ctx.platform);
@@ -252,6 +259,19 @@ impl TasteApp {
 impl App for TasteApp {
     fn init(&mut self, platform: &Platform) {
         platform.window.set_title(&format!("taste - {}", self.scene_name));
+        // The game owns the pointer: mouse look is always live (no held-button gate), so the OS
+        // cursor is captured and hidden for the run. Locked pins it in place; platforms without
+        // Locked (Windows among them) confine it to the window instead, and with the cursor
+        // hidden and look reading raw motion the two are indistinguishable in play. If neither
+        // works the game still runs, just with a visible pointer - worth a line on stdout.
+        let grabbed = platform
+            .window
+            .set_cursor_grab(CursorGrabMode::Locked)
+            .or_else(|_| platform.window.set_cursor_grab(CursorGrabMode::Confined));
+        if grabbed.is_err() {
+            println!("taste: cursor capture unavailable; the pointer stays visible");
+        }
+        platform.window.set_cursor_visible(false);
         let config = &platform.surface_config;
         // Diagnostic: which present mode the platform picked (vsync was requested; AutoVsync and
         // Fifo honour it). Jitter hunting starts with knowing whether frames are paced at all.
@@ -289,6 +309,12 @@ impl App for TasteApp {
         }
 
         let intent = map_input(&ctx.input, ctx.dt);
+        // Quit is the platform's clean shutdown (cleanup runs, the loop exits); nothing this
+        // frame would show is worth simulating or drawing on the way out.
+        if intent.quit {
+            ctx.should_close = true;
+            return;
+        }
         let steps = self.clock.advance(ctx.dt);
         self.simulate(&intent, steps);
 
@@ -299,39 +325,6 @@ impl App for TasteApp {
     }
 
     fn cleanup(&mut self, _platform: &Platform) {}
-}
-
-/// World-space bounds of everything the loaded chunks hold - terrain plus placed visible and
-/// hitbox extents - the base of the shadow region (caller policy per the render contract; the
-/// same reduction the editor makes). Falls back to a small box around the origin when nothing is
-/// loaded, so the shadow fit stays well-formed.
-fn scene_bounds(store: &ChunkStore) -> Aabb {
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    let mut grow = |b: Aabb| {
-        min = min.min(b.min);
-        max = max.max(b.max);
-    };
-    for (coord, runtime) in store.iter_loaded() {
-        let origin = chunk_origin(coord);
-        let origin_mat = Mat4::from_translation(origin);
-        if let Some(mesh) = runtime.terrain_mesh.as_ref() {
-            let b = mesh.bounds();
-            grow(Aabb::new(b.min + origin, b.max + origin));
-        }
-        for item in &runtime.visible {
-            if let VisibleItem::Primitive { primitive, transform, .. } = item {
-                grow(world_aabb(*primitive, origin_mat * *transform));
-            }
-        }
-        for hitbox in &runtime.hitboxes {
-            grow(world_aabb(hitbox.primitive, origin_mat * hitbox.transform));
-        }
-    }
-    if min.x > max.x {
-        return Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0));
-    }
-    Aabb::new(min, max)
 }
 
 /// The point the camera orbits and frames: a little above the capsule centre.
@@ -350,8 +343,19 @@ fn player_transform(position: Vec3) -> Mat4 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::PLAYER_HEIGHT;
+    use crate::constants::{GRAVITY, JUMP_VELOCITY, PLAYER_HEIGHT};
     use wok_physics::Capsule;
+
+    #[test]
+    fn the_shadow_headroom_clears_the_jump_apex() {
+        // The headroom must cover the apex plus the capsule's upper half from the region's highest
+        // point, or the shadow pops off mid-jump; pinned so a jump retune cannot out-jump the fit.
+        let apex = JUMP_VELOCITY * JUMP_VELOCITY / (2.0 * -GRAVITY.y);
+        assert!(
+            SHADOW_HEADROOM_M >= apex + PLAYER_HEIGHT * 0.5,
+            "headroom {SHADOW_HEADROOM_M} cannot cover the apex {apex} plus the capsule's upper half"
+        );
+    }
 
     #[test]
     fn the_drawn_capsule_is_the_collider() {

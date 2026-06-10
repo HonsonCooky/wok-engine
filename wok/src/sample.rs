@@ -48,17 +48,29 @@ enum Rest {
 /// placeholder shape.
 const PREFABS: [(&str, Primitive, Vec3, &str, Rest); 4] = [
     ("crate", Primitive::Cube, Vec3::new(1.0, 1.0, 1.0), "wood", Rest::Corner),
-    ("boulder", Primitive::Ellipsoid, Vec3::new(2.6, 1.8, 2.2), "stone", Rest::Center { sink_m: 0.05 }),
+    // Uniform on purpose: a uniformly scaled ellipsoid is exactly a sphere, so the boulder
+    // classifies as a Sphere collider instead of its conservative box (the old 2.6 x 1.8 x 2.2
+    // was AABB-grade). 2.2 is the old axes' geometric mean, so the volume in the scene reads the
+    // same. The sink grew with the curvature: the sphere's underside is rounder than the squashed
+    // ellipsoid's (bottom curvature radius 1.1 vs ~1.6), so matching the old contact patch
+    // (sqrt(2 * R * sink) ~ 0.4m) needs ~0.08 rather than 0.05.
+    ("boulder", Primitive::Ellipsoid, Vec3::splat(2.2), "stone", Rest::Center { sink_m: 0.08 }),
     ("pillar", Primitive::Cylinder, Vec3::new(1.2, 5.0, 1.2), "stone", Rest::Corner),
     ("marker", Primitive::Capsule, Vec3::new(0.8, 2.0, 0.8), "metal", Rest::Center { sink_m: 0.02 }),
 ];
 
 /// The sample placements: prefab slug, chunk-local x/z in metres, yaw in degrees, uniform scale.
 /// Spread around the chunk's middle so the spawn camera sees them against the hills.
+///
+/// Solid boxes stay axis-aligned: a yawed cube collides as its conservative world AABB, which
+/// reaches past the drawn faces and gives the player an invisible standable shelf (the
+/// phantom-shelf finding). An oriented-box collider is parked until an authored scene wants a
+/// rotated solid box; yaw on round prefabs is free (a sphere or vertical cylinder spun about Y is
+/// itself).
 const PLACEMENTS: [(&str, f32, f32, f32, f32); 8] = [
-    ("crate", 52.0, 60.0, 15.0, 1.5),
-    ("crate", 54.5, 61.8, 40.0, 1.0),
-    ("crate", 66.0, 55.0, 70.0, 2.0),
+    ("crate", 52.0, 60.0, 0.0, 1.5),
+    ("crate", 54.5, 61.8, 0.0, 1.0),
+    ("crate", 66.0, 55.0, 0.0, 2.0),
     ("boulder", 70.0, 48.0, 0.0, 1.0),
     ("boulder", 45.0, 75.0, 110.0, 1.4),
     ("pillar", 60.0, 70.0, 0.0, 1.0),
@@ -279,6 +291,50 @@ mod tests {
                 bounds.min.y,
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn sliced_sample_hitboxes_classify_into_their_true_collider_shapes() {
+        // The same store-to-world reduction the game runs over loaded chunks: slice, then classify
+        // each hitbox. The boulder's uniform scale is the point - it is what makes it a Sphere
+        // collider here instead of its conservative box - and the upright pillar comes out a true
+        // vertical cylinder. Cube and capsule placeholders stay boxes.
+        use wok_physics::{Collider, classify_collider};
+        let content = build();
+        let prefabs: std::collections::HashMap<_, _> = content.prefabs.iter().cloned().collect();
+        let sliced = wok_scene::slice_chunk(&content.chunk, &prefabs).expect("the sample chunk slices");
+        assert_eq!(sliced.hitboxes.len(), content.chunk.placements.len());
+        for hitbox in &sliced.hitboxes {
+            let collider = classify_collider(hitbox.primitive, hitbox.transform);
+            match hitbox.primitive {
+                Primitive::Ellipsoid => {
+                    assert!(matches!(collider, Collider::Sphere { .. }), "boulder: {collider:?}");
+                }
+                Primitive::Cylinder => {
+                    assert!(matches!(collider, Collider::VertCylinder { .. }), "pillar: {collider:?}");
+                }
+                _ => assert!(matches!(collider, Collider::Aabb(_)), "{:?}: {collider:?}", hitbox.primitive),
+            }
+        }
+    }
+
+    #[test]
+    fn box_collided_placements_stay_axis_aligned() {
+        // The phantom-shelf guard: prefabs that collide as conservative AABBs (the cube crates and
+        // the capsule marker) must not be yawed, or the AABB outgrows the drawn shape and the
+        // player can stand on the invisible margin. Round prefabs may yaw freely.
+        let content = build();
+        for placement in &content.chunk.placements {
+            let aabb_grade = matches!(placement.prefab.as_str(), "crate" | "marker");
+            if aabb_grade {
+                assert_eq!(
+                    placement.transform.rotation,
+                    Quat::IDENTITY,
+                    "{:?} collides as its AABB and must stay axis-aligned",
+                    placement.prefab
+                );
+            }
         }
     }
 

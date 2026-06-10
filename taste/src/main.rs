@@ -9,8 +9,9 @@
 //! Run with `cargo run -p taste [content-dir]` (default `./content`, the editor's convention).
 //! taste never writes content: with no scene on disk it asks you to run the editor first and exits.
 //!
-//! Controls: WASD to move relative to the camera, space to jump, hold the right mouse button to
-//! orbit the camera, F1 to toggle the hitbox overlay.
+//! Controls: WASD to move relative to the camera, space to jump, the mouse to orbit the camera
+//! (always live; the cursor is captured and hidden while the game runs), F1 to toggle the hitbox
+//! overlay, Esc to quit. On a gamepad: sticks, south button, and Select/Back to quit.
 //!
 //! Errors: `Box<dyn Error>` to `main`, which prints and exits - the wok precedent; nothing here
 //! inspects failures programmatically, so no error enum (and no anyhow dependency) has earned its
@@ -28,6 +29,7 @@ mod diagnose;
 mod follow;
 mod intent;
 mod jump;
+mod landing;
 #[cfg(test)]
 mod replay;
 mod sim;
@@ -72,8 +74,8 @@ fn start(args: &[String]) -> Result<app::TasteApp, Box<dyn Error>> {
         loaded.prefabs.len()
     );
     println!("taste: controls: WASD or left stick to move, space or south button to jump,");
-    println!("taste:           hold right mouse or use the right stick to look,");
-    println!("taste:           F1 to toggle the hitbox overlay");
+    println!("taste:           mouse or right stick to look (cursor is captured while running),");
+    println!("taste:           F1 to toggle the hitbox overlay, Esc or Select/Back to quit");
 
     app::TasteApp::new(loaded)
 }

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
 use wok_content::ChunkStore;
-use wok_physics::Motion;
+use wok_physics::{Collider, Motion};
 use wok_scene::{
     Aabb, CHUNK_GRID_DIM, CHUNK_GRID_LEN, Chunk, ChunkCoord, ChunkStreaming, HEIGHT_MAX_M, HEIGHT_MIN_M, Heightmap,
     InstanceId, Placement, Prefab, PrefabRef, PrefabState, Primitive, Shape, SurfaceTag, Transform,
@@ -40,13 +40,15 @@ const FLAT_HEIGHT_M: f32 = 2.0;
 const FLAT_MAX_CELL: u16 = 40;
 const SLOPE_DELTA: u16 = 100;
 
-/// A solid placeholder prefab: a single unit cube, hitbox and visible.
-fn solid_block() -> Prefab {
+/// A solid placeholder prefab: a single unit primitive, hitbox and visible. The wall stays a cube;
+/// the pillar is a cylinder, so the fixture carries one round hitbox through the store and the
+/// world reduction classifies it round (the path the demo's content takes).
+fn solid(primitive: Primitive) -> Prefab {
     Prefab {
         states: vec![PrefabState {
             name: "default".into(),
             shapes: vec![Shape {
-                primitive: Primitive::Cube,
+                primitive,
                 transform: Transform::IDENTITY,
                 surface: Some(SurfaceTag::new("stone")),
                 is_hitbox: true,
@@ -58,9 +60,9 @@ fn solid_block() -> Prefab {
     }
 }
 
-fn placement(id: u32, center: Vec3, size: Vec3) -> Placement {
+fn placement(prefab: &str, id: u32, center: Vec3, size: Vec3) -> Placement {
     Placement {
-        prefab: PrefabRef::new("block"),
+        prefab: PrefabRef::new(prefab),
         instance_id: InstanceId(id),
         transform: Transform { translation: center, rotation: Quat::IDENTITY, scale: size },
         state: None,
@@ -86,14 +88,16 @@ fn fixture_world() -> World {
         coord: ChunkCoord::new(0, 0),
         placements: vec![
             // The long wall along z the script stops against and slides along.
-            placement(1, WALL_CENTER, WALL_SIZE),
-            // A pillar off the walked path, so collision is shown to be selective.
-            placement(2, Vec3::new(30.0, 4.0, 30.0), Vec3::new(2.0, 8.0, 2.0)),
+            placement("block", 1, WALL_CENTER, WALL_SIZE),
+            // A round pillar off the walked path: collision is shown to be selective, and the
+            // reduction is shown to classify a real cylinder hitbox round.
+            placement("pillar", 2, Vec3::new(30.0, 4.0, 30.0), Vec3::new(2.0, 8.0, 2.0)),
         ],
         streaming: ChunkStreaming::default(),
     };
     let mut prefabs = HashMap::new();
-    prefabs.insert(PrefabRef::new("block"), solid_block());
+    prefabs.insert(PrefabRef::new("block"), solid(Primitive::Cube));
+    prefabs.insert(PrefabRef::new("pillar"), solid(Primitive::Cylinder));
 
     let mut store = ChunkStore::new();
     store.load(chunk, Some(fixture_heightmap()), &prefabs).expect("the fixture chunk should load");
@@ -153,6 +157,27 @@ fn settle(world: &World, start: Player, steps: usize) -> Player {
 /// splits between them.
 fn base_height(center: Vec3) -> f32 {
     center.y - PLAYER_HEIGHT * 0.5
+}
+
+#[test]
+fn the_world_reduction_classifies_each_hitbox_into_its_own_shape() {
+    // The fixture's wall is a scaled cube and its pillar a uniform-xz cylinder; through the real
+    // store-to-world path the wall must stay a conservative box and the pillar must come out a
+    // true vertical cylinder at the placement's dimensions - not be lifted to its box.
+    let world = fixture_world();
+    assert_eq!(world.statics.len(), 2);
+    assert!(
+        world.statics.iter().any(|c| matches!(c, Collider::Aabb(_))),
+        "the cube wall should reduce to a box"
+    );
+    let round = world.statics.iter().find_map(|c| match *c {
+        Collider::VertCylinder { center, radius, half_height } => Some((center, radius, half_height)),
+        _ => None,
+    });
+    let (center, radius, half_height) = round.expect("the cylinder pillar should classify round");
+    assert!((center - Vec3::new(30.0, 4.0, 30.0)).length() < 1e-5, "pillar centre: {center:?}");
+    assert!((radius - 1.0).abs() < 1e-5, "pillar radius: {radius}");
+    assert!((half_height - 4.0).abs() < 1e-5, "pillar half-height: {half_height}");
 }
 
 #[test]
@@ -243,10 +268,13 @@ fn walking_off_a_ledge_taller_than_the_glue_goes_airborne() {
     let mut world = fixture_world();
     let drop = 2.0;
     assert!(drop > SNAP_DOWN_DISTANCE, "fixture: the ledge must out-reach the glue");
-    world.statics.push(Aabb::from_center_extents(
-        Vec3::new(6.0, FLAT_HEIGHT_M + drop * 0.5, 100.0),
-        Vec3::new(2.0, drop * 0.5, 2.0),
-    ));
+    world.statics.push(
+        Aabb::from_center_extents(
+            Vec3::new(6.0, FLAT_HEIGHT_M + drop * 0.5, 100.0),
+            Vec3::new(2.0, drop * 0.5, 2.0),
+        )
+        .into(),
+    );
 
     let start = player_at(Vec3::new(6.0, FLAT_HEIGHT_M + drop + PLAYER_HEIGHT, 100.0));
     let on_box = settle(&world, start, 120);

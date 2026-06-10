@@ -53,10 +53,11 @@
 //! [`Heightmap`]: wok_scene::Heightmap
 
 use glam::{Quat, Vec3};
-use wok_scene::{Aabb, Heightmap};
+use wok_scene::Heightmap;
 
 use crate::capsule::Capsule;
-use crate::sweep::sweep_capsule_aabbs;
+use crate::collider::Collider;
+use crate::sweep::sweep_capsule_colliders;
 
 /// Unit direction from the target out to the camera for orbit angles `yaw` and `pitch` (radians).
 ///
@@ -83,12 +84,14 @@ pub fn boom_point(target: Vec3, boom_direction: Vec3, length: f32) -> Vec3 {
 /// Boom length that keeps the camera clear of static geometry between the target and the camera.
 ///
 /// Sweeps a sphere of radius `probe_radius` from `target` along `boom_direction` (expected unit, as
-/// [`boom_direction`] returns) for `distance` metres - 2a's [`sweep_capsule_aabbs`] on a capsule
-/// whose segment has collapsed to a point. With an obstruction the arm is the time-of-impact
-/// fraction of `distance`, the point where the probe sphere stops; that leaves its centre - where
-/// the camera rides - about `probe_radius` in front of the surface, so the probe radius is the
-/// standoff (the brief's "small skin"). With nothing in the way it is the full `distance`. The
-/// result lies in `0.0..=distance`, since the sweep's time of impact is in `0.0..=1.0`.
+/// [`boom_direction`] returns) for `distance` metres - the collider sweep
+/// ([`sweep_capsule_colliders`]) on a capsule whose segment has collapsed to a point, so the boom
+/// clamps against the same mixed collider set the body collides with, round shapes included. With
+/// an obstruction the arm is the time-of-impact fraction of `distance`, the point where the probe
+/// sphere stops; that leaves its centre - where the camera rides - about `probe_radius` in front of
+/// the surface, so the probe radius is the standoff (the brief's "small skin"). With nothing in the
+/// way it is the full `distance`. The result lies in `0.0..=distance`, since the sweep's time of
+/// impact is in `0.0..=1.0`.
 ///
 /// Total over valid inputs: a zero `distance` produces no motion to sweep and returns `0.0`; a
 /// target already inside a collider impacts at time zero and returns `0.0` (the camera collapses
@@ -98,10 +101,10 @@ pub fn spring_arm(
     boom_direction: Vec3,
     distance: f32,
     probe_radius: f32,
-    statics: &[Aabb],
+    statics: &[Collider],
 ) -> f32 {
     let probe = Capsule::new(target, target, probe_radius);
-    match sweep_capsule_aabbs(&probe, boom_direction * distance, statics) {
+    match sweep_capsule_colliders(&probe, boom_direction * distance, statics) {
         // The sphere surface meets the box at `toi`; its centre is that fraction of the way out,
         // i.e. `probe_radius` short of the surface - which is where we want the camera.
         Some(hit) => hit.toi * distance,
@@ -137,7 +140,7 @@ mod tests {
     use super::*;
     use crate::smooth;
     use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
-    use wok_scene::{CHUNK_GRID_LEN, SurfaceTag};
+    use wok_scene::{Aabb, CHUNK_GRID_LEN, SurfaceTag};
 
     const EPS: f32 = 1e-5;
 
@@ -149,8 +152,8 @@ mod tests {
     }
 
     // A wall blocking the +Z boom: its -Z face is at z = 5, wide in x and y.
-    fn wall_at_z5() -> Aabb {
-        Aabb::new(Vec3::new(-5.0, -5.0, 5.0), Vec3::new(5.0, 5.0, 6.0))
+    fn wall_at_z5() -> Collider {
+        Collider::from(Aabb::new(Vec3::new(-5.0, -5.0, 5.0), Vec3::new(5.0, 5.0, 6.0)))
     }
 
     // ---- orbit ----
@@ -229,8 +232,17 @@ mod tests {
     fn target_inside_a_collider_collapses_the_arm() {
         // Degenerate but must be graceful: the probe starts inside the box, impacts at time zero, so
         // the arm is zero (the camera collapses onto the target) rather than erroring.
-        let around = Aabb::new(Vec3::splat(-2.0), Vec3::splat(2.0));
+        let around = Collider::from(Aabb::new(Vec3::splat(-2.0), Vec3::splat(2.0)));
         assert_eq!(spring_arm(Vec3::ZERO, Vec3::Z, 10.0, 0.5, &[around]), 0.0);
+    }
+
+    #[test]
+    fn a_round_obstruction_clamps_the_arm_too() {
+        // The boom collides with the same collider set the body does: a sphere across the boom
+        // clamps the arm at the probe's contact with the ball, near face at z = 4.
+        let ball = Collider::Sphere { center: Vec3::new(0.0, 0.0, 6.0), radius: 2.0 };
+        let arm = spring_arm(Vec3::ZERO, Vec3::Z, 10.0, 0.5, &[ball]);
+        assert!((arm - 3.5).abs() < 1e-2, "probe centre should stop 0.5 short of the near face: {arm}");
     }
 
     #[test]

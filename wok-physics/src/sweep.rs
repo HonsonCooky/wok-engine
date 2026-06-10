@@ -23,32 +23,40 @@
 //! both correct - the capsule never reaches the box - and what lets [`crate::slide`] keep moving a
 //! capsule that is already flush against a wall.
 //!
+//! The advancement loop itself is shape-agnostic: it needs only an exact closest-point pair against
+//! a convex static and a fallback normal for the segment-inside case. It is factored as
+//! [`advance_capsule`] so the vertical-cylinder sweep ([`crate::sweep_round`]) runs the identical
+//! machinery against its own projection; this module instantiates it for the [`Aabb`] and owns the
+//! earliest-impact dispatch over mixed [`Collider`] sets.
+//!
 //! Determinism (canon contract): a fixed iteration order with a fixed cap, no RNG, no parallel
-//! reduction; the multi-box sweep takes the earliest impact and breaks ties by slice order. The
-//! math reads only relative positions, so it is position-independent to float precision.
+//! reduction; the multi-collider sweep takes the earliest impact and breaks ties by slice order.
+//! The math reads only relative positions, so it is position-independent to float precision.
 
 use glam::Vec3;
 use wok_scene::Aabb;
 
 use crate::capsule::Capsule;
+use crate::collider::Collider;
 use crate::geom::closest_points_segment_aabb;
+use crate::sweep_round::{sweep_capsule_cylinder_inflated, sweep_capsule_sphere_inflated};
 
-/// Below this distance the segment is touching or inside the box and the closest-points direction
-/// is unreliable; we fall back to a face normal (see [`face_normal`]).
-const TOUCHING: f32 = 1e-6;
+/// Below this distance the segment is touching or inside the static shape and the closest-points
+/// direction is unreliable; we fall back to the shape's own deep normal (see [`face_normal`]).
+pub(crate) const TOUCHING: f32 = 1e-6;
 
 /// Approach rates at or below this count as "not closing": the motion is parallel to or receding
-/// from the box, so no impact. Also guards the `gap / closing` divide.
-const CLOSING_EPS: f32 = 1e-8;
+/// from the shape, so no impact. Also guards the `gap / closing` divide.
+pub(crate) const CLOSING_EPS: f32 = 1e-8;
 
 /// Impact is declared once the gap is within this of zero. The resulting `toi` sits a hair before
-/// true contact (the capsule surface is `GAP_EPS` from the box), far tighter than the response
+/// true contact (the capsule surface is `GAP_EPS` from the shape), far tighter than the response
 /// needs.
-const GAP_EPS: f32 = 1e-5;
+pub(crate) const GAP_EPS: f32 = 1e-5;
 
 /// Below this squared length the motion is treated as zero: a capsule that does not move cannot
 /// sweep into anything.
-const MOTION_EPS_SQ: f32 = 1e-12;
+pub(crate) const MOTION_EPS_SQ: f32 = 1e-12;
 
 /// Cap on advancement steps. Convergence is fast for the contacts a player meets; the cap only
 /// bounds a degenerate grazing approach, which is reported as no hit.
@@ -106,39 +114,104 @@ pub(crate) fn sweep_capsule_aabbs_inflated(
     best
 }
 
+/// Sweep `capsule` through `delta` against one static [`Collider`], dispatching to the shape's own
+/// sweep; `None` if it never makes contact.
+pub fn sweep_capsule_collider(capsule: &Capsule, delta: Vec3, collider: &Collider) -> Option<SweptHit> {
+    sweep_collider_one(capsule, delta, collider, 0.0)
+}
+
+/// Sweep `capsule` through `delta` against a mixed set of static colliders, returning the earliest
+/// impact: the same slice-order, earliest-toi-wins contract as [`sweep_capsule_aabbs`].
+pub fn sweep_capsule_colliders(capsule: &Capsule, delta: Vec3, colliders: &[Collider]) -> Option<SweptHit> {
+    sweep_capsule_colliders_inflated(capsule, delta, colliders, 0.0)
+}
+
+/// Earliest-impact collider sweep with the capsule radius inflated by `skin`: what
+/// [`crate::slide`] runs each iteration. With `skin = 0.0` it is exactly
+/// [`sweep_capsule_colliders`].
+pub(crate) fn sweep_capsule_colliders_inflated(
+    capsule: &Capsule,
+    delta: Vec3,
+    colliders: &[Collider],
+    skin: f32,
+) -> Option<SweptHit> {
+    let mut best: Option<SweptHit> = None;
+    for collider in colliders {
+        if let Some(hit) = sweep_collider_one(capsule, delta, collider, skin) {
+            // Earliest impact wins; an exact tie keeps the earlier-indexed collider.
+            match best {
+                Some(b) if b.toi <= hit.toi => {}
+                _ => best = Some(hit),
+            }
+        }
+    }
+    best
+}
+
+/// One collider, one sweep: the per-shape dispatch every multi-collider query funnels through.
+fn sweep_collider_one(capsule: &Capsule, delta: Vec3, collider: &Collider, skin: f32) -> Option<SweptHit> {
+    match *collider {
+        Collider::Aabb(ref aabb) => sweep_one(capsule, delta, aabb, skin),
+        Collider::Sphere { center, radius } => sweep_capsule_sphere_inflated(capsule, delta, center, radius, skin),
+        Collider::VertCylinder { center, radius, half_height } => {
+            sweep_capsule_cylinder_inflated(capsule, delta, center, radius, half_height, skin)
+        }
+    }
+}
+
 /// Conservative advancement of one capsule against one box, with the radius inflated by `skin`.
 fn sweep_one(capsule: &Capsule, delta: Vec3, aabb: &Aabb, skin: f32) -> Option<SweptHit> {
+    advance_capsule(
+        capsule,
+        delta,
+        capsule.radius + skin,
+        |a, b| closest_points_segment_aabb(a, b, aabb),
+        |p| face_normal(aabb, p),
+    )
+}
+
+/// Conservative advancement of one capsule against one convex static shape, the shape supplied as
+/// its exact closest-point pairing (`closest`, segment endpoints in, `(on_segment, on_shape)` out)
+/// and a fallback outward normal for the segment-touching-or-inside case (`deep_normal`, given the
+/// segment point). `radius` is the capsule radius, already inflated by whatever skin the caller
+/// keeps. The convexity argument in the module docs is shape-generic, so so is the loop.
+pub(crate) fn advance_capsule(
+    capsule: &Capsule,
+    delta: Vec3,
+    radius: f32,
+    closest: impl Fn(Vec3, Vec3) -> (Vec3, Vec3),
+    deep_normal: impl Fn(Vec3) -> Vec3,
+) -> Option<SweptHit> {
     if delta.length_squared() <= MOTION_EPS_SQ {
         return None;
     }
-    let radius = capsule.radius + skin;
     let mut a = capsule.a;
     let mut b = capsule.b;
     let mut toi = 0.0_f32;
 
     for _ in 0..MAX_STEPS {
-        let (on_segment, on_box) = closest_points_segment_aabb(a, b, aabb);
-        let to_box = on_box - on_segment;
-        let dist = to_box.length();
+        let (on_segment, on_shape) = closest(a, b);
+        let to_shape = on_shape - on_segment;
+        let dist = to_shape.length();
 
         if dist <= TOUCHING {
-            // Segment is touching or inside the box: the closest direction is degenerate, so use
-            // the nearest face's outward normal to give a sane push-out direction.
-            let normal = face_normal(aabb, on_segment);
-            return Some(SweptHit { toi, normal, point: on_box });
+            // Segment is touching or inside the shape: the closest direction is degenerate, so use
+            // the shape's deep normal to give a sane push-out direction.
+            let normal = deep_normal(on_segment);
+            return Some(SweptHit { toi, normal, point: on_shape });
         }
 
-        let toward_box = to_box / dist;
-        let closing = delta.dot(toward_box);
+        let toward_shape = to_shape / dist;
+        let closing = delta.dot(toward_shape);
         if closing <= CLOSING_EPS {
-            // Moving away from or parallel to the box: the gap never closes, so no impact.
+            // Moving away from or parallel to the shape: the gap never closes, so no impact.
             return None;
         }
 
         let gap = dist - radius;
         if gap <= GAP_EPS {
-            // Capsule surface has reached the box: outward normal points box -> capsule.
-            return Some(SweptHit { toi, normal: -toward_box, point: on_box });
+            // Capsule surface has reached the shape: outward normal points shape -> capsule.
+            return Some(SweptHit { toi, normal: -toward_shape, point: on_shape });
         }
 
         // Advance to where the current tangent predicts contact. Convexity guarantees this does not
@@ -270,6 +343,19 @@ mod tests {
         assert_eq!(hit.toi, 0.0);
         assert!(hit.normal.is_finite(), "normal must be finite, got {:?}", hit.normal);
         assert!((hit.normal.length() - 1.0).abs() < 1e-5, "normal must be unit, len {}", hit.normal.length());
+    }
+
+    #[test]
+    fn the_earliest_impact_wins_across_mixed_collider_shapes() {
+        // The dispatch's contract is the AABB multi-sweep's: earliest toi over the slice, in slice
+        // order. A sphere in front of a box must win, whichever the slice lists first.
+        let c = player(Vec3::ZERO);
+        let near_sphere = Collider::Sphere { center: Vec3::new(3.0, 1.0, 0.0), radius: 1.0 }; // contact toi 0.3
+        let far_box = Collider::Aabb(Aabb::new(Vec3::new(6.0, 0.0, -1.0), Vec3::new(7.0, 3.0, 1.0)));
+        let hit = sweep_capsule_colliders(&c, Vec3::new(5.0, 0.0, 0.0), &[far_box, near_sphere])
+            .expect("hits the sphere");
+        assert!((hit.toi - 0.3).abs() < 1e-4, "toi = {}", hit.toi);
+        assert!((hit.normal - Vec3::NEG_X).length() < 1e-4, "normal = {:?}", hit.normal);
     }
 
     #[test]
