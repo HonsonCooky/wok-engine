@@ -4,10 +4,11 @@
 //! Level 3's screenshot diff with tolerances, later.
 
 use glam::{Mat4, Vec3};
-use wok_light::LightState;
+use wok_light::{CelParams, Fog, LightState, SkyGradient, Sun};
 use wok_mesh::MeshGpu;
 use wok_platform::wgpu;
 use wok_render::{Camera, RenderItem, Renderer};
+use wok_scene::Aabb;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const SIZE: u32 = 128;
@@ -36,6 +37,7 @@ fn shader_modules_compile_and_validate() {
     let passes = [
         ("mesh", include_str!("../src/shaders/mesh.wgsl")),
         ("sky", include_str!("../src/shaders/sky.wgsl")),
+        ("shadow", include_str!("../src/shaders/shadow.wgsl")),
     ];
     for (name, body) in passes {
         device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -63,6 +65,7 @@ fn render_frame(
     renderer: &mut Renderer,
     camera: &Camera,
     light: &LightState,
+    shadow_region: Aabb,
     items: &[RenderItem],
 ) -> Vec<u8> {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -85,7 +88,7 @@ fn render_frame(
 
     let mut encoder =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("smoke") });
-    renderer.render(device, queue, &mut encoder, &view, camera, light, items);
+    renderer.render(device, queue, &mut encoder, &view, camera, light, shadow_region, items);
     encoder.copy_texture_to_buffer(
         texture.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
@@ -124,8 +127,9 @@ fn render_smoke_sky_gradient_and_geometry_land() {
     let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
     let camera = Camera { view_proj: projection * view, eye };
     let light = LightState::default();
+    let region = Aabb::new(Vec3::splat(-3.0), Vec3::splat(3.0));
 
-    let sky_only = render_frame(&device, &queue, &mut renderer, &camera, &light, &[]);
+    let sky_only = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &[]);
 
     // Structural property 1: the sky pass produced a vertical gradient, not a uniform clear.
     let first = &sky_only[0..4];
@@ -141,7 +145,7 @@ fn render_smoke_sky_gradient_and_geometry_land() {
         mesh: &cube,
         color: Vec3::new(1.0, 0.1, 0.1),
     }];
-    let with_cube = render_frame(&device, &queue, &mut renderer, &camera, &light, &items);
+    let with_cube = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &items);
     let differing = sky_only
         .chunks_exact(4)
         .zip(with_cube.chunks_exact(4))
@@ -152,5 +156,90 @@ fn render_smoke_sky_gradient_and_geometry_land() {
     assert!(
         differing > 500,
         "geometry changed only {differing} pixels; expected the cube to cover far more"
+    );
+}
+
+/// The pixel of a world point under `camera`, for sampling a rendered frame at known geometry.
+fn pixel_of(camera: &Camera, world: Vec3) -> (u32, u32) {
+    let ndc = camera.view_proj.project_point3(world);
+    let x = ((ndc.x * 0.5 + 0.5) * SIZE as f32) as u32;
+    let y = ((-ndc.y * 0.5 + 0.5) * SIZE as f32) as u32;
+    (x.min(SIZE - 1), y.min(SIZE - 1))
+}
+
+/// Mean luminance (plain RGB average) of the 5x5 pixel block centred on `(x, y)`.
+fn block_luminance(pixels: &[u8], x: u32, y: u32) -> f32 {
+    let mut sum = 0.0;
+    for dy in -2i32..=2 {
+        for dx in -2i32..=2 {
+            let px = (x as i32 + dx).clamp(0, SIZE as i32 - 1) as u32;
+            let py = (y as i32 + dy).clamp(0, SIZE as i32 - 1) as u32;
+            let at = ((py * SIZE + px) * 4) as usize;
+            sum += (pixels[at] as f32 + pixels[at + 1] as f32 + pixels[at + 2] as f32) / 3.0;
+        }
+    }
+    sum / 25.0
+}
+
+#[test]
+fn shadow_smoke_a_floating_cube_darkens_the_plane_behind_it() {
+    // Structural, not pixel-exact (Level 3 owns exact pixels later): a cube floats above a large
+    // plane under a low sun travelling toward +x, so the cube's shadow falls on the plane's +x
+    // side. The plane region there must read darker than the mirror point on the -x side, which
+    // the same sun lights unoccluded. Rim is zeroed so the comparison sees only the sun term, and
+    // fog starts far beyond the scene.
+    let (device, queue) = device();
+    let mut renderer = Renderer::new(&device, FORMAT, SIZE, SIZE);
+
+    let light = LightState {
+        sun: Sun { direction: Vec3::new(1.0, -1.0, 0.0), color: Vec3::ONE },
+        ambient: Vec3::splat(0.1),
+        fog: Fog { color: Vec3::splat(0.7), start: 500.0, end: 1000.0 },
+        sky: SkyGradient { horizon: Vec3::splat(0.7), zenith: Vec3::new(0.3, 0.5, 0.9) },
+        cel: CelParams { band_count: 4, transition_softness: 0.05, rim_intensity: 0.0 },
+    };
+
+    // Straight down from 20m; up is +Z because the view direction is -Y.
+    let eye = Vec3::new(0.0, 20.0, 0.0);
+    let projection = Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 100.0);
+    let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Z);
+    let camera = Camera { view_proj: projection * view, eye };
+
+    let plane = MeshGpu::upload(&device, &wok_mesh::plane());
+    let cube = MeshGpu::upload(&device, &wok_mesh::cube());
+    let items = [
+        RenderItem {
+            transform: Mat4::from_scale(Vec3::new(24.0, 1.0, 24.0)),
+            mesh: &plane,
+            color: Vec3::splat(0.8),
+        },
+        RenderItem {
+            transform: Mat4::from_scale_rotation_translation(
+                Vec3::splat(2.0),
+                glam::Quat::IDENTITY,
+                Vec3::new(0.0, 3.0, 0.0),
+            ),
+            mesh: &cube,
+            color: Vec3::splat(0.8),
+        },
+    ];
+    let region = Aabb::new(Vec3::new(-12.0, -0.5, -12.0), Vec3::new(12.0, 4.5, 12.0));
+
+    let pixels = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &items);
+
+    // The cube (2m wide, bottom at 2m, top at 4m) under a 45 degree sun shadows the plane across
+    // x in roughly [1, 5]; (3.5, 0, 0) sits inside that band and clear of the cube's screen
+    // footprint from a straight-down camera. (-3.5, 0, 0) is its unoccluded mirror.
+    let (sx, sy) = pixel_of(&camera, Vec3::new(3.5, 0.0, 0.0));
+    let (lx, ly) = pixel_of(&camera, Vec3::new(-3.5, 0.0, 0.0));
+    let shadowed = block_luminance(&pixels, sx, sy);
+    let lit = block_luminance(&pixels, lx, ly);
+    assert!(
+        lit > 60.0,
+        "the unoccluded plane reads at luminance {lit}; the sun pass did not light it"
+    );
+    assert!(
+        shadowed < lit * 0.75,
+        "shadowed side {shadowed} vs lit side {lit}: the cube cast no measurable shadow"
     );
 }

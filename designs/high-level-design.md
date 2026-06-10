@@ -87,7 +87,7 @@ Everything else follows from the principles and the crate descriptions above. Wh
 - **`wok-physics`** - `wok-scene`.
 - **`wok-mesh`** - `wok-scene`, `wok-platform` (taken when MeshGpu landed with the renderer).
 - **`wok-content`** - `wok-scene`, `wok-mesh`.
-- **`wok-render`** - `wok-platform`, `wok-mesh`, `wok-light`.
+- **`wok-render`** - `wok-platform`, `wok-mesh`, `wok-light`, `wok-scene` (taken when the shadow pass landed: the frame API's shadow region is wok-scene's `Aabb`).
 
 As later crates land, each takes on what it genuinely uses under the three rules, and this list grows to match.
 

@@ -20,12 +20,13 @@ use glam::{Mat4, Vec2, Vec3};
 use wok_content::{ChunkState, ChunkStore};
 use wok_light::LightState;
 use wok_mesh::{MeshGpu, primitive_mesh};
+use wok_physics::world_aabb;
 use wok_platform::input::InputState;
 use wok_platform::winit::event::MouseButton;
 use wok_platform::winit::keyboard::Key;
 use wok_platform::{App, FrameCtx, Platform, gfx};
 use wok_render::{Camera, RenderItem, Renderer};
-use wok_scene::{CHUNK_GRID_DIM, ChunkCoord, Prefab, PrefabRef, Primitive, Scene, SurfaceTag, VisibleItem, Watcher};
+use wok_scene::{Aabb, CHUNK_GRID_DIM, ChunkCoord, Prefab, PrefabRef, Primitive, Scene, SurfaceTag, VisibleItem, Watcher};
 
 use crate::camera::{self, CameraInput, FlyCamera};
 use crate::content::{self, ContentPaths, LoadedContent, Reload};
@@ -56,6 +57,40 @@ fn primitive_index(primitive: Primitive) -> usize {
 /// World-space origin of a chunk: its grid coordinate times the chunk size.
 fn chunk_origin(coord: ChunkCoord) -> Vec3 {
     Vec3::new(coord.x as f32 * CHUNK_SIZE_M, 0.0, coord.z as f32 * CHUNK_SIZE_M)
+}
+
+/// World-space bounds of everything the loaded chunks hold - terrain plus placed visible and
+/// hitbox extents - the shadow region the frame call passes (caller policy per the render
+/// contract). Falls back to a small box around the origin when nothing is loaded, so the shadow
+/// fit stays well-formed. Recomputed per frame because hot reload can change the store between
+/// any two frames; the scan is a few thousand min/max ops per chunk, frame-state-cheap.
+fn scene_bounds(store: &ChunkStore) -> Aabb {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let mut grow = |b: Aabb| {
+        min = min.min(b.min);
+        max = max.max(b.max);
+    };
+    for (coord, runtime) in store.iter_loaded() {
+        let origin = chunk_origin(coord);
+        let origin_mat = Mat4::from_translation(origin);
+        if let Some(mesh) = runtime.terrain_mesh.as_ref() {
+            let b = mesh.bounds();
+            grow(Aabb::new(b.min + origin, b.max + origin));
+        }
+        for item in &runtime.visible {
+            if let VisibleItem::Primitive { primitive, transform, .. } = item {
+                grow(world_aabb(*primitive, origin_mat * *transform));
+            }
+        }
+        for hitbox in &runtime.hitboxes {
+            grow(world_aabb(hitbox.primitive, origin_mat * hitbox.transform));
+        }
+    }
+    if min.x > max.x {
+        return Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0));
+    }
+    Aabb::new(min, max)
 }
 
 /// Flat base color for a placeholder by its surface tag; editor presentation policy, not engine
@@ -242,6 +277,7 @@ impl EditorApp {
             &frame.view,
             &camera,
             &self.light,
+            scene_bounds(&self.store),
             &items,
         );
         frame.finish(ctx.platform);

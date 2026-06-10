@@ -21,9 +21,10 @@ use glam::{Mat4, Quat, Vec3};
 use wok_content::ChunkStore;
 use wok_light::LightState;
 use wok_mesh::{MeshGpu, primitive_mesh};
+use wok_physics::world_aabb;
 use wok_platform::{App, FrameCtx, Platform, gfx};
 use wok_render::{Camera, RenderItem, Renderer};
-use wok_scene::{ChunkCoord, Primitive, SurfaceTag, VisibleItem};
+use wok_scene::{Aabb, ChunkCoord, Primitive, SurfaceTag, VisibleItem};
 
 use crate::clock::FixedClock;
 use crate::constants::{
@@ -43,6 +44,12 @@ const TERRAIN_COLOR: Vec3 = Vec3::new(0.40, 0.60, 0.35);
 const MARKER_SIZE: f32 = 0.6;
 const MARKER_LIFT: f32 = 0.01;
 const MARKER_COLOR: Vec3 = Vec3::new(1.0, 0.0, 1.0);
+
+/// Vertical headroom added to the shadow region's top: the player must keep casting at the jump
+/// apex (JUMP_VELOCITY^2 / 2g is about 1.3m) plus half the placeholder's height above the tracked
+/// position, even when standing on the region's highest point. Game knowledge, so it lives here
+/// rather than in the renderer's fit.
+const SHADOW_HEADROOM_M: f32 = 3.0;
 
 /// Draw order of the primitive mesh cache; `primitive_index` must match.
 const PRIMITIVES: [Primitive; 5] =
@@ -83,6 +90,9 @@ pub struct TasteApp {
     scene_name: String,
     light: LightState,
     store: ChunkStore,
+    /// The shadow region the frame call passes: the loaded content's bounds plus jump headroom,
+    /// computed once because taste loads everything up front and never reloads.
+    shadow_region: Aabb,
     world: World,
     player: Player,
     /// The sim state one fixed step behind `player`: the other end of the draw interpolation.
@@ -101,6 +111,8 @@ impl TasteApp {
         for (chunk, heightmap) in loaded.chunks {
             store.load(chunk, heightmap, &loaded.prefabs)?;
         }
+        let mut shadow_region = scene_bounds(&store);
+        shadow_region.max.y += SHADOW_HEADROOM_M;
         let world = World::from_store(&store);
         let player = sim::spawn(&world);
         let camera = FollowCamera::spawn(camera_target(player.motion.position));
@@ -108,6 +120,7 @@ impl TasteApp {
             scene_name: loaded.scene.name,
             light: loaded.light,
             store,
+            shadow_region,
             world,
             player,
             player_prev: player,
@@ -200,6 +213,7 @@ impl TasteApp {
             &frame.view,
             &camera,
             &self.light,
+            self.shadow_region,
             &items,
         );
         frame.finish(ctx.platform);
@@ -248,6 +262,39 @@ impl App for TasteApp {
     }
 
     fn cleanup(&mut self, _platform: &Platform) {}
+}
+
+/// World-space bounds of everything the loaded chunks hold - terrain plus placed visible and
+/// hitbox extents - the base of the shadow region (caller policy per the render contract; the
+/// same reduction the editor makes). Falls back to a small box around the origin when nothing is
+/// loaded, so the shadow fit stays well-formed.
+fn scene_bounds(store: &ChunkStore) -> Aabb {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let mut grow = |b: Aabb| {
+        min = min.min(b.min);
+        max = max.max(b.max);
+    };
+    for (coord, runtime) in store.iter_loaded() {
+        let origin = chunk_origin(coord);
+        let origin_mat = Mat4::from_translation(origin);
+        if let Some(mesh) = runtime.terrain_mesh.as_ref() {
+            let b = mesh.bounds();
+            grow(Aabb::new(b.min + origin, b.max + origin));
+        }
+        for item in &runtime.visible {
+            if let VisibleItem::Primitive { primitive, transform, .. } = item {
+                grow(world_aabb(*primitive, origin_mat * *transform));
+            }
+        }
+        for hitbox in &runtime.hitboxes {
+            grow(world_aabb(hitbox.primitive, origin_mat * hitbox.transform));
+        }
+    }
+    if min.x > max.x {
+        return Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0));
+    }
+    Aabb::new(min, max)
 }
 
 /// The point the camera orbits and frames: a little above the capsule centre.

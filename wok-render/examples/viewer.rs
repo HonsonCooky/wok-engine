@@ -1,9 +1,11 @@
-//! Visual verification vehicle for wok-render part 1.
+//! Visual verification vehicle for wok-render.
 //!
 //! Opens a wok-platform window and renders a fixture scene built in code: a grid of the five
 //! placeholder primitives at increasing scales standing on a terrain mesh generated from a
-//! synthetic heightmap, all cel-shaded under a hand-built `LightState` with fog and the gradient
-//! sky. The camera orbits the scene slowly. No input handling; close the window to exit.
+//! synthetic heightmap, all cel-shaded under a hand-built `LightState` with fog, the gradient
+//! sky, and the sun's shadow map (primitives cast onto the terrain and each other; the fixture's
+//! bounds are the shadow region). The camera orbits the scene slowly. No input handling; close
+//! the window to exit.
 //!
 //! Run with: cargo run -p wok-render --example viewer
 
@@ -12,7 +14,7 @@ use wok_light::{CelParams, Fog, LightState, SkyGradient, Sun};
 use wok_mesh::{MeshGpu, primitive_mesh, terrain_mesh};
 use wok_platform::{App, Desc, FrameCtx, Platform, gfx, run};
 use wok_render::{Camera, RenderItem, Renderer};
-use wok_scene::{CHUNK_GRID_DIM, CHUNK_GRID_LEN, Heightmap, Primitive, SurfaceTag};
+use wok_scene::{Aabb, CHUNK_GRID_DIM, CHUNK_GRID_LEN, Heightmap, Primitive, SurfaceTag};
 
 // One row per primitive kind, one column per scale, standing on the terrain.
 const ROWS: [(Primitive, Vec3); 5] = [
@@ -75,16 +77,23 @@ fn fixture_light() -> LightState {
     }
 }
 
-/// The uploaded meshes and the static placements that reference them by index. Built once in
-/// `init`; the per-frame render list borrows from `meshes`.
+/// The uploaded meshes, the static placements that reference them by index, and the fixture's
+/// world bounds (the shadow region the frame call passes). Built once in `init`; the per-frame
+/// render list borrows from `meshes`.
 struct Fixture {
     meshes: Vec<MeshGpu>,
     placements: Vec<(usize, Mat4, Vec3)>,
     orbit_center: Vec3,
+    bounds: Aabb,
 }
 
 fn build_fixture(platform: &Platform) -> Fixture {
     let terrain = synthetic_heightmap();
+    let terrain_cpu = terrain_mesh(&terrain);
+    // The shadow region starts as the terrain's bounds and grows over each placement: every
+    // placement here is an axis-aligned unit primitive, so its box is the center +/- half the
+    // scale on each axis (conservative for the plane's flat y, which is fine for a fit).
+    let mut bounds = terrain_cpu.bounds();
     let mut meshes = Vec::new();
     let mut placements = Vec::new();
 
@@ -99,17 +108,20 @@ fn build_fixture(platform: &Platform) -> Fixture {
                 Primitive::Plane => terrain.height_at(x, z) + 1.5,
                 _ => terrain.height_at(x, z) + 0.5 * scale + 0.05,
             };
+            let center = Vec3::new(x, y, z);
             let transform = Mat4::from_scale_rotation_translation(
                 Vec3::splat(*scale),
                 glam::Quat::IDENTITY,
-                Vec3::new(x, y, z),
+                center,
             );
             placements.push((row, transform, *color));
+            bounds.min = bounds.min.min(center - Vec3::splat(0.5 * scale));
+            bounds.max = bounds.max.max(center + Vec3::splat(0.5 * scale));
         }
     }
 
     let terrain_index = meshes.len();
-    meshes.push(MeshGpu::upload(&platform.device, &terrain_mesh(&terrain)));
+    meshes.push(MeshGpu::upload(&platform.device, &terrain_cpu));
     placements.push((terrain_index, Mat4::IDENTITY, TERRAIN_COLOR));
 
     let center_height = terrain.height_at(ORBIT_CENTER_XZ, ORBIT_CENTER_XZ);
@@ -117,6 +129,7 @@ fn build_fixture(platform: &Platform) -> Fixture {
         meshes,
         placements,
         orbit_center: Vec3::new(ORBIT_CENTER_XZ, center_height + 2.0, ORBIT_CENTER_XZ),
+        bounds,
     }
 }
 
@@ -183,6 +196,7 @@ impl App for Viewer {
             &frame.view,
             &camera,
             &fixture_light(),
+            fixture.bounds,
             &items,
         );
         frame.finish(ctx.platform);

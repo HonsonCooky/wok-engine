@@ -1,5 +1,6 @@
 // ---- shared frame bindings ----
-// Group 0 holds the per-frame uniforms both passes read: the camera and the light state. Each
+// Group 0 holds the per-frame uniforms every pass reads: the camera and the light state. Group 1
+// is the per-draw block, shared by the mesh and shadow passes (the sky pass ignores it). Each
 // pipeline's shader module is this file concatenated with the pass-specific file at build time
 // (see pipeline.rs), so these declarations exist exactly once.
 //
@@ -11,6 +12,9 @@ struct Camera {
     view_proj: mat4x4<f32>,
     // Inverse of view_proj; the sky pass unprojects NDC positions to world-space rays with it.
     inv_view_proj: mat4x4<f32>,
+    // The sun's orthographic view-projection, fitted per frame to the caller's shadow region
+    // (shadow.rs). The shadow pass rasterizes through it; the mesh pass samples the map by it.
+    sun_view_proj: mat4x4<f32>,
     // xyz: camera world position. Fog distance and rim lighting measure from here.
     eye: vec4<f32>,
 }
@@ -30,5 +34,15 @@ struct Light {
     zenith: vec4<f32>,
 }
 
+struct Draw {
+    model: mat4x4<f32>,
+    // Inverse-transpose of the model's upper 3x3, computed CPU-side per draw, so normals stay
+    // perpendicular to surfaces under non-uniform scale.
+    normal: mat4x4<f32>,
+    // xyz: flat base color, linear RGB.
+    color: vec4<f32>,
+}
+
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> light: Light;
+@group(1) @binding(0) var<uniform> draw: Draw;

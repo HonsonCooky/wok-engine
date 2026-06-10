@@ -17,7 +17,7 @@ use wok_light::LightState;
 use crate::renderer::Camera;
 
 // Byte sizes of the corresponding WGSL uniform structs.
-pub(crate) const CAMERA_UNIFORM_SIZE: u64 = 144; // two mat4 plus one vec4
+pub(crate) const CAMERA_UNIFORM_SIZE: u64 = 208; // three mat4 plus one vec4
 pub(crate) const LIGHT_UNIFORM_SIZE: u64 = 96; // six vec4
 pub(crate) const DRAW_UNIFORM_SIZE: u64 = 144; // two mat4 plus one vec4
 
@@ -27,19 +27,29 @@ const MIN_SOFTNESS: f32 = 1.0e-3;
 const MIN_FOG_SPAN: f32 = 1.0e-3;
 
 /// Pack `camera` into the WGSL `Camera` block: view-projection, its inverse (for the sky pass's
-/// unprojection), and the eye position. A non-invertible view-projection is the caller's bug; the
-/// inverse is not checked here.
-pub(crate) fn camera_floats(camera: &Camera) -> [f32; 36] {
-    let mut out = [0.0; 36];
+/// unprojection), the sun's shadow view-projection (computed per frame by `crate::shadow`), and
+/// the eye position. A non-invertible view-projection is the caller's bug; the inverse is not
+/// checked here.
+pub(crate) fn camera_floats(camera: &Camera, sun_view_proj: Mat4) -> [f32; 52] {
+    let mut out = [0.0; 52];
     out[0..16].copy_from_slice(&camera.view_proj.to_cols_array());
     out[16..32].copy_from_slice(&camera.view_proj.inverse().to_cols_array());
-    out[32..35].copy_from_slice(&camera.eye.to_array());
+    out[32..48].copy_from_slice(&sun_view_proj.to_cols_array());
+    out[48..51].copy_from_slice(&camera.eye.to_array());
     out
+}
+
+/// The sanitized sun travel direction: normalized, falling back to straight down for a zero
+/// vector (wok-light documents the direction may arrive unnormalized). One function shared by the
+/// light packing and the shadow fit, so the map is rendered along exactly the axis the lambert
+/// term reads; if the two drifted apart, every shadow would sit offset from its caster.
+pub(crate) fn sun_direction(light: &LightState) -> Vec3 {
+    light.sun.direction.try_normalize().unwrap_or(Vec3::NEG_Y)
 }
 
 /// Pack `light` into the WGSL `Light` block, sanitizing as documented on the module.
 pub(crate) fn light_floats(light: &LightState) -> [f32; 24] {
-    let sun_dir = light.sun.direction.try_normalize().unwrap_or(Vec3::NEG_Y);
+    let sun_dir = sun_direction(light);
     let bands = light.cel.band_count.max(2) as f32;
     let softness = light.cel.transition_softness.clamp(MIN_SOFTNESS, 1.0);
     let fog_start = light.fog.start;
@@ -91,19 +101,21 @@ mod tests {
     #[test]
     fn float_counts_match_the_declared_byte_sizes() {
         let camera = Camera { view_proj: Mat4::IDENTITY, eye: Vec3::ZERO };
-        assert_eq!(camera_floats(&camera).len() as u64 * 4, CAMERA_UNIFORM_SIZE);
+        assert_eq!(camera_floats(&camera, Mat4::IDENTITY).len() as u64 * 4, CAMERA_UNIFORM_SIZE);
         assert_eq!(light_floats(&light()).len() as u64 * 4, LIGHT_UNIFORM_SIZE);
         assert_eq!(draw_floats(Mat4::IDENTITY, Vec3::ZERO).len() as u64 * 4, DRAW_UNIFORM_SIZE);
     }
 
     #[test]
-    fn camera_packs_view_proj_then_inverse_then_eye() {
+    fn camera_packs_view_proj_inverse_sun_then_eye() {
         let view_proj = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
+        let sun_view_proj = Mat4::from_translation(Vec3::new(7.0, 8.0, 9.0));
         let camera = Camera { view_proj, eye: Vec3::new(4.0, 5.0, 6.0) };
-        let floats = camera_floats(&camera);
+        let floats = camera_floats(&camera, sun_view_proj);
         assert_eq!(&floats[0..16], &view_proj.to_cols_array());
         assert_eq!(&floats[16..32], &view_proj.inverse().to_cols_array());
-        assert_eq!(&floats[32..36], &[4.0, 5.0, 6.0, 0.0]);
+        assert_eq!(&floats[32..48], &sun_view_proj.to_cols_array());
+        assert_eq!(&floats[48..52], &[4.0, 5.0, 6.0, 0.0]);
     }
 
     #[test]

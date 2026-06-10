@@ -42,10 +42,11 @@ unused_self                       = "allow"
 wok-light = { path = "../wok-light" }
 wok-mesh = { path = "../wok-mesh" }
 wok-platform = { path = "../wok-platform" }
+# Taken with the shadow pass: the frame API's shadow region is a wok-scene Aabb, the workspace's
+# one AABB type (previously a dev-dependency for the viewer example's heightmap fixture).
+wok-scene = { path = "../wok-scene" }
 glam.workspace = true
 
 [dev-dependencies]
-# The headless tests block on adapter and device futures; the viewer example builds its terrain
-# fixture from a wok-scene heightmap.
+# The headless tests block on adapter and device futures.
 pollster.workspace = true
-wok-scene = { path = "../wok-scene" }

@@ -5,13 +5,21 @@ use wok_light::LightState;
 use wok_mesh::MeshGpu;
 use wok_platform::bytemuck;
 use wok_platform::wgpu;
+use wok_scene::Aabb;
 
 use crate::pipeline;
+use crate::shadow;
 use crate::uniforms;
 
 /// Per-draw buffer slots allocated up front; the buffer grows (power of two) when a frame's
 /// render list exceeds the current capacity, so steady-state frames never reallocate.
 const INITIAL_DRAW_CAPACITY: usize = 64;
+
+/// Default shadow map resolution (texels per side), used by [`Renderer::new`]. 2048 over a
+/// chunk-scale region (~128m) is roughly 6cm per texel before PCF, which reads clean at the
+/// engine's fidelity; pass another size via [`Renderer::with_shadow_map_size`] to trade memory
+/// against edge sharpness.
+pub const DEFAULT_SHADOW_MAP_SIZE: u32 = 2048;
 
 /// The caller's camera for one frame. The caller supplies final matrices: how view and projection
 /// compose, and any chunk-origin rebasing, are its policy. `eye` is the camera's world position,
@@ -42,7 +50,11 @@ pub struct RenderItem<'m> {
 pub struct Renderer {
     mesh_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
     depth_view: wgpu::TextureView,
+    shadow_view: wgpu::TextureView,
+    shadow_group: wgpu::BindGroup,
+    shadow_map_size: u32,
     camera_buffer: wgpu::Buffer,
     light_buffer: wgpu::Buffer,
     frame_group: wgpu::BindGroup,
@@ -54,20 +66,51 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// Build the pipeline state for a `width` x `height` target of `surface_format`. For on-screen
-    /// rendering pass the surface configuration's format and size; for render-to-texture pass the
-    /// texture's.
+    /// Build the pipeline state for a `width` x `height` target of `surface_format`, with the
+    /// default [`DEFAULT_SHADOW_MAP_SIZE`] shadow map. For on-screen rendering pass the surface
+    /// configuration's format and size; for render-to-texture pass the texture's.
     pub fn new(
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
     ) -> Renderer {
+        Renderer::with_shadow_map_size(device, surface_format, width, height, DEFAULT_SHADOW_MAP_SIZE)
+    }
+
+    /// [`Renderer::new`] with an explicit shadow map resolution (texels per side).
+    pub fn with_shadow_map_size(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        shadow_map_size: u32,
+    ) -> Renderer {
         let frame_layout = pipeline::frame_layout(device);
         let draw_layout = pipeline::draw_layout(device);
-        let mesh_pipeline = pipeline::mesh_pipeline(device, surface_format, &frame_layout, &draw_layout);
+        let shadow_layout = pipeline::shadow_layout(device);
+        let mesh_pipeline =
+            pipeline::mesh_pipeline(device, surface_format, &frame_layout, &draw_layout, &shadow_layout);
         let sky_pipeline = pipeline::sky_pipeline(device, surface_format, &frame_layout);
+        let shadow_pipeline = pipeline::shadow_pipeline(device, &frame_layout, &draw_layout);
         let depth_view = pipeline::depth_texture(device, width, height);
+
+        let shadow_view = pipeline::shadow_texture(device, shadow_map_size);
+        let shadow_sampler = pipeline::shadow_sampler(device);
+        let shadow_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("wok_render_shadow_group"),
+            layout: &shadow_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+            ],
+        });
 
         let camera_buffer = uniform_buffer(device, "wok_render_camera", uniforms::CAMERA_UNIFORM_SIZE);
         let light_buffer = uniform_buffer(device, "wok_render_light", uniforms::LIGHT_UNIFORM_SIZE);
@@ -90,7 +133,11 @@ impl Renderer {
         Renderer {
             mesh_pipeline,
             sky_pipeline,
+            shadow_pipeline,
             depth_view,
+            shadow_view,
+            shadow_group,
+            shadow_map_size,
             camera_buffer,
             light_buffer,
             frame_group,
@@ -109,9 +156,16 @@ impl Renderer {
         self.depth_view = pipeline::depth_texture(device, width, height);
     }
 
-    /// Draw one frame into `target`: the gradient sky first, then every item in `items`,
-    /// cel-shaded under `light`'s sun and fogged by its fog. The caller owns the encoder and
-    /// submission, so a frame can compose other passes around this one.
+    /// Draw one frame into `target`: the sun's shadow map first (every item in `items` rendered
+    /// depth-only from the sun's view), then the gradient sky, then every item again, cel-shaded
+    /// under `light`'s sun - shadowed by the map - and fogged by its fog. The caller owns the
+    /// encoder and submission, so a frame can compose other passes around this one.
+    ///
+    /// `shadow_region` is the world-space box shadows must cover, caller policy: typically the
+    /// AABB of the caller's loaded content (terrain plus placements). The sun's orthographic
+    /// projection is fitted to it each frame - tight region, sharp shadows - and surface outside
+    /// it renders unshadowed. Everything in `items` casts and receives, terrain included; the sky
+    /// does neither; there are no per-object toggles (HLD: one shadow map per frame).
     ///
     /// `items` is the whole contract: wok-render reads no stores and no pools, and draws exactly
     /// what it is handed, in order, with no culling.
@@ -123,6 +177,7 @@ impl Renderer {
         target: &wgpu::TextureView,
         camera: &Camera,
         light: &LightState,
+        shadow_region: Aabb,
         items: &[RenderItem],
     ) {
         if items.len() > self.draw_capacity {
@@ -133,7 +188,9 @@ impl Renderer {
             self.draw_group = group;
         }
 
-        let camera_floats = uniforms::camera_floats(camera);
+        let sun_view_proj =
+            shadow::sun_view_proj(uniforms::sun_direction(light), shadow_region, self.shadow_map_size);
+        let camera_floats = uniforms::camera_floats(camera, sun_view_proj);
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&camera_floats));
         let light_floats = uniforms::light_floats(light);
         queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&light_floats));
@@ -147,6 +204,33 @@ impl Renderer {
                 draws[i * stride..i * stride + block].copy_from_slice(bytemuck::cast_slice(&floats));
             }
             queue.write_buffer(&self.draw_buffer, 0, &draws);
+        }
+
+        // The shadow pass: depth-only, into the shadow map, scoped so its pass ends before the
+        // forward pass binds the map as a texture.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("wok_render_shadow_pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_bind_group(0, &self.frame_group, &[]);
+            for (i, item) in items.iter().enumerate() {
+                pass.set_bind_group(1, &self.draw_group, &[(i as u64 * self.draw_stride) as u32]);
+                pass.set_vertex_buffer(0, item.mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(item.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..item.mesh.index_count, 0, 0..1);
+            }
         }
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -178,6 +262,7 @@ impl Renderer {
         pass.draw(0..3, 0..1);
 
         pass.set_pipeline(&self.mesh_pipeline);
+        pass.set_bind_group(2, &self.shadow_group, &[]);
         for (i, item) in items.iter().enumerate() {
             pass.set_bind_group(1, &self.draw_group, &[(i as u64 * self.draw_stride) as u32]);
             pass.set_vertex_buffer(0, item.mesh.vertex_buffer.slice(..));
