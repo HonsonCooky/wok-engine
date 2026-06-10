@@ -7,7 +7,7 @@ use glam::{Mat4, Vec3};
 use wok_light::{CelParams, Fog, LightState, SkyGradient, Sun};
 use wok_mesh::MeshGpu;
 use wok_platform::wgpu;
-use wok_render::{Camera, RenderItem, Renderer};
+use wok_render::{Camera, LineSegment, RenderItem, Renderer};
 use wok_scene::Aabb;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -57,8 +57,9 @@ fn renderer_builds_without_validation_errors() {
     assert_no_validation_error(&device, "Renderer::new");
 }
 
-/// Render one frame into an offscreen texture and read the RGBA8 pixels back. SIZE is chosen so
-/// a row (SIZE * 4 bytes) already meets wgpu's 256-byte copy row alignment.
+/// Render one frame into an offscreen texture and read the RGBA8 pixels back, with `lines`
+/// overlaid after the meshes when any are given. SIZE is chosen so a row (SIZE * 4 bytes) already
+/// meets wgpu's 256-byte copy row alignment.
 fn render_frame(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -67,6 +68,7 @@ fn render_frame(
     light: &LightState,
     shadow_region: Aabb,
     items: &[RenderItem],
+    lines: &[LineSegment],
 ) -> Vec<u8> {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("smoke_target"),
@@ -89,6 +91,7 @@ fn render_frame(
     let mut encoder =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("smoke") });
     renderer.render(device, queue, &mut encoder, &view, camera, light, shadow_region, items);
+    renderer.render_lines(device, queue, &mut encoder, &view, lines);
     encoder.copy_texture_to_buffer(
         texture.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
@@ -129,7 +132,7 @@ fn render_smoke_sky_gradient_and_geometry_land() {
     let light = LightState::default();
     let region = Aabb::new(Vec3::splat(-3.0), Vec3::splat(3.0));
 
-    let sky_only = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &[]);
+    let sky_only = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &[], &[]);
 
     // Structural property 1: the sky pass produced a vertical gradient, not a uniform clear.
     let first = &sky_only[0..4];
@@ -145,7 +148,7 @@ fn render_smoke_sky_gradient_and_geometry_land() {
         mesh: &cube,
         color: Vec3::new(1.0, 0.1, 0.1),
     }];
-    let with_cube = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &items);
+    let with_cube = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &items, &[]);
     let differing = sky_only
         .chunks_exact(4)
         .zip(with_cube.chunks_exact(4))
@@ -225,7 +228,7 @@ fn shadow_smoke_a_floating_cube_darkens_the_plane_behind_it() {
     ];
     let region = Aabb::new(Vec3::new(-12.0, -0.5, -12.0), Vec3::new(12.0, 4.5, 12.0));
 
-    let pixels = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &items);
+    let pixels = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &items, &[]);
 
     // The cube (2m wide, bottom at 2m, top at 4m) under a 45 degree sun shadows the plane across
     // x in roughly [1, 5]; (3.5, 0, 0) sits inside that band and clear of the cube's screen
@@ -242,4 +245,79 @@ fn shadow_smoke_a_floating_cube_darkens_the_plane_behind_it() {
         shadowed < lit * 0.75,
         "shadowed side {shadowed} vs lit side {lit}: the cube cast no measurable shadow"
     );
+}
+
+#[test]
+fn line_pipeline_builds_without_validation_errors() {
+    // The line shader validates and the whole line path - pipeline, buffer, pass recording, draw -
+    // records and submits a frame without a validation error. Structural; pixels are the smoke
+    // test below.
+    let (device, queue) = device();
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let common = include_str!("../src/shaders/common.wgsl");
+    let line = include_str!("../src/shaders/line.wgsl");
+    let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("line"),
+        source: wgpu::ShaderSource::Wgsl(format!("{common}\n{line}").into()),
+    });
+    assert_no_validation_error(&device, "line shader");
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut renderer = Renderer::new(&device, FORMAT, SIZE, SIZE);
+    let eye = Vec3::new(0.0, 0.0, 6.0);
+    let camera = Camera {
+        view_proj: Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 400.0)
+            * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y),
+        eye,
+    };
+    let lines = [LineSegment { start: Vec3::NEG_X, end: Vec3::X, color: Vec3::ONE }];
+    let region = Aabb::new(Vec3::splat(-3.0), Vec3::splat(3.0));
+    let _frame = render_frame(
+        &device, &queue, &mut renderer, &camera, &LightState::default(), region, &[], &lines,
+    );
+    assert_no_validation_error(&device, "render_lines");
+}
+
+#[test]
+fn line_smoke_a_line_lands_its_pixels_in_its_own_color() {
+    // A pure red horizontal line across the view, over the sky alone (nothing occludes it). The
+    // frame must differ from the line-less frame along a line's worth of pixels, and those pixels
+    // must be the line's color verbatim: unlit and unfogged means nothing modulates it.
+    let (device, queue) = device();
+    let mut renderer = Renderer::new(&device, FORMAT, SIZE, SIZE);
+
+    let eye = Vec3::new(0.0, 0.0, 6.0);
+    let camera = Camera {
+        view_proj: Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 400.0)
+            * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y),
+        eye,
+    };
+    let light = LightState::default();
+    let region = Aabb::new(Vec3::splat(-3.0), Vec3::splat(3.0));
+
+    let without = render_frame(&device, &queue, &mut renderer, &camera, &light, region, &[], &[]);
+    let lines = [LineSegment {
+        start: Vec3::new(-3.0, 0.0, 0.0),
+        end: Vec3::new(3.0, 0.0, 0.0),
+        color: Vec3::new(1.0, 0.0, 0.0),
+    }];
+    let with =
+        render_frame(&device, &queue, &mut renderer, &camera, &light, region, &[], &lines);
+
+    let line_pixels = without
+        .chunks_exact(4)
+        .zip(with.chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .map(|(_, b)| b)
+        .collect::<Vec<_>>();
+    // A 6m line spanning the 60 degree frustum at 6m crosses the full SIZE-wide frame; require a
+    // generous fraction so the assertion is structural rather than rasterization-exact.
+    assert!(
+        line_pixels.len() > (SIZE / 2) as usize,
+        "only {} pixels changed; the line did not land",
+        line_pixels.len()
+    );
+    for px in line_pixels {
+        assert_eq!(&px[0..3], &[255, 0, 0], "line pixel is not the authored color: {px:?}");
+    }
 }

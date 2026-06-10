@@ -16,6 +16,12 @@
 //! policy. This is HLD principle 5 applied to drawing: the game owns the loop and the state, the
 //! engine owns the GPU mechanics.
 //!
+//! After the frame, a caller may overlay debug lines: [`Renderer::render_lines`] draws a list of
+//! [`LineSegment`]s (world-space endpoints plus a flat color) through the same camera, unlit and
+//! unfogged, depth-tested against the frame's geometry, outside the shadow pass entirely. A
+//! diagnostic overlay, not a scene element; it exists so applications can draw hitboxes and other
+//! invisible structure without inventing degenerate meshes.
+//!
 //! ## The shadow map
 //!
 //! One shadow map per frame, from the [`LightState`]'s sun: a depth-only pass renders every item
@@ -59,4 +65,4 @@ mod renderer;
 mod shadow;
 mod uniforms;
 
-pub use renderer::{Camera, DEFAULT_SHADOW_MAP_SIZE, RenderItem, Renderer};
+pub use renderer::{Camera, DEFAULT_SHADOW_MAP_SIZE, LineSegment, RenderItem, Renderer};

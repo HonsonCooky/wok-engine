@@ -12,7 +12,10 @@
 //!
 //! Drawing is the editor's render path: the same renderer, the same primitive mesh cache, the same
 //! chunk-origin composition of terrain and placements, plus one item the editor does not have - the
-//! player, an ellipsoid scaled to the capsule's dimensions in a color nothing else uses.
+//! player, a true capsule mesh generated at the collider's exact dimensions (`wok_mesh::capsule_mesh`
+//! paired with `Capsule::upright`) in a color nothing else uses. F1 toggles the hitbox overlay
+//! (`crate::debug`): every static hitbox AABB and the player capsule as line cages, drawn through
+//! the renderer's debug line pass after the meshes.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -20,17 +23,20 @@ use std::error::Error;
 use glam::{Mat4, Quat, Vec3};
 use wok_content::ChunkStore;
 use wok_light::LightState;
-use wok_mesh::{MeshGpu, primitive_mesh};
+use wok_mesh::{MeshGpu, capsule_mesh, primitive_mesh};
 use wok_physics::world_aabb;
+use wok_platform::winit::keyboard::NamedKey;
 use wok_platform::{App, FrameCtx, Platform, gfx};
 use wok_render::{Camera, RenderItem, Renderer};
 use wok_scene::{Aabb, ChunkCoord, Primitive, SurfaceTag, VisibleItem};
 
 use crate::clock::FixedClock;
 use crate::constants::{
-    DEBUG_GROUND_MARKER, MAX_STEPS_PER_FRAME, PLAYER_COLOR, PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT,
+    DEBUG_GROUND_MARKER, DEBUG_HITBOXES, MAX_STEPS_PER_FRAME, PLAYER_COLOR, PLAYER_RADIUS,
+    PLAYER_SEGMENT, SIM_DT,
 };
 use crate::content::LoadedContent;
+use crate::debug;
 use crate::follow::{self, FollowCamera};
 use crate::intent::{Intent, map_input};
 use crate::jump::JumpLatch;
@@ -80,10 +86,12 @@ fn surface_color(surface: Option<&SurfaceTag>) -> Vec3 {
 }
 
 /// GPU residency, created in `init` once a device exists: the renderer, one uploaded mesh per unit
-/// primitive (shared by every placement and the player), and one terrain mesh per loaded chunk.
+/// primitive (shared by every placement), the player's capsule mesh (generated at the collider's
+/// dimensions, so the draw transform never scales it), and one terrain mesh per loaded chunk.
 struct Gpu {
     renderer: Renderer,
     primitives: Vec<MeshGpu>,
+    player: MeshGpu,
     terrain: BTreeMap<ChunkCoord, MeshGpu>,
 }
 
@@ -103,6 +111,8 @@ pub struct TasteApp {
     camera: FollowCamera,
     clock: FixedClock,
     size: (u32, u32),
+    /// The hitbox overlay (`crate::debug`), seeded from `DEBUG_HITBOXES` and flipped by F1.
+    debug_hitboxes: bool,
     gpu: Option<Gpu>,
 }
 
@@ -131,6 +141,7 @@ impl TasteApp {
             camera,
             clock: FixedClock::new(SIM_DT, MAX_STEPS_PER_FRAME),
             size: (0, 0),
+            debug_hitboxes: DEBUG_HITBOXES,
             gpu: None,
         })
     }
@@ -156,7 +167,7 @@ impl TasteApp {
     /// targets.
     fn render(&mut self, ctx: &mut FrameCtx, view_pos: Vec3) {
         let Some(gpu) = self.gpu.as_mut() else { return };
-        let Gpu { renderer, primitives, terrain } = gpu;
+        let Gpu { renderer, primitives, player, terrain } = gpu;
 
         let aspect = self.size.0 as f32 / self.size.1.max(1) as f32;
         // Fog distance sets render distance (HLD); the far plane sits past full occlusion.
@@ -190,7 +201,7 @@ impl TasteApp {
 
         items.push(RenderItem {
             transform: player_transform(view_pos),
-            mesh: &primitives[primitive_index(Primitive::Ellipsoid)],
+            mesh: player,
             color: PLAYER_COLOR,
         });
 
@@ -225,6 +236,15 @@ impl TasteApp {
             self.shadow_region,
             &items,
         );
+        if self.debug_hitboxes {
+            renderer.render_lines(
+                &ctx.platform.device,
+                &ctx.platform.queue,
+                &mut frame.encoder,
+                &frame.view,
+                &debug::debug_lines(&self.world, view_pos),
+            );
+        }
         frame.finish(ctx.platform);
     }
 }
@@ -243,13 +263,15 @@ impl App for TasteApp {
             .iter()
             .map(|&p| MeshGpu::upload(&platform.device, &primitive_mesh(p)))
             .collect();
+        let player =
+            MeshGpu::upload(&platform.device, &capsule_mesh(PLAYER_RADIUS, PLAYER_SEGMENT));
         let mut terrain = BTreeMap::new();
         for (coord, runtime) in self.store.iter_loaded() {
             if let Some(mesh) = runtime.terrain_mesh.as_ref() {
                 terrain.insert(coord, MeshGpu::upload(&platform.device, mesh));
             }
         }
-        self.gpu = Some(Gpu { renderer, primitives, terrain });
+        self.gpu = Some(Gpu { renderer, primitives, player, terrain });
     }
 
     fn frame(&mut self, ctx: &mut FrameCtx) {
@@ -258,6 +280,12 @@ impl App for TasteApp {
                 gpu.renderer.resize(&ctx.platform.device, ctx.width, ctx.height);
             }
             self.size = (ctx.width, ctx.height);
+        }
+
+        // The overlay toggle reads the raw input directly: it is a diagnostic, not part of what
+        // the player meant, so it stays out of the Intent the simulation consumes.
+        if ctx.input.key_pressed(NamedKey::F1) {
+            self.debug_hitboxes = !self.debug_hitboxes;
         }
 
         let intent = map_input(&ctx.input, ctx.dt);
@@ -311,39 +339,42 @@ fn camera_target(player_pos: Vec3) -> Vec3 {
     player_pos + Vec3::new(0.0, crate::constants::CAMERA_TARGET_LIFT, 0.0)
 }
 
-/// The player placeholder's draw transform: a unit ellipsoid (spanning +/-0.5) scaled to the
-/// capsule's bounding box about the capsule centre, so the placeholder and the collider agree about
-/// where the body is - in particular, the ellipsoid's bottom is the capsule's lowest point.
+/// The player's draw transform: a pure translation to the capsule centre. The mesh is generated at
+/// the collider's exact dimensions (`capsule_mesh(PLAYER_RADIUS, PLAYER_SEGMENT)`, origin-centred
+/// like `Capsule::upright` about its centre), so no scale belongs here - scaling would be the one
+/// way the drawn body and the collider could disagree again.
 fn player_transform(position: Vec3) -> Mat4 {
-    Mat4::from_scale_rotation_translation(
-        Vec3::new(PLAYER_RADIUS * 2.0, PLAYER_HEIGHT, PLAYER_RADIUS * 2.0),
-        Quat::IDENTITY,
-        position,
-    )
+    Mat4::from_translation(position)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::PLAYER_HEIGHT;
     use wok_physics::Capsule;
 
     #[test]
-    fn the_drawn_ellipsoid_bottom_is_the_capsule_base() {
-        // The visual half of the at-rest contract: the physics rests the capsule's base on the
-        // surface, so the drawn shape's lowest point must be that base or the player reads as
-        // floating (or sunken) even when the physics is exact. The bound is float roundoff between
-        // the two derivations of the same height, not a tolerance for visual slack.
+    fn the_drawn_capsule_is_the_collider() {
+        // The visual half of the at-rest contract, now exact in shape and not just in bounds: the
+        // mesh is generated at the collider's dimensions and the transform only translates, so the
+        // drawn extremes must be the collider's base, tip, and radius. The bound is float roundoff
+        // between two derivations of the same numbers, not a tolerance for visual slack.
         let position = Vec3::new(3.0, 7.25, -2.0);
         let capsule = Capsule::upright(position, PLAYER_HEIGHT, PLAYER_RADIUS);
-        let bottom = player_transform(position).transform_point3(Vec3::new(0.0, -0.5, 0.0));
+        let bounds = wok_mesh::capsule_mesh(PLAYER_RADIUS, PLAYER_SEGMENT).bounds();
+        let to_world = player_transform(position);
+
+        let bottom = to_world.transform_point3(Vec3::new(0.0, bounds.min.y, 0.0));
         assert!(
             (bottom.y - capsule.base().y).abs() < 1e-6,
-            "ellipsoid bottom {} vs capsule base {}",
+            "mesh bottom {} vs capsule base {}",
             bottom.y,
             capsule.base().y
         );
-        // And the width matches the capsule's: the equator spans the radius each way.
-        let side = player_transform(position).transform_point3(Vec3::new(0.5, 0.0, 0.0));
+        let top = to_world.transform_point3(Vec3::new(0.0, bounds.max.y, 0.0));
+        assert!((top.y - (capsule.base().y + PLAYER_HEIGHT)).abs() < 1e-6);
+        // And the width matches the capsule's: the wall spans the radius each way.
+        let side = to_world.transform_point3(Vec3::new(bounds.max.x, 0.0, 0.0));
         assert!((side.x - (position.x + PLAYER_RADIUS)).abs() < 1e-6);
     }
 }

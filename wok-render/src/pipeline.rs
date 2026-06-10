@@ -35,6 +35,21 @@ const COMMON_WGSL: &str = include_str!("shaders/common.wgsl");
 const MESH_WGSL: &str = include_str!("shaders/mesh.wgsl");
 const SKY_WGSL: &str = include_str!("shaders/sky.wgsl");
 const SHADOW_WGSL: &str = include_str!("shaders/shadow.wgsl");
+const LINE_WGSL: &str = include_str!("shaders/line.wgsl");
+
+/// Bytes per debug line vertex: world position (3 x f32) plus color (3 x f32), interleaved. Local
+/// to wok-render: line vertices are built per frame from `LineSegment`s, never from a `MeshCpu`,
+/// so wok-mesh's layout does not apply.
+pub(crate) const LINE_VERTEX_STRIDE: u64 = 24;
+
+const LINE_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+
+const LINE_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: LINE_VERTEX_STRIDE,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &LINE_VERTEX_ATTRIBUTES,
+};
 
 /// Group 0: per-frame camera and light uniforms.
 pub(crate) fn frame_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -242,6 +257,61 @@ pub(crate) fn shadow_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         fragment: None,
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// The debug line pipeline: LineList topology, unlit vertex color out, drawn after the meshes in
+/// the frame's forward pass output. Depth-tested against the depth the mesh pass wrote (hidden
+/// geometry hides its lines too) but compared LessEqual and not written: a line traced exactly on
+/// a surface - an AABB edge on a box face - must not lose the tie to the face that defines it,
+/// and lines have no later pass to occlude. No culling: a line has no winding.
+pub(crate) fn line_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    frame_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("wok_render_line_shader"),
+        source: wgpu::ShaderSource::Wgsl(format!("{COMMON_WGSL}\n{LINE_WGSL}").into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("wok_render_line_pipeline_layout"),
+        bind_group_layouts: &[frame_layout],
+        push_constant_ranges: &[],
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("wok_render_line_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_line"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[LINE_VERTEX_LAYOUT],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::LineList,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_line"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
         multiview: None,
         cache: None,
     })

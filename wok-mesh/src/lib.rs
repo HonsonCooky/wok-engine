@@ -33,7 +33,9 @@
 //! source, not by parallel restatement.
 //!
 //! A consequence worth stating: a radius-0.5 capsule inscribed in the unit cube has zero
-//! cylinder-body height, so the unit `Capsule` mesh *is* the unit sphere. See [`capsule`].
+//! cylinder-body height, so the unit `Capsule` mesh *is* the unit sphere. See [`capsule`]. The one
+//! generator deliberately outside the convention is [`capsule_mesh`], a true capsule parameterized
+//! in metres that pairs with wok-physics's parameterized `Capsule`; its docs carry the distinction.
 //!
 //! ## Determinism (canon contract)
 //!
@@ -64,7 +66,7 @@ pub mod primitive;
 mod surface;
 pub mod terrain;
 
-pub use capsule::capsule;
+pub use capsule::{capsule, capsule_mesh};
 pub use cube::{cube, plane};
 pub use cylinder::cylinder;
 pub use ellipsoid::ellipsoid;

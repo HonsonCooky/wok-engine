@@ -10,7 +10,7 @@
 //! taste never writes content: with no scene on disk it asks you to run the editor first and exits.
 //!
 //! Controls: WASD to move relative to the camera, space to jump, hold the right mouse button to
-//! orbit the camera.
+//! orbit the camera, F1 to toggle the hitbox overlay.
 //!
 //! Errors: `Box<dyn Error>` to `main`, which prints and exits - the wok precedent; nothing here
 //! inspects failures programmatically, so no error enum (and no anyhow dependency) has earned its
@@ -22,6 +22,7 @@ mod cli;
 mod clock;
 mod constants;
 mod content;
+mod debug;
 #[cfg(test)]
 mod diagnose;
 mod follow;
@@ -71,7 +72,8 @@ fn start(args: &[String]) -> Result<app::TasteApp, Box<dyn Error>> {
         loaded.prefabs.len()
     );
     println!("taste: controls: WASD or left stick to move, space or south button to jump,");
-    println!("taste:           hold right mouse or use the right stick to look");
+    println!("taste:           hold right mouse or use the right stick to look,");
+    println!("taste:           F1 to toggle the hitbox overlay");
 
     app::TasteApp::new(loaded)
 }

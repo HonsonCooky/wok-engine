@@ -15,6 +15,10 @@ use crate::uniforms;
 /// render list exceeds the current capacity, so steady-state frames never reallocate.
 const INITIAL_DRAW_CAPACITY: usize = 64;
 
+/// Line segments the line vertex buffer holds before growing, same policy as the draw buffer:
+/// rewritten every frame, reallocated (power of two) only when a frame's list outgrows it.
+const INITIAL_LINE_CAPACITY: usize = 256;
+
 /// Default shadow map resolution (texels per side), used by [`Renderer::new`]. 2048 over a
 /// chunk-scale region (~128m) is roughly 6cm per texel before PCF, which reads clean at the
 /// engine's fidelity; pass another size via [`Renderer::with_shadow_map_size`] to trade memory
@@ -36,6 +40,15 @@ pub struct Camera {
 pub struct RenderItem<'m> {
     pub transform: Mat4,
     pub mesh: &'m MeshGpu,
+    pub color: Vec3,
+}
+
+/// One debug line segment for [`Renderer::render_lines`]: world-space endpoints and a flat color
+/// (linear RGB). Positions are final, exactly as a [`RenderItem`] transform is.
+#[derive(Clone, Copy, Debug)]
+pub struct LineSegment {
+    pub start: Vec3,
+    pub end: Vec3,
     pub color: Vec3,
 }
 
@@ -63,6 +76,9 @@ pub struct Renderer {
     draw_group: wgpu::BindGroup,
     draw_capacity: usize,
     draw_stride: u64,
+    line_pipeline: wgpu::RenderPipeline,
+    line_buffer: wgpu::Buffer,
+    line_capacity: usize,
 }
 
 impl Renderer {
@@ -93,6 +109,7 @@ impl Renderer {
             pipeline::mesh_pipeline(device, surface_format, &frame_layout, &draw_layout, &shadow_layout);
         let sky_pipeline = pipeline::sky_pipeline(device, surface_format, &frame_layout);
         let shadow_pipeline = pipeline::shadow_pipeline(device, &frame_layout, &draw_layout);
+        let line_pipeline = pipeline::line_pipeline(device, surface_format, &frame_layout);
         let depth_view = pipeline::depth_texture(device, width, height);
 
         let shadow_view = pipeline::shadow_texture(device, shadow_map_size);
@@ -146,6 +163,9 @@ impl Renderer {
             draw_group,
             draw_capacity: INITIAL_DRAW_CAPACITY,
             draw_stride,
+            line_pipeline,
+            line_buffer: line_buffer(device, INITIAL_LINE_CAPACITY),
+            line_capacity: INITIAL_LINE_CAPACITY,
         }
     }
 
@@ -270,6 +290,73 @@ impl Renderer {
             pass.draw_indexed(0..item.mesh.index_count, 0, 0..1);
         }
     }
+
+    /// Draw debug `lines` over the frame [`Renderer::render`] just produced, into the same
+    /// `target` through the same `encoder`. Call it after `render` in the same frame: the pass
+    /// loads the forward pass's color and depth instead of clearing, so lines are depth-tested
+    /// against the frame's geometry (hidden lines hide), and the camera uniform `render` uploaded
+    /// is the one the lines project through. Lines are unlit, unfogged, and outside the shadow
+    /// pass entirely: they neither cast nor receive. The vertex buffer is reused across frames
+    /// and rewritten per call, growing like the draw buffer when a frame's list outgrows it.
+    pub fn render_lines(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        lines: &[LineSegment],
+    ) {
+        if lines.is_empty() {
+            return;
+        }
+        if lines.len() > self.line_capacity {
+            self.line_capacity = lines.len().next_power_of_two();
+            self.line_buffer = line_buffer(device, self.line_capacity);
+        }
+
+        let mut floats: Vec<f32> = Vec::with_capacity(lines.len() * 12);
+        for line in lines {
+            floats.extend_from_slice(&[
+                line.start.x, line.start.y, line.start.z, line.color.x, line.color.y, line.color.z,
+                line.end.x, line.end.y, line.end.z, line.color.x, line.color.y, line.color.z,
+            ]);
+        }
+        queue.write_buffer(&self.line_buffer, 0, bytemuck::cast_slice(&floats));
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("wok_render_line_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.line_pipeline);
+        pass.set_bind_group(0, &self.frame_group, &[]);
+        pass.set_vertex_buffer(0, self.line_buffer.slice(..));
+        pass.draw(0..lines.len() as u32 * 2, 0..1);
+    }
+}
+
+/// The line vertex buffer for `capacity` segments: two [`pipeline::LINE_VERTEX_STRIDE`]-byte
+/// vertices per segment, rewritten each frame.
+fn line_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("wok_render_lines"),
+        size: capacity as u64 * 2 * pipeline::LINE_VERTEX_STRIDE,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 fn uniform_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {

@@ -34,8 +34,15 @@ pub const WALKABLE_COS: f32 = std::f32::consts::FRAC_1_SQRT_2;
 /// Player capsule total height (tip to tip) and radius, in metres. The segment length follows from
 /// these via `Capsule::upright`: half-segment = height / 2 - radius. A squat, wide bean rather than
 /// a tall pill: play-testing read the character better low and round under a third-person camera.
-pub const PLAYER_HEIGHT: f32 = 1.1;
+/// 1.5 over 0.9 wide is the bean silhouette - the earlier 1.1 was nearly a sphere, which read fine
+/// while the placeholder was an ellipsoid but loses the silhouette now the capsule renders true.
+pub const PLAYER_HEIGHT: f32 = 1.5;
 pub const PLAYER_RADIUS: f32 = 0.45;
+
+/// The capsule wall (cylinder segment) length the height and radius imply - what `Capsule::upright`
+/// derives internally - restated as a constant so the drawn `capsule_mesh` and the debug cage size
+/// from exactly the numbers the collider uses.
+pub const PLAYER_SEGMENT: f32 = PLAYER_HEIGHT - 2.0 * PLAYER_RADIUS;
 
 /// Horizontal locomotion speed in m/s, a brisk run.
 pub const MOVE_SPEED: f32 = 6.0;
@@ -121,7 +128,15 @@ pub const STICK_LOOK_RATE: f32 = 2.5;
 /// composed through the same chunk-origin path as the terrain mesh. For the floating-at-rest
 /// diagnosis: if the marker lies on the rendered terrain while the bean floats, the gap is in the
 /// rest math; if the marker itself disagrees with the rendered terrain, sampling and mesh disagree.
-pub const DEBUG_GROUND_MARKER: bool = true;
+/// Off by default: the shadow map carries the grounding cue in normal play now, so the marker
+/// retires to an opt-in diagnostic.
+pub const DEBUG_GROUND_MARKER: bool = false;
+
+/// Default for the hitbox overlay (F1 flips it at runtime): every loaded hitbox AABB drawn as a
+/// line cage plus the player capsule as rings and verticals, through the renderer's debug line
+/// pass. The drawn scene shows visible shapes; this shows what the simulation actually collides
+/// with, so visual-only and trigger-only placeholders stop being invisible to a play-tester.
+pub const DEBUG_HITBOXES: bool = false;
 
 /// Orbit pitch limits, radians. Positive pitch raises the camera (wok-physics boom convention);
 /// the floor allows a slight under-shoulder look and the ceiling stops short of straight overhead.
