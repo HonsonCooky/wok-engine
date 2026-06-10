@@ -72,33 +72,47 @@ pub struct TerrainRest {
 /// Lift a [`Capsule`] so its base stays on (not below) the terrain, and report whether it is
 /// grounded.
 ///
-/// **Footprint sampling.** The ground height is the highest of five samples under the base: its
-/// centre and four points a `radius` out along +/-x and +/-z. Taking the max keeps the rounded
-/// bottom from dipping below the surface where it overhangs a rise; like part 1's box rest this is
-/// coarse (a peak between samples can still poke through) but right for 1m terrain and a
-/// player-sized capsule.
+/// **Profile-aware footprint sampling.** The support height is the highest *lift candidate* over
+/// five samples under the base: its centre and four points a `radius` out along +/-x and +/-z. A
+/// sample at horizontal distance `d` from the centre does not sit under the capsule's lowest point;
+/// the spherical bottom has curved away from it by `profile(d) = r - sqrt(r^2 - d^2)` (zero at the
+/// centre, the full `r` at the rim). Its candidate is therefore `height - profile(d)`: the base
+/// height at which the bottom would touch the terrain *at that sample*. Taking the raw heights
+/// instead (treating the bottom as flat across the footprint) rested the capsule on its highest
+/// rim sample and floated the centre by `radius * gradient` on every slope.
 ///
-/// **Lift only.** A capsule resting on or above the sampled ground is left where it is; a sinking
-/// one is raised straight up until its base meets the ground. A falling body is stopped by the
+/// The consequence and its bound: on a planar slope of gradient `g` the centre candidate wins, so
+/// the base sits exactly on the surface under the centre - zero gap - which is within
+/// `r * (sqrt(1 + g^2) - 1)` of where a true sphere-plane contact would put it (about 4cm of sink
+/// for `g = 0.45`, `r = 0.45`; the up-slope side of the bottom penetrates by at most that much). A
+/// steep rise is still guarded: a rim sample more than `r` above the centre still lifts the body.
+/// Like part 1's box rest the sampling is coarse (a peak between samples can still poke through)
+/// but right for 1m terrain and a player-sized capsule.
+///
+/// **Lift only.** A capsule resting on or above the sampled support is left where it is; a sinking
+/// one is raised straight up until its base meets the support. A falling body is stopped by the
 /// surface but never pulled down onto it - sticking to the ground is a game decision, not physics.
 ///
-/// **Grounded.** True when the base is at or below the sampled ground (so the capsule is resting,
+/// **Grounded.** True when the base is at or below the sampled support (so the capsule is resting,
 /// not airborne) *and* the terrain normal under the base ([`Heightmap::normal_at`]) is within the
 /// walkable-slope threshold of straight up: `normal.dot(Y) >= walkable_cos`. Pass
 /// `walkable_cos = cos(max_slope_angle)`, the same limit [`crate::collide_and_slide`] takes.
 pub fn rest_on_heightmap(capsule: Capsule, terrain: &Heightmap, walkable_cos: f32) -> TerrainRest {
     let base = capsule.base();
     let r = capsule.radius;
+    // Each sample: chunk-local position and its horizontal distance d from the base centre.
     let samples = [
-        (base.x, base.z),
-        (base.x - r, base.z),
-        (base.x + r, base.z),
-        (base.x, base.z - r),
-        (base.x, base.z + r),
+        (base.x, base.z, 0.0),
+        (base.x - r, base.z, r),
+        (base.x + r, base.z, r),
+        (base.x, base.z - r, r),
+        (base.x, base.z + r, r),
     ];
     let mut ground = f32::NEG_INFINITY;
-    for (x, z) in samples {
-        ground = ground.max(terrain.height_at(x, z));
+    for (x, z, d) in samples {
+        // How far the spherical bottom has curved up from its lowest point at distance d.
+        let profile = r - (r * r - d * d).max(0.0).sqrt();
+        ground = ground.max(terrain.height_at(x, z) - profile);
     }
 
     let resting = base.y <= ground + GROUND_EPS;
@@ -276,6 +290,66 @@ mod tests {
         // Lifted straight up: x and z are unchanged.
         assert_eq!(r.position.x, 64.0);
         assert_eq!(r.position.z, 64.0);
+    }
+
+    #[test]
+    fn capsule_on_a_planar_ramp_rests_with_zero_gap_under_the_centre() {
+        // The profile-aware rest: on a constant slope the centre candidate wins (each rim sample's
+        // height is discounted by the full radius the bottom has curved away), so the base sits on
+        // the surface directly under the centre instead of floating radius * gradient above it.
+        let terrain = ramp_x(0, 300);
+        let g = 300.0 * (64.0 / u16::MAX as f32); // gradient in m/m, from the quantization step
+        let c = player(Vec3::new(60.5, -50.0, 64.0));
+        let r = rest_on_heightmap(c, &terrain, WALKABLE_COS);
+
+        let base_y = r.position.y - 1.0;
+        let ground = terrain.height_at(60.5, 64.0);
+        assert!((base_y - ground).abs() < 1e-4, "base {base_y} should sit on the surface {ground}");
+        assert!(r.grounded, "the ramp is well inside the walkable limit");
+
+        // The documented sink bound: nowhere does the spherical bottom dip below the planar
+        // surface by more than r * (sqrt(1 + g^2) - 1). Scan the bottom along the up-slope axis.
+        let radius = c.radius;
+        let bound = radius * ((1.0 + g * g).sqrt() - 1.0);
+        for i in 0..=100 {
+            let d = radius * i as f32 / 100.0;
+            let bottom = base_y + (radius - (radius * radius - d * d).sqrt());
+            let surface = terrain.height_at(60.5 + d, 64.0);
+            assert!(
+                surface - bottom <= bound + 1e-4,
+                "penetration {} at d = {d} exceeds the documented bound {bound}",
+                surface - bottom,
+            );
+        }
+    }
+
+    #[test]
+    fn a_steep_rise_under_a_rim_sample_still_lifts() {
+        // A 3m step one cell up-slope of the centre: the centre sample alone would leave the body
+        // inside the riser, but the rim candidate (height minus the full radius) still guards it.
+        let step_m = 3.0;
+        let heights = (0..CHUNK_GRID_LEN)
+            .map(|i| {
+                let x = i % CHUNK_GRID_DIM;
+                Heightmap::meters_to_raw(if x >= 65 { step_m } else { 0.0 })
+            })
+            .collect();
+        let terrain =
+            Heightmap::new(heights, vec![SurfaceTag::new("g")], vec![0; CHUNK_GRID_LEN]).unwrap();
+
+        // Feet at x = 64: the centre sample reads the flat ground, the +x rim sample (64.5) reads
+        // halfway up the interpolated riser.
+        let c = player(Vec3::new(64.0, -5.0, 64.0));
+        let r = rest_on_heightmap(c, &terrain, WALKABLE_COS);
+
+        let base_y = r.position.y - 1.0;
+        let centre_ground = terrain.height_at(64.0, 64.0);
+        let rim_candidate = terrain.height_at(64.5, 64.0) - c.radius;
+        assert!(rim_candidate > centre_ground + 0.5, "fixture: the rim must dominate the centre");
+        assert!(
+            (base_y - rim_candidate).abs() < 1e-4,
+            "base {base_y} should be lifted to the rim candidate {rim_candidate}",
+        );
     }
 
     #[test]

@@ -2015,6 +2015,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "taste"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "wok-content",
+ "wok-light",
+ "wok-mesh",
+ "wok-physics",
+ "wok-platform",
+ "wok-render",
+ "wok-scene",
+]
+
+[[package]]
 name = "termcolor"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

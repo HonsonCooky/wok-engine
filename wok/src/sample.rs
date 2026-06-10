@@ -6,10 +6,12 @@
 //! arithmetic, no clock and no RNG - so two generations produce identical files, which is what the
 //! determinism test pins.
 //!
-//! Placement uses wok-physics terrain functions per the brief: each prefab's authored bounds are
-//! reduced with `world_aabb`, dropped below the terrain floor, and lifted with `resolve_heightmap`
-//! (lift-only), so every placeholder rests exactly on the surface rather than sinking into a hill
-//! or floating over a dip.
+//! Placement rests each prefab on the terrain by a per-prefab policy (a code-level mapping in the
+//! prefab table; placement policy is application-side by design). Boxy prefabs reduce their
+//! authored bounds with `world_aabb` and rest by wok-physics's `resolve_heightmap` corner rest, so
+//! no corner hovers or sinks. Round or organic prefabs rest their bounds' bottom on the terrain
+//! sample under the placement centre (`height_at`), optionally sunk a few centimetres: corner rest
+//! would perch a curved underside on its highest bounds corner and float it on any slope.
 
 use std::error::Error;
 
@@ -27,13 +29,28 @@ use crate::content::ContentPaths;
 pub const SCENE_NAME: &str = "sample";
 pub const LIGHT_NAME: &str = "default";
 
-/// The sample prefabs: a slug, the unit primitive, the shape's local scale in metres, and a
-/// surface tag (the editor colors placeholders by tag). Each is one solid placeholder shape.
-const PREFABS: [(&str, Primitive, Vec3, &str); 4] = [
-    ("crate", Primitive::Cube, Vec3::new(1.0, 1.0, 1.0), "wood"),
-    ("boulder", Primitive::Ellipsoid, Vec3::new(2.6, 1.8, 2.2), "stone"),
-    ("pillar", Primitive::Cylinder, Vec3::new(1.2, 5.0, 1.2), "stone"),
-    ("marker", Primitive::Capsule, Vec3::new(0.8, 2.0, 0.8), "metal"),
+/// How a prefab is rested on the terrain at placement time. Which rest fits is authoring intent
+/// about the shape's underside, so it is part of the prefab table, not derived from geometry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Rest {
+    /// AABB corner rest via wok-physics `resolve_heightmap`: the bounds' bottom sits on the
+    /// highest footprint sample, so no corner hovers or sinks. Right for flat-bottomed shapes,
+    /// whose silhouette really is their bounds.
+    Corner,
+    /// The bounds' bottom sits on the terrain sample under the placement centre (`height_at`),
+    /// sunk `sink_m` so a curved underside meets the ground instead of tangentially perching on
+    /// it. Right for round or organic shapes, which corner rest floats on any slope.
+    Center { sink_m: f32 },
+}
+
+/// The sample prefabs: a slug, the unit primitive, the shape's local scale in metres, a surface
+/// tag (the editor colors placeholders by tag), and the placement rest policy. Each is one solid
+/// placeholder shape.
+const PREFABS: [(&str, Primitive, Vec3, &str, Rest); 4] = [
+    ("crate", Primitive::Cube, Vec3::new(1.0, 1.0, 1.0), "wood", Rest::Corner),
+    ("boulder", Primitive::Ellipsoid, Vec3::new(2.6, 1.8, 2.2), "stone", Rest::Center { sink_m: 0.05 }),
+    ("pillar", Primitive::Cylinder, Vec3::new(1.2, 5.0, 1.2), "stone", Rest::Corner),
+    ("marker", Primitive::Capsule, Vec3::new(0.8, 2.0, 0.8), "metal", Rest::Center { sink_m: 0.02 }),
 ];
 
 /// The sample placements: prefab slug, chunk-local x/z in metres, yaw in degrees, uniform scale.
@@ -63,7 +80,7 @@ pub fn build() -> SampleContent {
     let heightmap = sample_heightmap();
     let prefabs: Vec<(PrefabRef, Prefab)> = PREFABS
         .iter()
-        .map(|&(slug, primitive, scale, surface)| (PrefabRef::new(slug), solid_prefab(primitive, scale, surface)))
+        .map(|&(slug, primitive, scale, surface, _)| (PrefabRef::new(slug), solid_prefab(primitive, scale, surface)))
         .collect();
 
     let mut scene = Scene {
@@ -77,6 +94,7 @@ pub fn build() -> SampleContent {
     let mut placements = Vec::with_capacity(PLACEMENTS.len());
     for &(slug, x, z, yaw_deg, scale) in &PLACEMENTS {
         let prefab = &prefabs.iter().find(|(r, _)| r.as_str() == slug).expect("placement table names a prefab").1;
+        let rest = rest_policy(slug);
         let floating = Transform {
             translation: Vec3::new(x, 0.0, z),
             rotation: Quat::from_rotation_y(yaw_deg.to_radians()),
@@ -85,7 +103,7 @@ pub fn build() -> SampleContent {
         placements.push(Placement {
             prefab: PrefabRef::new(slug),
             instance_id: scene.allocate_instance_id(),
-            transform: rest_on_terrain(prefab, floating, &heightmap),
+            transform: rest_on_terrain(prefab, rest, floating, &heightmap),
             state: None,
         });
     }
@@ -154,23 +172,37 @@ fn sample_light() -> LightState {
         ambient: Vec3::new(0.12, 0.12, 0.16),
         fog: Fog { color: Vec3::new(0.65, 0.70, 0.80), start: 60.0, end: 260.0 },
         sky: SkyGradient { horizon: Vec3::new(0.65, 0.70, 0.80), zenith: Vec3::new(0.25, 0.45, 0.85) },
-        cel: CelParams { band_count: 4, transition_softness: 0.08, rim_intensity: 0.35 },
+        cel: CelParams { band_count: 32, transition_softness: 0.08, rim_intensity: 0.35 },
     }
 }
 
-/// Vertically correct a placement so the prefab's bounds rest on the terrain surface.
+/// The rest policy for a prefab slug, from the prefab table.
+fn rest_policy(slug: &str) -> Rest {
+    PREFABS.iter().find(|p| p.0 == slug).expect("placement table names a prefab").4
+}
+
+/// Vertically correct a placement so the prefab rests on the terrain surface per its `Rest`
+/// policy.
 ///
-/// The authored bounds are reduced to a conservative chunk-local AABB (`world_aabb` over the
-/// default state's shapes), dropped below the lowest representable terrain, and lifted by the
-/// lift-only `resolve_heightmap`; the lifted bottom is exactly the surface under the footprint,
-/// and the difference from the original bottom is the correction.
-fn rest_on_terrain(prefab: &Prefab, transform: Transform, terrain: &Heightmap) -> Transform {
+/// Corner rest: the authored bounds are reduced to a conservative chunk-local AABB (`world_aabb`
+/// over the default state's shapes), dropped below the lowest representable terrain, and lifted by
+/// the lift-only `resolve_heightmap`; the lifted bottom is exactly the surface under the
+/// footprint. Center rest: the bounds' bottom goes to the terrain sample under the placement
+/// centre, minus the policy's sink. Either way the difference from the original bottom is the
+/// correction.
+fn rest_on_terrain(prefab: &Prefab, rest: Rest, transform: Transform, terrain: &Heightmap) -> Transform {
     let bounds = prefab_bounds(prefab, &transform);
-    let drop = (HEIGHT_MIN_M - 1.0) - bounds.min.y;
-    let dropped = Aabb::new(bounds.min + Vec3::Y * drop, bounds.max + Vec3::Y * drop);
-    let rested = resolve_heightmap(dropped, terrain);
-    let lift = rested.min.y - bounds.min.y;
-    Transform { translation: transform.translation + Vec3::Y * lift, ..transform }
+    let bottom = match rest {
+        Rest::Corner => {
+            let drop = (HEIGHT_MIN_M - 1.0) - bounds.min.y;
+            let dropped = Aabb::new(bounds.min + Vec3::Y * drop, bounds.max + Vec3::Y * drop);
+            resolve_heightmap(dropped, terrain).min.y
+        }
+        Rest::Center { sink_m } => {
+            terrain.height_at(transform.translation.x, transform.translation.z) - sink_m
+        }
+    };
+    Transform { translation: transform.translation + Vec3::Y * (bottom - bounds.min.y), ..transform }
 }
 
 /// Conservative AABB of a placed prefab: the union of `world_aabb` over its default state's
@@ -210,32 +242,42 @@ mod tests {
     }
 
     #[test]
-    fn placements_rest_on_the_surface() {
+    fn placements_rest_on_the_surface_per_their_policy() {
         let content = build();
         let prefabs: std::collections::HashMap<_, _> = content.prefabs.iter().cloned().collect();
         for placement in &content.chunk.placements {
             let prefab = &prefabs[&placement.prefab];
             let bounds = prefab_bounds(prefab, &placement.transform);
-            // The rest puts the bounds' bottom exactly at the highest footprint sample, the same
-            // five points resolve_heightmap reads: four bottom corners plus the center.
-            let center = (bounds.min + bounds.max) * 0.5;
-            let samples = [
-                (bounds.min.x, bounds.min.z),
-                (bounds.max.x, bounds.min.z),
-                (bounds.min.x, bounds.max.z),
-                (bounds.max.x, bounds.max.z),
-                (center.x, center.z),
-            ];
-            let ground = samples
-                .iter()
-                .map(|&(x, z)| content.heightmap.height_at(x, z))
-                .fold(f32::NEG_INFINITY, f32::max);
+            let expected = match rest_policy(placement.prefab.as_str()) {
+                // Corner rest puts the bounds' bottom exactly at the highest footprint sample,
+                // the same five points resolve_heightmap reads: four bottom corners plus the
+                // center.
+                Rest::Corner => {
+                    let center = (bounds.min + bounds.max) * 0.5;
+                    let samples = [
+                        (bounds.min.x, bounds.min.z),
+                        (bounds.max.x, bounds.min.z),
+                        (bounds.min.x, bounds.max.z),
+                        (bounds.max.x, bounds.max.z),
+                        (center.x, center.z),
+                    ];
+                    samples
+                        .iter()
+                        .map(|&(x, z)| content.heightmap.height_at(x, z))
+                        .fold(f32::NEG_INFINITY, f32::max)
+                }
+                // Center rest puts it at the sample under the placement centre, minus the sink.
+                Rest::Center { sink_m } => {
+                    let t = placement.transform.translation;
+                    content.heightmap.height_at(t.x, t.z) - sink_m
+                }
+            };
             assert!(
-                (bounds.min.y - ground).abs() < 1e-3,
-                "{:?} bottom {} should rest at ground {}",
+                (bounds.min.y - expected).abs() < 1e-3,
+                "{:?} bottom {} should rest at {}",
                 placement.prefab,
                 bounds.min.y,
-                ground
+                expected
             );
         }
     }
