@@ -5,6 +5,12 @@ resolver = "3"
 [workspace.dependencies]
 winit = "0.30"
 wgpu = "24"
+# The editor's UI toolkit. 0.31 is the egui line built against wgpu 24 and winit 0.30, the same
+# versions wok-platform pins; these are dependencies of the wok application only, never of an
+# engine crate.
+egui = "0.31"
+egui-wgpu = "0.31"
+egui-winit = "0.31"
 cpal = "0.15"
 gilrs = "0.11"
 notify = "8"

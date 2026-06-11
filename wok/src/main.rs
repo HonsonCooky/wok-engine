@@ -1,7 +1,10 @@
 //! wok: the editor, the engine's reference application.
 //!
-//! v0 is a viewport proving the authored loop end to end: content on disk -> wok-scene load ->
-//! wok-content transform -> wok-render draw, with hot reload and a fly camera. No editing UI yet.
+//! v1 is the authoring loop over v0's viewport: see the scene's structure (scene tree), select
+//! (tree click or viewport pick), edit (inspector), place and delete, and save - all against the
+//! authored in-memory forms, re-transformed through wok-content per edit so the viewport always
+//! draws the authored truth. The UI is egui, composed as a final render pass; egui is a
+//! dependency of this application only, never of an engine crate.
 //!
 //! Run with `cargo run -p wok [content-dir]` (default `./content`). A first run against an empty
 //! directory generates the sample scene through the engine's save paths; every later run loads
@@ -19,7 +22,16 @@ mod app;
 mod camera;
 mod cli;
 mod content;
+mod gui;
+mod input;
+mod lines;
+mod model;
+mod panels;
+mod pick;
+mod place;
+mod reload;
 mod sample;
+mod sync;
 
 use std::error::Error;
 
@@ -61,6 +73,7 @@ fn start(args: &[String]) -> Result<app::EditorApp, Box<dyn Error>> {
         loaded.prefabs.len()
     );
     println!("wok: controls: WASD move, Q/E down/up, hold right mouse to look, scroll for speed");
+    println!("wok: editing: click to select, Delete removes, Ctrl+S saves, Esc cancels/deselects");
 
     app::EditorApp::new(paths, loaded)
 }

@@ -1,42 +1,37 @@
-//! The editor application: GPU state, the per-frame loop, input mapping, and hot reload.
+//! The editor application: GPU state and the per-frame loop.
 //!
-//! This is composition only, per the HLD's application layer: authored data flows through
-//! wok-content's store into runtime arrays, wok-mesh uploads them, wok-render draws exactly the
-//! list it is handed each frame, and the chunk-origin composition (chunk-local transforms lifted
-//! into world space) happens here because the render contract makes it caller policy.
+//! Composition only, per the HLD's application layer: the authored model (`crate::model`) flows
+//! through wok-content's store into runtime arrays, wok-mesh uploads them, wok-render draws
+//! exactly the list it is handed, and the chunk-origin composition happens here because the
+//! render contract makes it caller policy. egui paints last into the same encoder
+//! (`crate::gui`), the UI emits actions the loop applies (`crate::panels`), input routing honors
+//! egui's focus (`crate::input`), and watcher changes apply content-compared (`crate::reload`).
 //!
-//! Hot reload follows the HLD data flow: wok-scene's watcher reports raw changed paths, the
-//! editor polls each frame, classifies them (`crate::content::classify`), and re-runs the
-//! authored-to-runtime transform for affected chunks. A light-state change swaps per-frame data
-//! only and never touches a chunk. Reload failures are printed and skipped rather than crashing:
-//! a watcher event can arrive mid-write with a half-written file, and the completing write
-//! delivers a second event that retries.
+//! The frame order is load-bearing: hot reload first (the model is current before anything reads
+//! it), then the UI (its focus queries decide what input the rest of the frame may use), then
+//! actions, camera, clicks, and finally the render with the UI output painted over it.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::BTreeMap;
 use std::error::Error;
-use std::path::PathBuf;
 
-use glam::{Mat4, Vec2, Vec3};
-use wok_content::{ChunkState, ChunkStore};
+use glam::{Mat4, Vec3};
 use wok_light::LightState;
 use wok_mesh::{MeshGpu, primitive_mesh};
 use wok_physics::world_aabb;
-use wok_platform::input::InputState;
-use wok_platform::winit::event::MouseButton;
-use wok_platform::winit::keyboard::Key;
+use wok_platform::winit::event::WindowEvent;
 use wok_platform::{App, FrameCtx, Platform, gfx};
-use wok_render::{Camera, RenderItem, Renderer};
-use wok_scene::{Aabb, CHUNK_GRID_DIM, ChunkCoord, Prefab, PrefabRef, Primitive, Scene, SurfaceTag, VisibleItem, Watcher};
+use wok_render::{Camera, DepthMode, LineSegment, RenderItem, Renderer};
+use wok_scene::{Aabb, ChunkCoord, Primitive, SurfaceTag, VisibleItem, Watcher};
 
-use crate::camera::{self, CameraInput, FlyCamera};
-use crate::content::{self, ContentPaths, LoadedContent, Reload};
-
-/// Chunk side in metres, derived from the heightmap grid (128 one-metre cells; the 129th sample
-/// is the shared edge). wok-scene deliberately does not bake the chunk size into ChunkCoord.
-const CHUNK_SIZE_M: f32 = (CHUNK_GRID_DIM - 1) as f32;
-
-/// Mouse-look sensitivity, radians per pixel of raw motion.
-const LOOK_SENSITIVITY: f32 = 0.0035;
+use crate::camera::{self, FlyCamera};
+use crate::content::{ContentPaths, LoadedContent};
+use crate::gui::Gui;
+use crate::input;
+use crate::lines;
+use crate::model::{CHUNK_SIZE_M, EditorModel, chunk_origin};
+use crate::panels::{self, Action, Stats, UiState};
+use crate::pick;
+use crate::reload;
 
 const TERRAIN_COLOR: Vec3 = Vec3::new(0.40, 0.60, 0.35);
 
@@ -54,17 +49,11 @@ fn primitive_index(primitive: Primitive) -> usize {
     }
 }
 
-/// World-space origin of a chunk: its grid coordinate times the chunk size.
-fn chunk_origin(coord: ChunkCoord) -> Vec3 {
-    Vec3::new(coord.x as f32 * CHUNK_SIZE_M, 0.0, coord.z as f32 * CHUNK_SIZE_M)
-}
-
-/// World-space bounds of everything the loaded chunks hold - terrain plus placed visible and
-/// hitbox extents - the shadow region the frame call passes (caller policy per the render
-/// contract). Falls back to a small box around the origin when nothing is loaded, so the shadow
-/// fit stays well-formed. Recomputed per frame because hot reload can change the store between
-/// any two frames; the scan is a few thousand min/max ops per chunk, frame-state-cheap.
-fn scene_bounds(store: &ChunkStore) -> Aabb {
+/// World-space bounds of everything the loaded chunks hold - the shadow region the frame call
+/// passes (caller policy per the render contract). Falls back to a small box around the origin
+/// when nothing is loaded. Recomputed per frame because edits and hot reload can change the store
+/// between any two frames; the scan is a few thousand min/max ops per chunk, frame-state-cheap.
+fn scene_bounds(store: &wok_content::ChunkStore) -> Aabb {
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
     let mut grow = |b: Aabb| {
@@ -105,150 +94,98 @@ fn surface_color(surface: Option<&SurfaceTag>) -> Vec3 {
     }
 }
 
-/// GPU residency, created in `init` once a device exists: the renderer, one uploaded mesh per
-/// unit primitive (shared by every placement), and one terrain mesh per loaded chunk.
+/// GPU residency, created in `init` once a device exists: the renderer, the egui integration, one
+/// uploaded mesh per unit primitive (shared by every placement), and one terrain mesh per chunk.
 struct Gpu {
     renderer: Renderer,
+    gui: Gui,
     primitives: Vec<MeshGpu>,
     terrain: BTreeMap<ChunkCoord, MeshGpu>,
 }
 
 pub struct EditorApp {
     paths: ContentPaths,
-    scene: Scene,
-    prefabs: HashMap<PrefabRef, Prefab>,
+    model: EditorModel,
     light: LightState,
-    store: ChunkStore,
     watcher: Watcher,
     camera: FlyCamera,
+    ui: UiState,
     size: (u32, u32),
     gpu: Option<Gpu>,
+    /// Exponentially smoothed frame time in milliseconds, for the stats overlay.
+    frame_ms: f32,
+    /// Render-list length of the previous frame, for the stats overlay.
+    draw_items: usize,
+    title: String,
 }
 
 impl EditorApp {
-    /// Build the app from loaded content: transform every chunk through the store (synchronous,
-    /// no streaming in v0) and start watching the content root for hot reload.
+    /// Build the app from loaded content: the authored model transforms every chunk through the
+    /// store (synchronous, no streaming), and the content root is watched for hot reload.
     pub fn new(paths: ContentPaths, loaded: LoadedContent) -> Result<EditorApp, Box<dyn Error>> {
         let watcher = Watcher::new(&paths.root)?;
-        let mut store = ChunkStore::new();
-        for (chunk, heightmap) in loaded.chunks {
-            store.load(chunk, heightmap, &loaded.prefabs)?;
-        }
-        let camera = spawn_camera(&store);
+        let model = EditorModel::new(loaded.scene, loaded.prefabs, loaded.chunks)?;
+        let camera = spawn_camera(&model);
         Ok(EditorApp {
             paths,
-            scene: loaded.scene,
-            prefabs: loaded.prefabs,
+            model,
             light: loaded.light,
-            store,
             watcher,
             camera,
+            ui: UiState::default(),
             size: (0, 0),
             gpu: None,
+            frame_ms: 0.0,
+            draw_items: 0,
+            title: String::new(),
         })
     }
 
-    fn apply_reloads(&mut self, platform: &Platform, changed: Vec<PathBuf>) {
-        let mut scene_changed = false;
-        let mut prefabs_changed = false;
-        let mut light_changed = false;
-        let mut chunks: BTreeSet<ChunkCoord> = BTreeSet::new();
-        for path in changed {
-            match content::classify(&self.paths.root, &path) {
-                Some(Reload::Scene) => scene_changed = true,
-                Some(Reload::Prefabs) => prefabs_changed = true,
-                Some(Reload::Chunk(coord)) => {
-                    chunks.insert(coord);
-                }
-                Some(Reload::Light(name)) if name == self.scene.default_lighting.as_str() => {
-                    light_changed = true;
-                }
-                _ => {}
-            }
-        }
+    /// Fog distance sets render distance (HLD); the far plane sits past full occlusion. Picking
+    /// shares it: what you can see, you can click.
+    fn far_plane(&self) -> f32 {
+        (self.light.fog.end * 1.2).max(50.0)
+    }
 
-        if scene_changed {
-            match wok_scene::load_scene(self.paths.scene()) {
-                Ok(scene) => {
-                    if scene.default_lighting != self.scene.default_lighting {
-                        light_changed = true;
-                    }
-                    platform.window.set_title(&format!("wok - {}", scene.name));
-                    self.scene = scene;
-                    println!("wok: reloaded scene manifest");
+    fn apply_action(&mut self, action: Action) {
+        match action {
+            Action::Select(sel) => self.model.selection = sel,
+            Action::Edit { sel, transform, state } => {
+                if let Err(err) = self.model.edit_placement(sel, transform, state) {
+                    eprintln!("wok: edit failed: {err}");
                 }
-                Err(err) => eprintln!("wok: scene reload failed, keeping previous: {err}"),
             }
-        }
-
-        if prefabs_changed {
-            match content::load_prefab_library(&self.paths) {
-                Ok(prefabs) => {
-                    self.prefabs = prefabs;
-                    // The runtime arrays do not retain which prefabs a chunk placed, so a prefab
-                    // change re-transforms every loaded chunk.
-                    chunks.extend(self.store.iter_loaded().map(|(coord, _)| coord));
-                    println!("wok: reloaded prefab library");
-                }
-                Err(err) => eprintln!("wok: prefab reload failed, keeping previous: {err}"),
-            }
-        }
-
-        for coord in chunks {
-            self.reload_chunk(platform, coord);
-        }
-
-        if light_changed {
-            let name = self.scene.default_lighting.as_str();
-            match wok_light::load_light_state(self.paths.light(name)) {
-                Ok((_, light)) => {
-                    self.light = light;
-                    println!("wok: reloaded light state {name:?}");
-                }
-                Err(err) => eprintln!("wok: light reload failed, keeping previous: {err}"),
-            }
+            Action::ArmPlace(prefab) => self.ui.placing = Some(prefab),
+            Action::DisarmPlace => self.ui.placing = None,
         }
     }
 
-    /// Release and re-transform one chunk from disk, replacing its terrain mesh on the GPU. A
-    /// missing chunk file means the chunk was deleted; it stays released.
-    fn reload_chunk(&mut self, platform: &Platform, coord: ChunkCoord) {
-        if self.store.state(coord) == ChunkState::Loaded {
-            let _ = self.store.release(coord);
-        }
-        if let Some(gpu) = self.gpu.as_mut() {
-            gpu.terrain.remove(&coord);
-        }
-        if !self.paths.chunk(coord).exists() {
-            println!("wok: chunk {}_{} removed", coord.x, coord.z);
-            return;
-        }
-        let loaded = content::load_chunk_with_heightmap(&self.paths, coord)
-            .and_then(|(chunk, hm)| Ok(self.store.load(chunk, hm, &self.prefabs)?));
-        match loaded {
-            Ok(runtime) => {
-                if let Some(mesh) = runtime.terrain_mesh.as_ref()
-                    && let Some(gpu) = self.gpu.as_mut()
-                {
-                    gpu.terrain.insert(coord, MeshGpu::upload(&platform.device, mesh));
-                }
-                println!("wok: reloaded chunk {}_{}", coord.x, coord.z);
+    /// The selected placement's classified colliders as an x-ray cage.
+    fn selection_lines(&self) -> Vec<LineSegment> {
+        let mut out = Vec::new();
+        if let Some(sel) = self.model.selection
+            && let Some(placement) = self.model.placement(sel)
+            && let Some(prefab) = self.model.prefabs.get(&placement.prefab)
+        {
+            for collider in pick::placement_colliders(prefab, placement, chunk_origin(sel.coord)) {
+                lines::collider_lines(&collider, lines::SELECTION_COLOR, &mut out);
             }
-            Err(err) => eprintln!("wok: chunk {}_{} reload failed, now unloaded: {err}", coord.x, coord.z),
         }
+        out
     }
 
-    fn render(&mut self, ctx: &mut FrameCtx) {
+    fn render(&mut self, ctx: &mut FrameCtx, ui_output: Option<egui::FullOutput>) {
+        let far = self.far_plane();
+        let cage = self.selection_lines();
+        let model = &self.model;
         let Some(gpu) = self.gpu.as_mut() else { return };
-        let Gpu { renderer, primitives, terrain } = gpu;
+        let Gpu { renderer, gui, primitives, terrain } = gpu;
 
         let aspect = self.size.0 as f32 / self.size.1.max(1) as f32;
-        // Fog distance sets render distance (HLD); the far plane sits past full occlusion.
-        let far = (self.light.fog.end * 1.2).max(50.0);
         let camera = Camera { view_proj: self.camera.view_proj(aspect, far), eye: self.camera.position };
 
         let mut items: Vec<RenderItem> = Vec::new();
-        for (coord, runtime) in self.store.iter_loaded() {
+        for (coord, runtime) in model.store.iter_loaded() {
             let origin = Mat4::from_translation(chunk_origin(coord));
             if let Some(mesh) = terrain.get(&coord) {
                 items.push(RenderItem { transform: origin, mesh, color: TERRAIN_COLOR });
@@ -263,11 +200,12 @@ impl EditorApp {
                         });
                     }
                     // Named replacement meshes need the glTF loader (wok-mesh, later); their
-                    // placements simply do not draw in v0.
+                    // placements simply do not draw yet.
                     VisibleItem::Mesh { .. } => {}
                 }
             }
         }
+        self.draw_items = items.len();
 
         let Some(mut frame) = gfx::begin_frame(ctx.platform) else { return };
         renderer.render(
@@ -277,16 +215,38 @@ impl EditorApp {
             &frame.view,
             &camera,
             &self.light,
-            scene_bounds(&self.store),
+            scene_bounds(&model.store),
             &items,
         );
+        if !cage.is_empty() {
+            renderer.render_lines(
+                &ctx.platform.device,
+                &ctx.platform.queue,
+                &mut frame.encoder,
+                &frame.view,
+                &cage,
+                DepthMode::XRay,
+            );
+        }
+        if let Some(output) = ui_output {
+            gui.paint(ctx.platform, &mut frame.encoder, &frame.view, output, self.size);
+        }
         frame.finish(ctx.platform);
+    }
+
+    /// Keep the window title showing the scene name and the unsaved-changes indicator.
+    fn refresh_title(&mut self, platform: &Platform) {
+        let dirty = if self.model.is_dirty() { " *" } else { "" };
+        let title = format!("wok - {}{dirty}", self.model.scene.name);
+        if title != self.title {
+            platform.window.set_title(&title);
+            self.title = title;
+        }
     }
 }
 
 impl App for EditorApp {
     fn init(&mut self, platform: &Platform) {
-        platform.window.set_title(&format!("wok - {}", self.scene.name));
         let config = &platform.surface_config;
         let renderer = Renderer::new(&platform.device, config.format, config.width, config.height);
         self.size = (config.width, config.height);
@@ -296,12 +256,19 @@ impl App for EditorApp {
             .map(|&p| MeshGpu::upload(&platform.device, &primitive_mesh(p)))
             .collect();
         let mut terrain = BTreeMap::new();
-        for (coord, runtime) in self.store.iter_loaded() {
+        for (coord, runtime) in self.model.store.iter_loaded() {
             if let Some(mesh) = runtime.terrain_mesh.as_ref() {
                 terrain.insert(coord, MeshGpu::upload(&platform.device, mesh));
             }
         }
-        self.gpu = Some(Gpu { renderer, primitives, terrain });
+        self.gpu = Some(Gpu { renderer, gui: Gui::new(platform), primitives, terrain });
+        self.refresh_title(platform);
+    }
+
+    fn on_window_event(&mut self, platform: Option<&Platform>, event: &WindowEvent) {
+        if let (Some(platform), Some(gpu)) = (platform, self.gpu.as_mut()) {
+            gpu.gui.on_event(&platform.window, event);
+        }
     }
 
     fn frame(&mut self, ctx: &mut FrameCtx) {
@@ -313,12 +280,67 @@ impl App for EditorApp {
         }
 
         let changed = self.watcher.poll();
-        if !changed.is_empty() {
-            self.apply_reloads(ctx.platform, changed);
+        if !changed.is_empty()
+            && let Some(gpu) = self.gpu.as_mut()
+        {
+            reload::apply(
+                &self.paths,
+                &mut self.model,
+                &mut self.light,
+                &mut gpu.terrain,
+                &ctx.platform.device,
+                changed,
+            );
         }
 
-        self.camera = camera::update(&self.camera, &camera_input(&ctx.input), ctx.dt);
-        self.render(ctx);
+        if ctx.dt > 0.0 {
+            let ms = ctx.dt * 1000.0;
+            self.frame_ms = if self.frame_ms <= 0.0 { ms } else { 0.9 * self.frame_ms + 0.1 * ms };
+        }
+
+        // Run the UI first: its focus queries decide what input the rest of the frame may use.
+        let mut actions = Vec::new();
+        let mut ui_output = None;
+        let (mut pointer_free, mut keys_free) = (true, true);
+        {
+            let model = &self.model;
+            let ui_state = &self.ui;
+            let stats = Stats {
+                fps: if self.frame_ms > 0.0 { 1000.0 / self.frame_ms } else { 0.0 },
+                frame_ms: self.frame_ms,
+                chunk_count: model.chunks.len(),
+                placement_count: model.placement_count(),
+                draw_items: self.draw_items,
+            };
+            if let Some(gpu) = self.gpu.as_mut() {
+                let output = gpu.gui.run(&ctx.platform.window, |egui_ctx| {
+                    panels::ui(egui_ctx, model, ui_state, &stats, &mut actions);
+                });
+                pointer_free = !gpu.gui.ctx.is_pointer_over_area() && !gpu.gui.ctx.wants_pointer_input();
+                keys_free = !gpu.gui.ctx.wants_keyboard_input();
+                ui_output = Some(output);
+            }
+        }
+        for action in actions {
+            self.apply_action(action);
+        }
+
+        self.camera =
+            camera::update(&self.camera, &input::camera_input(&ctx.input, pointer_free, keys_free), ctx.dt);
+        input::handle(
+            &ctx.input,
+            pointer_free,
+            keys_free,
+            &self.camera,
+            self.size,
+            self.far_plane(),
+            &mut self.model,
+            &mut self.ui,
+            &self.paths,
+        );
+
+        self.render(ctx, ui_output);
+        self.refresh_title(ctx.platform);
     }
 
     fn cleanup(&mut self, _platform: &Platform) {}
@@ -326,10 +348,11 @@ impl App for EditorApp {
 
 /// Spawn over the first loaded chunk, mid-south looking north across it, a little above the
 /// terrain there (or above the origin plane when the scene has no terrain).
-fn spawn_camera(store: &ChunkStore) -> FlyCamera {
+fn spawn_camera(model: &EditorModel) -> FlyCamera {
     let half = CHUNK_SIZE_M * 0.5;
     let south = CHUNK_SIZE_M * 0.8;
-    let (origin, ground) = store
+    let (origin, ground) = model
+        .store
         .iter_loaded()
         .next()
         .map_or((Vec3::ZERO, 0.0), |(coord, runtime)| {
@@ -341,88 +364,5 @@ fn spawn_camera(store: &ChunkStore) -> FlyCamera {
         yaw: 0.0,
         pitch: -0.15,
         speed: 16.0,
-    }
-}
-
-/// Map the frame's raw input snapshot to the camera's input: WASD moves, Q/E sink and rise,
-/// holding the right mouse button turns raw mouse motion into look, scroll adjusts speed.
-fn camera_input(input: &InputState) -> CameraInput {
-    let axis = |pos: char, neg: char| f32::from(char_held(input, pos)) - f32::from(char_held(input, neg));
-    let look_delta = if input.mouse_held(MouseButton::Right) {
-        Vec2::new(input.mouse_motion.0 as f32, -input.mouse_motion.1 as f32) * LOOK_SENSITIVITY
-    } else {
-        Vec2::ZERO
-    };
-    CameraInput {
-        move_forward: axis('w', 's'),
-        move_right: axis('d', 'a'),
-        move_up: axis('e', 'q'),
-        look_delta,
-        speed_steps: input.scroll_delta.1,
-    }
-}
-
-/// Is a printable character key held, compared case-insensitively so shift state does not stick
-/// a movement key (the held-key analogue of `InputState::char_pressed`).
-fn char_held(input: &InputState, ch: char) -> bool {
-    input.keys_held.iter().any(|k| match k {
-        Key::Character(s) => s.chars().any(|c| c.eq_ignore_ascii_case(&ch)),
-        _ => false,
-    })
-}
-
-#[cfg(test)]
-#[allow(clippy::float_cmp)]
-mod tests {
-    use super::*;
-    use std::collections::HashSet;
-
-    fn input_with(keys: &[&str]) -> InputState {
-        InputState {
-            keys_held: keys.iter().map(|s| Key::Character((*s).into())).collect(),
-            keys_pressed: HashSet::new(),
-            keys_released: HashSet::new(),
-            mouse_pos: (0.0, 0.0),
-            mouse_delta: (0.0, 0.0),
-            mouse_motion: (10.0, 4.0),
-            mouse_buttons_held: HashSet::new(),
-            mouse_buttons_pressed: HashSet::new(),
-            mouse_buttons_released: HashSet::new(),
-            scroll_delta: (0.0, 2.0),
-            gamepads: vec![],
-        }
-    }
-
-    #[test]
-    fn wasd_and_qe_map_to_movement_axes() {
-        let input = input_with(&["w", "d", "q"]);
-        let mapped = camera_input(&input);
-        assert_eq!(mapped.move_forward, 1.0);
-        assert_eq!(mapped.move_right, 1.0);
-        assert_eq!(mapped.move_up, -1.0);
-        assert_eq!(mapped.speed_steps, 2.0);
-    }
-
-    #[test]
-    fn opposed_keys_cancel_and_shifted_keys_still_count() {
-        let input = input_with(&["W", "s"]);
-        assert_eq!(camera_input(&input).move_forward, 0.0);
-    }
-
-    #[test]
-    fn mouse_motion_is_look_only_while_right_button_is_held() {
-        let mut input = input_with(&[]);
-        assert_eq!(camera_input(&input).look_delta, Vec2::ZERO);
-
-        input.mouse_buttons_held.insert(MouseButton::Right);
-        let look = camera_input(&input).look_delta;
-        assert!(look.x > 0.0, "rightward motion should turn right: {look:?}");
-        assert!(look.y < 0.0, "downward motion should pitch down: {look:?}");
-    }
-
-    #[test]
-    fn chunk_origin_scales_by_the_chunk_size() {
-        assert_eq!(chunk_origin(ChunkCoord::new(0, 0)), Vec3::ZERO);
-        assert_eq!(chunk_origin(ChunkCoord::new(2, -1)), Vec3::new(256.0, 0.0, -128.0));
     }
 }

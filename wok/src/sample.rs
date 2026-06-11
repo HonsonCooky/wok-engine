@@ -17,31 +17,17 @@ use std::error::Error;
 
 use glam::{Quat, Vec3};
 use wok_light::{CelParams, Fog, LightState, SkyGradient, Sun};
-use wok_physics::{resolve_heightmap, world_aabb};
 use wok_scene::{
-    Aabb, CHUNK_GRID_DIM, CHUNK_GRID_LEN, Chunk, ChunkCoord, ChunkStreaming, Eagerness, HEIGHT_MIN_M,
-    Heightmap, Placement, Prefab, PrefabRef, PrefabState, Primitive, Scene, Shape, StreamingDefaults,
+    CHUNK_GRID_DIM, CHUNK_GRID_LEN, Chunk, ChunkCoord, ChunkStreaming, Eagerness, Heightmap,
+    Placement, Prefab, PrefabRef, PrefabState, Primitive, Scene, Shape, StreamingDefaults,
     SurfaceTag, Transform,
 };
 
 use crate::content::ContentPaths;
+use crate::place::{Rest, rest_on_terrain};
 
 pub const SCENE_NAME: &str = "sample";
 pub const LIGHT_NAME: &str = "default";
-
-/// How a prefab is rested on the terrain at placement time. Which rest fits is authoring intent
-/// about the shape's underside, so it is part of the prefab table, not derived from geometry.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Rest {
-    /// AABB corner rest via wok-physics `resolve_heightmap`: the bounds' bottom sits on the
-    /// highest footprint sample, so no corner hovers or sinks. Right for flat-bottomed shapes,
-    /// whose silhouette really is their bounds.
-    Corner,
-    /// The bounds' bottom sits on the terrain sample under the placement centre (`height_at`),
-    /// sunk `sink_m` so a curved underside meets the ground instead of tangentially perching on
-    /// it. Right for round or organic shapes, which corner rest floats on any slope.
-    Center { sink_m: f32 },
-}
 
 /// The sample prefabs: a slug, the unit primitive, the shape's local scale in metres, a surface
 /// tag (the editor colors placeholders by tag), and the placement rest policy. Each is one solid
@@ -193,52 +179,10 @@ fn rest_policy(slug: &str) -> Rest {
     PREFABS.iter().find(|p| p.0 == slug).expect("placement table names a prefab").4
 }
 
-/// Vertically correct a placement so the prefab rests on the terrain surface per its `Rest`
-/// policy.
-///
-/// Corner rest: the authored bounds are reduced to a conservative chunk-local AABB (`world_aabb`
-/// over the default state's shapes), dropped below the lowest representable terrain, and lifted by
-/// the lift-only `resolve_heightmap`; the lifted bottom is exactly the surface under the
-/// footprint. Center rest: the bounds' bottom goes to the terrain sample under the placement
-/// centre, minus the policy's sink. Either way the difference from the original bottom is the
-/// correction.
-fn rest_on_terrain(prefab: &Prefab, rest: Rest, transform: Transform, terrain: &Heightmap) -> Transform {
-    let bounds = prefab_bounds(prefab, &transform);
-    let bottom = match rest {
-        Rest::Corner => {
-            let drop = (HEIGHT_MIN_M - 1.0) - bounds.min.y;
-            let dropped = Aabb::new(bounds.min + Vec3::Y * drop, bounds.max + Vec3::Y * drop);
-            resolve_heightmap(dropped, terrain).min.y
-        }
-        Rest::Center { sink_m } => {
-            terrain.height_at(transform.translation.x, transform.translation.z) - sink_m
-        }
-    };
-    Transform { translation: transform.translation + Vec3::Y * (bottom - bounds.min.y), ..transform }
-}
-
-/// Conservative AABB of a placed prefab: the union of `world_aabb` over its default state's
-/// shapes, composed `placement * shape` exactly as the slicer composes them.
-fn prefab_bounds(prefab: &Prefab, transform: &Transform) -> Aabb {
-    let placement = transform.to_mat4();
-    let state = prefab
-        .states
-        .iter()
-        .find(|s| s.name == prefab.default_state)
-        .expect("sample prefabs have a valid default state");
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    for shape in &state.shapes {
-        let b = world_aabb(shape.primitive, placement * shape.transform.to_mat4());
-        min = min.min(b.min);
-        max = max.max(b.max);
-    }
-    Aabb::new(min, max)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::place::prefab_bounds;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
