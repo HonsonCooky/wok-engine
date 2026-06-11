@@ -9,7 +9,8 @@
 //!                                                  variable-height cut - the game's policy)
 //!     -> integrate one fixed step under gravity   (wok-physics: integrate; ascent gravity while
 //!                                                  rising, the heavier fall gravity otherwise)
-//!     -> collide-and-slide against static AABBs   (wok-physics: collide_and_slide)
+//!     -> collide-and-slide against the statics    (crate::slide over wok-physics's sweep:
+//!                                                  supported ground contacts resolve flat)
 //!     -> rest the slid capsule on the terrain     (wok-physics: rest_on_heightmap, chunk-local)
 //!
 //! Two extensions over the harness. World space: statics were lifted to world space when the
@@ -24,9 +25,10 @@
 //! which is what the replay test (`crate::replay`) pins bitwise.
 
 use glam::Vec3;
-use wok_physics::{Capsule, Motion, boom_direction, collide_and_slide, integrate, rest_on_heightmap};
+use wok_physics::{Capsule, Motion, boom_direction, integrate, rest_on_heightmap};
 
 use crate::air;
+use crate::slide::slide_player;
 use crate::constants::{
     AIR_JUMP_SCALE, AIR_JUMPS, ASCENT_GRAVITY, COYOTE_S, FALL_GRAVITY, GROUND_ACCEL, GROUND_FRICTION,
     JUMP_CUT_FACTOR, JUMP_VELOCITY, MOVE_SPEED, PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT, SNAP_DOWN_DISTANCE,
@@ -204,11 +206,13 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     }
 
     // One fixed step under gravity - ascent gravity while rising, the heavier fall gravity
-    // otherwise - then slide the resulting move along any static geometry it meets.
+    // otherwise - then slide the resulting move along any static geometry it meets. The slide is
+    // the game's policy wrapper (`crate::slide`): supported ground contacts resolve flat so
+    // standing on walkable geometry never bleeds sideways, walls and airborne contacts resolve
+    // exactly as the engine does.
     let next = integrate(m, gravity(m.velocity.y), SIM_DT);
     let capsule = Capsule::upright(m.position, PLAYER_HEIGHT, PLAYER_RADIUS);
-    let slid =
-        collide_and_slide(capsule, next.position - m.position, next.velocity, &world.statics, Vec3::Y, WALKABLE_COS);
+    let slid = slide_player(capsule, next.position - m.position, next.velocity, &world.statics);
 
     // Rest the slid capsule on the terrain of the chunk beneath it, in that chunk's local frame
     // (lift-only; the slide handled walls). Off every chunk there is no ground to rest on.

@@ -39,6 +39,7 @@ mod precision;
 #[cfg(test)]
 mod replay;
 mod sim;
+mod slide;
 mod world;
 
 use std::error::Error;

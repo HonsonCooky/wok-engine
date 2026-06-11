@@ -25,6 +25,13 @@ pub const MAX_STEPS_PER_FRAME: u32 = 8;
 /// slide and the terrain rest so the two grounded signals agree.
 pub const WALKABLE_COS: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
+/// Contacts at least this upright (by normal.y) grade as ground for the slide's flat-resolve
+/// policy (`crate::slide`): when the player is genuinely supported at the contact, such a contact
+/// resolves as flat ground, so gravity dies in the contact instead of leaking sideways - the
+/// edge-drift fix. Set a hair under WALKABLE_COS so every contact the grounded signal accepts
+/// also qualifies; wall-grade contacts and all unsupported resolution keep their true normals.
+pub const WALKABLE_NORMAL_Y: f32 = 0.7;
+
 // ---- player ----
 
 /// Player capsule total height (tip to tip) and radius, in metres. The segment length follows from
@@ -345,6 +352,15 @@ mod tests {
     fn the_walkable_threshold_is_a_real_slope_limit() {
         // cos of an angle strictly between flat (1.0) and vertical (0.0).
         assert!(WALKABLE_COS > 0.0 && WALKABLE_COS < 1.0);
+    }
+
+    #[test]
+    fn the_flat_resolve_threshold_spans_ground_but_not_walls() {
+        // Every contact the slide grades as ground (normal.y >= WALKABLE_COS) must also qualify
+        // for the supported flat resolve, or a grounding contact could still bleed drift; and it
+        // must sit well above any wall-grade normal, or walls would stop pushing back.
+        assert!(WALKABLE_NORMAL_Y <= WALKABLE_COS);
+        assert!(WALKABLE_NORMAL_Y > 0.5);
     }
 
     #[test]
