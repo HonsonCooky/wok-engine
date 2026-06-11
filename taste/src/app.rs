@@ -13,7 +13,9 @@
 //! Drawing is the editor's render path: the same renderer, the same primitive mesh cache, the same
 //! chunk-origin composition of terrain and placements, plus one item the editor does not have - the
 //! player, a true capsule mesh generated at the collider's exact dimensions (`wok_mesh::capsule_mesh`
-//! paired with `Capsule::upright`) in a color nothing else uses. F1 toggles the hitbox overlay
+//! paired with `Capsule::upright`) in a color nothing else uses. Prefabs crossing the eye-to-anchor
+//! segment draw partially faded (`crate::fade`, taste-only: neither the editor nor the viewer has a
+//! player to occlude). F1 toggles the hitbox overlay
 //! (`crate::debug`): every static collider and the player capsule as line cages, drawn x-ray
 //! through the renderer's debug line pass after the meshes so the cages read through the very
 //! geometry they describe.
@@ -38,6 +40,7 @@ use crate::constants::{
 };
 use crate::content::LoadedContent;
 use crate::debug;
+use crate::fade::{OcclusionFade, segment_hits_aabb};
 use crate::follow::{self, FollowCamera};
 use crate::intent::{Intent, map_input};
 use crate::jump::JumpLatch;
@@ -110,6 +113,8 @@ pub struct TasteApp {
     /// Pending jump press, latched across frames until a fixed step consumes it (`crate::jump`).
     jump: JumpLatch,
     camera: FollowCamera,
+    /// Per-prefab-item occlusion fade state (`crate::fade`), advanced each rendered frame.
+    fade: OcclusionFade,
     clock: FixedClock,
     size: (u32, u32),
     /// The hitbox overlay (`crate::debug`), seeded from `DEBUG_HITBOXES` and flipped by F1.
@@ -140,6 +145,7 @@ impl TasteApp {
             player_prev: player,
             jump: JumpLatch::new(),
             camera,
+            fade: OcclusionFade::new(),
             clock: FixedClock::new(SIM_DT, MAX_STEPS_PER_FRAME),
             size: (0, 0),
             debug_hitboxes: DEBUG_HITBOXES,
@@ -178,19 +184,32 @@ impl TasteApp {
             eye: self.camera.position,
         };
 
+        // The occlusion fade: a drawn prefab whose world AABB crosses the eye-to-anchor segment
+        // fades partially out instead of clamping the camera (`crate::fade`). Terrain never fades
+        // (opacity pinned 1.0 below); the player never fades; index association is the stable
+        // draw order of this loop. Frame dt, like the camera: presentation, not simulation.
+        let (eye, anchor) = (self.camera.position, self.camera.anchor);
+        let mut prefab_index = 0usize;
+
         let mut items: Vec<RenderItem> = Vec::new();
         for (coord, runtime) in self.store.iter_loaded() {
             let origin = Mat4::from_translation(chunk_origin(coord));
             if let Some(mesh) = terrain.get(&coord) {
-                items.push(RenderItem { transform: origin, mesh, color: TERRAIN_COLOR });
+                items.push(RenderItem { transform: origin, mesh, color: TERRAIN_COLOR, opacity: 1.0 });
             }
             for item in &runtime.visible {
                 match item {
                     VisibleItem::Primitive { primitive, transform, surface } => {
+                        let world_transform = origin * *transform;
+                        let bounds = wok_physics::world_aabb(*primitive, world_transform);
+                        let occluded = segment_hits_aabb(eye, anchor, &bounds);
+                        let opacity = self.fade.advance(prefab_index, occluded, ctx.dt);
+                        prefab_index += 1;
                         items.push(RenderItem {
-                            transform: origin * *transform,
+                            transform: world_transform,
                             mesh: &primitives[primitive_index(*primitive)],
                             color: surface_color(surface.as_ref()),
+                            opacity,
                         });
                     }
                     // Named replacement meshes need the glTF loader (wok-mesh, later); their
@@ -204,6 +223,7 @@ impl TasteApp {
             transform: player_transform(view_pos),
             mesh: player,
             color: PLAYER_COLOR,
+            opacity: 1.0,
         });
 
         // Ground-truth marker (floating diagnosis): a bright quad at the sampled terrain height
@@ -222,6 +242,7 @@ impl TasteApp {
                     transform: Mat4::from_translation(t.origin) * quad,
                     mesh: &primitives[primitive_index(Primitive::Plane)],
                     color: MARKER_COLOR,
+                    opacity: 1.0,
                 });
             }
         }

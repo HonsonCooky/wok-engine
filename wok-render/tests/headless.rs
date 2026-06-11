@@ -150,6 +150,7 @@ fn render_smoke_sky_gradient_and_geometry_land() {
         transform: Mat4::from_scale(Vec3::splat(2.0)),
         mesh: &cube,
         color: Vec3::new(1.0, 0.1, 0.1),
+        opacity: 1.0,
     }];
     let with_cube = render_frame(
         &device, &queue, &mut renderer, &camera, &light, region, &items, &[], DepthMode::Tested,
@@ -220,6 +221,7 @@ fn shadow_smoke_a_floating_cube_darkens_the_plane_behind_it() {
             transform: Mat4::from_scale(Vec3::new(24.0, 1.0, 24.0)),
             mesh: &plane,
             color: Vec3::splat(0.8),
+            opacity: 1.0,
         },
         RenderItem {
             transform: Mat4::from_scale_rotation_translation(
@@ -229,6 +231,7 @@ fn shadow_smoke_a_floating_cube_darkens_the_plane_behind_it() {
             ),
             mesh: &cube,
             color: Vec3::splat(0.8),
+            opacity: 1.0,
         },
     ];
     let region = Aabb::new(Vec3::new(-12.0, -0.5, -12.0), Vec3::new(12.0, 4.5, 12.0));
@@ -251,6 +254,71 @@ fn shadow_smoke_a_floating_cube_darkens_the_plane_behind_it() {
     assert!(
         shadowed < lit * 0.75,
         "shadowed side {shadowed} vs lit side {lit}: the cube cast no measurable shadow"
+    );
+}
+
+#[test]
+fn opacity_screen_doors_about_half_the_pixels_and_full_opacity_is_inert() {
+    // The per-item opacity contract, structurally: at 0.5 the 4x4 Bayer screen-door keeps half of
+    // every fully covered tile, so the faded cube lands roughly half the pixels the opaque one
+    // does; and because the fade is cutout (not blending), every kept pixel shades exactly as the
+    // opaque cube's and every dropped pixel shows exactly what was behind (the sky). At 1.0 the
+    // discard can never fire (the largest threshold is 15.5/16), so a full-opacity frame
+    // reproduces bitwise - the inertness that keeps existing callers' output unchanged.
+    let (device, queue) = device();
+    let mut renderer = Renderer::new(&device, FORMAT, SIZE, SIZE);
+
+    let eye = Vec3::new(0.0, 0.0, 6.0);
+    let camera = Camera {
+        view_proj: Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 400.0)
+            * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y),
+        eye,
+    };
+    let light = LightState::default();
+    let region = Aabb::new(Vec3::splat(-3.0), Vec3::splat(3.0));
+    let cube = MeshGpu::upload(&device, &wok_mesh::cube());
+    let cube_at = |opacity: f32| {
+        [RenderItem {
+            transform: Mat4::from_scale(Vec3::splat(2.0)),
+            mesh: &cube,
+            color: Vec3::new(1.0, 0.1, 0.1),
+            opacity,
+        }]
+    };
+
+    let sky = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &[], &[], DepthMode::Tested,
+    );
+    let opaque = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &cube_at(1.0), &[], DepthMode::Tested,
+    );
+    let opaque_again = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &cube_at(1.0), &[], DepthMode::Tested,
+    );
+    assert_eq!(opaque, opaque_again, "a full-opacity frame must reproduce bitwise");
+
+    let half = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &cube_at(0.5), &[], DepthMode::Tested,
+    );
+
+    let mut footprint = 0usize;
+    let mut kept = 0usize;
+    for ((s, o), h) in sky.chunks_exact(4).zip(opaque.chunks_exact(4)).zip(half.chunks_exact(4)) {
+        // Cutout semantics per pixel: the half frame is the opaque frame's pixel (survived) or
+        // the sky's pixel (discarded), never a blend of the two.
+        assert!(h == o || h == s, "a faded pixel is neither the cube's nor the sky's: {h:?}");
+        if o != s {
+            footprint += 1;
+            if h != s {
+                kept += 1;
+            }
+        }
+    }
+    assert!(footprint > 500, "the opaque cube covered only {footprint} pixels");
+    let ratio = kept as f32 / footprint as f32;
+    assert!(
+        (0.4..=0.6).contains(&ratio),
+        "opacity 0.5 kept {kept} of {footprint} cube pixels ({ratio}); expected about half"
     );
 }
 
@@ -365,6 +433,7 @@ fn xray_smoke_a_line_behind_a_mesh_still_lands_its_pixels() {
         transform: Mat4::from_scale(Vec3::splat(2.0)),
         mesh: &cube,
         color: Vec3::splat(0.8),
+        opacity: 1.0,
     }];
     let lines = [LineSegment {
         start: Vec3::new(-0.5, 0.0, -2.0),

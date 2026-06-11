@@ -64,6 +64,28 @@ pub enum Collider {
 }
 
 impl Collider {
+    /// Is `point` inside this collider? Exact per shape (no tolerance), and closed: a point on the
+    /// surface is contained, so the answer flips exactly where the solid ends. Pure comparisons of
+    /// relative coordinates - deterministic and position-independent like the rest of the crate.
+    /// First consumer is the game camera's eye-inside-geometry test; the editor's picking is the
+    /// expected second.
+    pub fn contains(&self, point: Vec3) -> bool {
+        match *self {
+            Collider::Aabb(aabb) => {
+                point.x >= aabb.min.x && point.x <= aabb.max.x
+                    && point.y >= aabb.min.y && point.y <= aabb.max.y
+                    && point.z >= aabb.min.z && point.z <= aabb.max.z
+            }
+            Collider::Sphere { center, radius } => {
+                (point - center).length_squared() <= radius * radius
+            }
+            Collider::VertCylinder { center, radius, half_height } => {
+                let d = point - center;
+                d.y.abs() <= half_height && d.x * d.x + d.z * d.z <= radius * radius
+            }
+        }
+    }
+
     /// The same collider translated by `by`: the lift from chunk-local to world space. A pure
     /// translation, so it commutes exactly with classification (see the module docs).
     pub fn translated(&self, by: Vec3) -> Collider {
@@ -292,6 +314,73 @@ mod tests {
         ]);
         let c = classify_collider(Primitive::Ellipsoid, m);
         assert_eq!(c, Collider::Aabb(world_aabb(Primitive::Ellipsoid, m)));
+    }
+
+    // ---- point containment ----
+
+    #[test]
+    fn an_aabb_contains_its_interior_faces_and_corners_but_not_beyond() {
+        let c = Collider::Aabb(Aabb::new(Vec3::new(-1.0, 0.0, 2.0), Vec3::new(1.0, 4.0, 5.0)));
+        assert!(c.contains(Vec3::new(0.0, 2.0, 3.0)), "interior");
+        assert!(c.contains(Vec3::new(1.0, 2.0, 3.0)), "a face is the closed boundary");
+        assert!(c.contains(Vec3::new(-1.0, 0.0, 2.0)), "the min corner is contained");
+        assert!(c.contains(Vec3::new(1.0, 4.0, 5.0)), "the max corner is contained");
+        assert!(!c.contains(Vec3::new(1.0 + 1e-5, 2.0, 3.0)), "just past a face in x");
+        assert!(!c.contains(Vec3::new(0.0, -1e-5, 3.0)), "just below the floor in y");
+        assert!(!c.contains(Vec3::new(0.0, 2.0, 5.0 + 1e-5)), "just past the far face in z");
+    }
+
+    #[test]
+    fn a_sphere_contains_its_interior_and_surface_but_not_beyond() {
+        let c = Collider::Sphere { center: Vec3::new(3.0, 1.0, -2.0), radius: 2.0 };
+        assert!(c.contains(Vec3::new(3.0, 1.0, -2.0)), "the centre");
+        assert!(c.contains(Vec3::new(3.0, 3.0, -2.0)), "a surface point is contained (closed)");
+        // Just inside along a diagonal (an exact diagonal surface point does not exist in float;
+        // the axis-aligned one above is the exact boundary case).
+        let diag = Vec3::new(3.0, 1.0, -2.0) + Vec3::ONE.normalize() * 1.999;
+        assert!(c.contains(diag), "just inside along a diagonal");
+        assert!(!c.contains(Vec3::new(3.0, 3.0 + 1e-4, -2.0)), "just past the surface");
+        assert!(!c.contains(Vec3::new(3.0 + 1.5, 1.0 + 1.5, -2.0)), "outside along a diagonal");
+    }
+
+    #[test]
+    fn a_cylinder_contains_its_interior_wall_caps_and_rim_but_not_beyond() {
+        let c = Collider::VertCylinder { center: Vec3::new(5.0, 2.0, 5.0), radius: 1.5, half_height: 2.0 };
+        assert!(c.contains(Vec3::new(5.0, 2.0, 5.0)), "the centre");
+        assert!(c.contains(Vec3::new(6.5, 2.0, 5.0)), "the wall is the closed boundary");
+        assert!(c.contains(Vec3::new(5.0, 4.0, 5.0)), "the top cap");
+        assert!(c.contains(Vec3::new(5.0, 0.0, 5.0)), "the bottom cap");
+        assert!(c.contains(Vec3::new(6.5, 4.0, 5.0)), "the rim: wall and cap at once");
+        assert!(!c.contains(Vec3::new(6.5 + 1e-4, 2.0, 5.0)), "just past the wall");
+        assert!(!c.contains(Vec3::new(5.0, 4.0 + 1e-5, 5.0)), "just above the top cap");
+        assert!(
+            !c.contains(Vec3::new(6.0, 4.5, 5.0)),
+            "inside the radius but above the cap: a cylinder is not a box"
+        );
+        assert!(
+            !c.contains(Vec3::new(6.2, 2.0, 6.2)),
+            "inside the bounding box's corner but outside the round wall"
+        );
+    }
+
+    #[test]
+    fn contains_commutes_with_translation() {
+        // The chunk lift again, for containment: testing the lifted point against the lifted
+        // collider answers as the local pair does. Relative coordinates, so exact for the round
+        // shapes and the box alike.
+        let by = Vec3::new(1280.0, -64.0, 2560.0);
+        let cases = [
+            (Collider::Aabb(Aabb::new(Vec3::ZERO, Vec3::ONE)), Vec3::new(0.5, 0.5, 0.5)),
+            (Collider::Sphere { center: Vec3::ONE, radius: 2.0 }, Vec3::new(2.0, 1.0, 1.0)),
+            (Collider::VertCylinder { center: Vec3::ZERO, radius: 1.0, half_height: 2.0 }, Vec3::new(0.5, 1.5, 0.0)),
+        ];
+        for (collider, point) in cases {
+            assert_eq!(
+                collider.contains(point),
+                collider.translated(by).contains(point + by),
+                "{collider:?}: containment must survive the lift"
+            );
+        }
     }
 
     // ---- position-independence and the lift ----

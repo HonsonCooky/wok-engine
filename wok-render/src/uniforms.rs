@@ -65,16 +65,19 @@ pub(crate) fn light_floats(light: &LightState) -> [f32; 24] {
     out
 }
 
-/// Pack one render item's per-draw block: the model matrix, its normal matrix, and the flat base
-/// color. The normal matrix is the inverse-transpose of the model's linear part, so normals stay
-/// perpendicular to surfaces under non-uniform scale; computed once per draw here rather than per
-/// vertex in the shader. A singular model matrix is the caller's bug, as with the camera.
-pub(crate) fn draw_floats(transform: Mat4, color: Vec3) -> [f32; 36] {
+/// Pack one render item's per-draw block: the model matrix, its normal matrix, the flat base
+/// color, and the opacity riding the color's fourth lane (the screen-door threshold the mesh
+/// shader compares against; 1.0 is opaque and can never discard). The normal matrix is the
+/// inverse-transpose of the model's linear part, so normals stay perpendicular to surfaces under
+/// non-uniform scale; computed once per draw here rather than per vertex in the shader. A
+/// singular model matrix is the caller's bug, as with the camera.
+pub(crate) fn draw_floats(transform: Mat4, color: Vec3, opacity: f32) -> [f32; 36] {
     let normal = Mat4::from_mat3(Mat3::from_mat4(transform).inverse().transpose());
     let mut out = [0.0; 36];
     out[0..16].copy_from_slice(&transform.to_cols_array());
     out[16..32].copy_from_slice(&normal.to_cols_array());
     out[32..35].copy_from_slice(&color.to_array());
+    out[35] = opacity;
     out
 }
 
@@ -103,7 +106,7 @@ mod tests {
         let camera = Camera { view_proj: Mat4::IDENTITY, eye: Vec3::ZERO };
         assert_eq!(camera_floats(&camera, Mat4::IDENTITY).len() as u64 * 4, CAMERA_UNIFORM_SIZE);
         assert_eq!(light_floats(&light()).len() as u64 * 4, LIGHT_UNIFORM_SIZE);
-        assert_eq!(draw_floats(Mat4::IDENTITY, Vec3::ZERO).len() as u64 * 4, DRAW_UNIFORM_SIZE);
+        assert_eq!(draw_floats(Mat4::IDENTITY, Vec3::ZERO, 1.0).len() as u64 * 4, DRAW_UNIFORM_SIZE);
     }
 
     #[test]
@@ -143,16 +146,22 @@ mod tests {
     fn draw_normal_matrix_is_the_inverse_transpose() {
         // Non-uniform scale (2, 1, 1): the normal matrix must scale x by 1/2, not 2, so a normal
         // on a stretched surface tilts the correct way.
-        let floats = draw_floats(Mat4::from_scale(Vec3::new(2.0, 1.0, 1.0)), Vec3::ONE);
+        let floats = draw_floats(Mat4::from_scale(Vec3::new(2.0, 1.0, 1.0)), Vec3::ONE, 1.0);
         assert_eq!(floats[16], 0.5); // normal matrix column 0, row 0
         assert_eq!(floats[21], 1.0); // column 1, row 1
         assert_eq!(floats[26], 1.0); // column 2, row 2
     }
 
     #[test]
+    fn draw_packs_opacity_in_the_color_w_lane() {
+        let floats = draw_floats(Mat4::IDENTITY, Vec3::new(0.1, 0.2, 0.3), 0.35);
+        assert_eq!(&floats[32..36], &[0.1, 0.2, 0.3, 0.35]);
+    }
+
+    #[test]
     fn packing_is_deterministic() {
         assert_eq!(light_floats(&light()), light_floats(&light()));
         let m = Mat4::from_rotation_y(0.37);
-        assert_eq!(draw_floats(m, Vec3::ONE), draw_floats(m, Vec3::ONE));
+        assert_eq!(draw_floats(m, Vec3::ONE, 0.5), draw_floats(m, Vec3::ONE, 0.5));
     }
 }

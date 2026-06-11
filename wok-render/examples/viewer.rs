@@ -183,6 +183,7 @@ impl App for Viewer {
                 transform,
                 mesh: &fixture.meshes[mesh],
                 color,
+                opacity: 1.0,
             })
             .collect();
 

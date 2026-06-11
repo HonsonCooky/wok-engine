@@ -3,15 +3,16 @@
 //! Part 1 was the smallest renderer that puts real pixels on screen: GPU mesh drawing through a
 //! single forward pass, cel-shaded geometry under a [`LightState`]'s directional sun, distance
 //! fog (always on, an identity commitment per the HLD), and the parametric gradient sky. Part 2
-//! adds the other identity commitment: one shadow map per frame, rendered from the sun. Later
-//! parts add post-process and alpha cutout.
+//! adds the other identity commitment: one shadow map per frame, rendered from the sun. This
+//! revision adds per-item opacity as screen-door cutout (below). Later parts add post-process.
 //!
 //! ## The render-list contract
 //!
 //! The caller supplies, each frame: a [`Camera`] (final view-projection matrix plus eye
 //! position), a [`LightState`], a shadow region (a world-space [`Aabb`], see below), and a list
-//! of [`RenderItem`]s, each a final world transform, a [`MeshGpu`] reference, and a flat base
-//! color. wok-render reads no stores and no pools, keeps no per-frame scene state, and draws
+//! of [`RenderItem`]s, each a final world transform, a [`MeshGpu`] reference, a flat base
+//! color, and an opacity. wok-render reads no stores and no pools, keeps no per-frame scene
+//! state, and draws
 //! exactly what it is handed; chunk-origin composition, culling, and ordering are the caller's
 //! policy. This is HLD principle 5 applied to drawing: the game owns the loop and the state, the
 //! engine owns the GPU mechanics.
@@ -23,6 +24,20 @@
 //! diagnostics: a hitbox cage must read even behind the surface it describes). A diagnostic
 //! overlay, not a scene element; it exists so applications can draw hitboxes and other invisible
 //! structure without inventing degenerate meshes.
+//!
+//! ## Opacity: screen-door cutout, not blending
+//!
+//! The HLD's transparency commitment is alpha cutout only - no sorted blending - and per-item
+//! opacity does not amend it: an opacity below 1.0 discards fragments on a 4x4 Bayer threshold
+//! matrix tiled over screen space, which is cutout, used as a fade. Bayer rather than noise
+//! because the pattern is ordered and a pure function of the pixel coordinate: stable frame to
+//! frame (no temporal shimmer), and an opacity of k/16 keeps exactly k of every 16 pixels of a
+//! covered tile. Surviving fragments are ordinary opaque fragments: they shade, fog, and write
+//! depth exactly as at opacity 1.0, and the item still casts its full shadow (the depth-only
+//! shadow pass never reads opacity). That depth-and-shadow policy is deliberate v1 behavior: a
+//! fade reads fine with the real shadow still grounding the object; revisit only if it reads
+//! wrong in play. At exactly 1.0 nothing discards and the output is bit-identical to the
+//! pre-opacity renderer.
 //!
 //! ## The shadow map
 //!

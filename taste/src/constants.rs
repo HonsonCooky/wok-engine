@@ -44,11 +44,12 @@ pub const PLAYER_RADIUS: f32 = 0.45;
 /// from exactly the numbers the collider uses.
 pub const PLAYER_SEGMENT: f32 = PLAYER_HEIGHT - 2.0 * PLAYER_RADIUS;
 
-/// Horizontal locomotion speed in m/s, a brisk run.
-pub const MOVE_SPEED: f32 = 6.0;
+/// Horizontal locomotion speed in m/s, a brisk run. Raised from 6.0 on the feel-pass verdict:
+/// crossing the demo's spaces at 6 read as too slow.
+pub const MOVE_SPEED: f32 = 7.5;
 
 /// Horizontal acceleration toward the intended velocity, in m/s^2, grounded with input. From rest
-/// to top speed in MOVE_SPEED / GROUND_ACCEL seconds (0.15s, nine fixed steps): quick enough to
+/// to top speed in MOVE_SPEED / GROUND_ACCEL seconds (0.19s, twelve fixed steps): quick enough to
 /// stay responsive, slow enough that starting reads as pushing off rather than snapping to speed.
 pub const GROUND_ACCEL: f32 = 40.0;
 
@@ -57,10 +58,11 @@ pub const GROUND_ACCEL: f32 = 40.0;
 pub const GROUND_FRICTION: f32 = 50.0;
 
 /// Airborne multiplier on the steering acceleration. A jump keeps its launch momentum: enough
-/// steering to adjust a landing, not enough to reverse direction mid-air. Friction never applies
+/// steering to adjust a landing, not enough to reverse direction mid-air. Raised from 0.3 on the
+/// feel-pass verdict: mid-air adjustment was too weak to place a landing. Friction never applies
 /// airborne - with no input the velocity is ballistic (policy in `crate::sim::step`: air friction
 /// pinned bodies onto crate corners, the last mid-air halt).
-pub const AIR_CONTROL: f32 = 0.3;
+pub const AIR_CONTROL: f32 = 0.55;
 
 /// Upward velocity granted by a jump, in m/s. With this gravity it clears about 1.9m at the apex
 /// (v^2 / 2g; apex scales with velocity squared, so the 1.5x apex verdict is a sqrt(1.5) bump on
@@ -92,9 +94,11 @@ pub const PLAYER_COLOR: Vec3 = Vec3::new(0.90, 0.35, 0.15);
 
 // ---- camera ----
 
-/// Unobstructed boom length from the look target out to the camera, in metres. Scaled to the bean:
-/// at the original 6m a 1.1m character read as a speck against the hills.
-pub const CAMERA_DISTANCE: f32 = 5.0;
+/// Unobstructed boom length from the look target out to the camera, in metres. Tuned by play
+/// verdicts in both directions: the original 6m read the then-1.1m character as a speck, the 5m
+/// answer to that read too close once the bean grew to 1.5m and the view led ahead, so 6.5 is the
+/// verdict for this body and framing, not a return to the old default.
+pub const CAMERA_DISTANCE: f32 = 6.5;
 
 /// Radius of the sphere the spring arm sweeps along the boom. It doubles as the standoff: the
 /// camera rides the sphere's centre, so it stops this far in front of whatever the sweep hits.
@@ -131,6 +135,16 @@ pub const CAMERA_TRACK_SMOOTH: f32 = 0.10;
 /// show the camera inside geometry); recovery is slow so the boom drifts back out rather than
 /// whipping, and grazing a corner does not pump the camera in and out.
 pub const CAMERA_ARM_RECOVER: f32 = 0.40;
+
+/// Opacity an occluding prefab fades toward while it crosses the eye-to-anchor segment: low enough
+/// that the player reads through it, high enough that the prefab still reads as present rather
+/// than vanishing (the fade is presentation; the collider underneath is unchanged).
+pub const OPACITY_OCCLUDED: f32 = 0.35;
+
+/// Time, in seconds, for a full fade from opaque to `OPACITY_OCCLUDED` (and the same rate back).
+/// Around 100ms: fast enough that the player is never hidden for a readable moment, slow enough
+/// that an item grazing the segment for one frame does not strobe.
+pub const OCCLUSION_FADE_S: f32 = 0.1;
 
 /// Mouse-look sensitivity, radians of orbit per pixel of raw motion. Mouse only: the stick is a
 /// rate device with its own STICK_LOOK_RATE. Raised 1.8x from the first playable's 0.0035 on the
@@ -267,6 +281,14 @@ mod tests {
     }
 
     #[test]
+    fn the_occlusion_fade_is_a_real_partial_fade() {
+        // The fade must land strictly between invisible and opaque: 0 would make occluders vanish
+        // (and cutout discard everything), 1 would make the fade a no-op. The rate must be live.
+        assert!(OPACITY_OCCLUDED > 0.0 && OPACITY_OCCLUDED < 1.0);
+        assert!(OCCLUSION_FADE_S > 0.0);
+    }
+
+    #[test]
     fn the_pitch_range_contains_its_default() {
         assert!(PITCH_MIN < PITCH_MAX);
         assert!((PITCH_MIN..=PITCH_MAX).contains(&PITCH_DEFAULT));
@@ -275,8 +297,9 @@ mod tests {
     #[test]
     fn the_snap_distance_covers_a_full_speed_step_down_the_steepest_walkable_slope() {
         // One step of full-speed walking descends at most MOVE_SPEED * SIM_DT * tan(max slope);
-        // with WALKABLE_COS = cos(45 deg) that gradient is 1. The glue must cover it, or a fast
-        // downhill walk outruns the snap and flickers airborne - the exact bug the glue removes.
+        // with WALKABLE_COS = cos(45 deg) that gradient is 1, so the bound rises with every speed
+        // retune (7.5 m/s puts it at 0.125m). The glue must cover it, or a fast downhill walk
+        // outruns the snap and flickers airborne - the exact bug the glue removes.
         let max_walkable_gradient = (1.0 - WALKABLE_COS * WALKABLE_COS).sqrt() / WALKABLE_COS;
         assert!(SNAP_DOWN_DISTANCE >= MOVE_SPEED * SIM_DT * max_walkable_gradient);
         // And it must stay a glue, not a teleport: well under the player's own height.

@@ -188,7 +188,7 @@ impl EditorApp {
         for (coord, runtime) in model.store.iter_loaded() {
             let origin = Mat4::from_translation(chunk_origin(coord));
             if let Some(mesh) = terrain.get(&coord) {
-                items.push(RenderItem { transform: origin, mesh, color: TERRAIN_COLOR });
+                items.push(RenderItem { transform: origin, mesh, color: TERRAIN_COLOR, opacity: 1.0 });
             }
             for item in &runtime.visible {
                 match item {
@@ -197,6 +197,7 @@ impl EditorApp {
                             transform: origin * *transform,
                             mesh: &primitives[primitive_index(*primitive)],
                             color: surface_color(surface.as_ref()),
+                            opacity: 1.0,
                         });
                     }
                     // Named replacement meshes need the glTF loader (wok-mesh, later); their

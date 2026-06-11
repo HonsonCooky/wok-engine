@@ -34,13 +34,24 @@ pub struct Camera {
     pub eye: Vec3,
 }
 
-/// One entry in the frame's render list: a world transform, a mesh to draw, and a flat base
-/// color (linear RGB). The transform is final; wok-render applies no chunk or parent composition.
+/// One entry in the frame's render list: a world transform, a mesh to draw, a flat base color
+/// (linear RGB), and an opacity. The transform is final; wok-render applies no chunk or parent
+/// composition.
+///
+/// `opacity` is 1.0 for an ordinary opaque item. Below 1.0 the mesh pass discards fragments on a
+/// 4x4 Bayer screen-door pattern in screen space - alpha cutout used as a fade, not blending (the
+/// renderer's cutout-only transparency commitment holds; see the crate docs). The pattern is a
+/// pure function of the pixel coordinate, so it is stable frame to frame with no temporal noise.
+/// Surviving fragments shade and write depth exactly as an opaque item's do, and the item still
+/// casts its full shadow (the depth-only shadow pass ignores opacity) - v1 policy, documented in
+/// the crate docs. At exactly 1.0 the discard can never fire and the output is bit-identical to
+/// an item without the field.
 #[derive(Debug)]
 pub struct RenderItem<'m> {
     pub transform: Mat4,
     pub mesh: &'m MeshGpu,
     pub color: Vec3,
+    pub opacity: f32,
 }
 
 /// One debug line segment for [`Renderer::render_lines`]: world-space endpoints and a flat color
@@ -252,7 +263,7 @@ impl Renderer {
             let block = uniforms::DRAW_UNIFORM_SIZE as usize;
             let mut draws = vec![0u8; items.len() * stride];
             for (i, item) in items.iter().enumerate() {
-                let floats = uniforms::draw_floats(item.transform, item.color);
+                let floats = uniforms::draw_floats(item.transform, item.color, item.opacity);
                 draws[i * stride..i * stride + block].copy_from_slice(bytemuck::cast_slice(&floats));
             }
             queue.write_buffer(&self.draw_buffer, 0, &draws);

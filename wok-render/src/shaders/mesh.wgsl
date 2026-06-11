@@ -52,6 +52,27 @@ fn sun_shadow(world_pos: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_mesh(in: MeshVsOut) -> @location(0) vec4<f32> {
+    // Screen-door fade: opacity below 1.0 discards fragments against a 4x4 Bayer threshold
+    // matrix tiled over screen space - alpha cutout used as a fade, within the renderer's
+    // cutout-only transparency commitment. The pattern is a pure function of the framebuffer
+    // pixel, so it is stable with no temporal noise, and the thresholds are the Bayer indices
+    // plus a half (compared against opacity * 16), so opacity 0.5 keeps exactly half of each
+    // 4x4 tile and 1.0 can never discard (the largest threshold is 15.5 < 16). Surviving
+    // fragments shade and write depth as opaque ones do; the depth-only shadow pass never reads
+    // opacity, so faded items still cast full shadows (v1 policy, see the crate docs).
+    if draw.color.w < 1.0 {
+        var bayer = array<f32, 16>(
+             0.5,  8.5,  2.5, 10.5,
+            12.5,  4.5, 14.5,  6.5,
+             3.5, 11.5,  1.5,  9.5,
+            15.5,  7.5, 13.5,  5.5,
+        );
+        let p = vec2u(in.clip.xy) % vec2u(4u, 4u);
+        if draw.color.w * 16.0 <= bayer[p.y * 4u + p.x] {
+            discard;
+        }
+    }
+
     let n = normalize(in.world_normal);
     let to_sun = -light.sun_dir_bands.xyz;
 

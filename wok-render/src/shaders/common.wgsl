@@ -39,7 +39,8 @@ struct Draw {
     // Inverse-transpose of the model's upper 3x3, computed CPU-side per draw, so normals stay
     // perpendicular to surfaces under non-uniform scale.
     normal: mat4x4<f32>,
-    // xyz: flat base color, linear RGB.
+    // xyz: flat base color, linear RGB; w: opacity (1.0 opaque, below it the mesh pass
+    // screen-door discards - see mesh.wgsl).
     color: vec4<f32>,
 }
 

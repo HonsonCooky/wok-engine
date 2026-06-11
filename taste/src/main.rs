@@ -26,6 +26,7 @@ mod content;
 mod debug;
 #[cfg(test)]
 mod diagnose;
+mod fade;
 mod follow;
 mod intent;
 mod jump;

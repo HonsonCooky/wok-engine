@@ -9,18 +9,25 @@
 //!     yaw, pitch += look                                                   direct, zero lag
 //!     anchor   = smooth(anchor, target, CAMERA_TRACK_SMOOTH, dt)           the one tracking lag
 //!     dir      = boom_direction(yaw, pitch)                                orbit -> boom direction
-//!     probe    = spring_arm(anchor, dir, boom, ...)                        swept obstruction, from the anchor
-//!     arm      = min(smooth(arm, boom, CAMERA_ARM_RECOVER, dt), probe)     instant clamp in, slow recovery out
+//!     desired  = boom_point(anchor, dir, boom)                             the eye the orbit asks for
+//!     arm      = smooth(arm, boom, CAMERA_ARM_RECOVER, dt)                 slow recovery toward the boom
+//!     arm      = min(arm, spring_arm(...))   ONLY if desired is inside a collider (contains)
 //!     eye      = boom_point(anchor, dir, arm)
 //!     position = terrain_floor(eye)                                        vertical clamp; if it engaged,
 //!     pitch, arm <- recomputed from position - anchor                      the clamp writes the orbit back
 //!     aim      = anchor + horizontal_forward * LOOK_AHEAD_M * cos(pitch) (+ lift)   the view leads ahead (render only)
 //!
 //! The anchor is the boom's hanging point: the player's draw position plus the look-target lift,
-//! trailed with one short smooth, vertical included so jumps and falls track. The arm asymmetry is
-//! the `min`: a wall clamps the arm inward the same frame the probe sees it (easing into a wall
-//! would show the camera inside geometry), while clearance recovers toward the desired boom on the
-//! slow smooth, so the boom drifts back out instead of whipping.
+//! trailed with one short smooth, vertical included so jumps and falls track.
+//!
+//! Prefab colliders clamp the arm only when the desired eye itself sits inside one
+//! (`Collider::contains`); otherwise the arm ignores prefabs entirely and the boom may pass
+//! through them - a prefab crossing the view fades out instead (the occlusion fade in
+//! `crate::fade`), which keeps the camera steady where the old always-on clamp pumped the arm
+//! every time a crate grazed the boom. The clamp that remains is the old one unchanged: the swept
+//! probe from the anchor, applied instantly via the `min` (easing into geometry would show the
+//! camera inside it), with clearance recovering toward the desired boom on the slow smooth so the
+//! boom drifts back out instead of whipping.
 //!
 //! The terrain floor is the one deliberate exception to "the world never writes the orbit". A
 //! purely derived clamp leaves the orbit believing in a virtual eye below the ground, and the
@@ -124,12 +131,19 @@ pub fn update(camera: &FollowCamera, target: Vec3, look_delta: Vec2, world: &Wor
     // The anchor trails the target with the one tracking lag, vertical included.
     let anchor = smooth(camera.anchor, target, CAMERA_TRACK_SMOOTH, dt);
 
-    // The arm: obstruction clamps instantly inward (the min against the probe), clearance recovers
-    // toward the desired boom on the slow smooth. The probe sweeps from the actual anchor, so the
-    // clamp matches what the eye would really pass through.
+    // The arm. Prefab colliders engage only when the eye the orbit asks for is itself inside one:
+    // then the old swept clamp applies, instantly inward via the min, from the actual anchor so
+    // the clamp matches what the eye would really pass through. Otherwise prefabs are ignored -
+    // the boom may cross them, and the occlusion fade handles what that does to the view - and
+    // the arm just recovers toward the desired boom on the slow smooth.
     let dir = boom_direction(yaw, pitch);
-    let probe = spring_arm(anchor, dir, camera.boom, CAMERA_PROBE_RADIUS, &world.statics);
-    let arm = smooth(camera.arm, camera.boom, CAMERA_ARM_RECOVER, dt).min(probe);
+    let desired_eye = boom_point(anchor, dir, camera.boom);
+    let recovered = smooth(camera.arm, camera.boom, CAMERA_ARM_RECOVER, dt);
+    let arm = if world.statics.iter().any(|c| c.contains(desired_eye)) {
+        recovered.min(spring_arm(anchor, dir, camera.boom, CAMERA_PROBE_RADIUS, &world.statics))
+    } else {
+        recovered
+    };
 
     // The eye is derived, then the terrain floor clamps it vertically. When the clamp engages,
     // the clamped reality is written back into pitch and arm (yaw cannot change: the clamp is
@@ -170,11 +184,21 @@ mod tests {
         World { statics: vec![], terrains: vec![crate::world::ChunkTerrain { origin: Vec3::ZERO, heightmap }] }
     }
 
-    /// A wall a metre and a half behind a target at z = 64 on the +Z boom: its near face is at
-    /// z = 65.5, wide in x and tall enough to block the boom at any test pitch.
-    fn walled_world() -> World {
+    /// A thin crate crossing the +Z boom of a target at z = 64: its near face is at z = 65.5 and
+    /// it ends at z = 67, so it obstructs the boom's path but does not contain a desired eye at
+    /// the full boom (z = 64 + CAMERA_DISTANCE, past 67 for any boom over 3).
+    fn crossing_crate_world() -> World {
         World {
             statics: vec![Aabb::new(Vec3::new(50.0, 0.0, 65.5), Vec3::new(80.0, 10.0, 67.0)).into()],
+            terrains: vec![],
+        }
+    }
+
+    /// A deep crate on the same +Z boom: near face still at z = 65.5, but extending past the full
+    /// boom and tall enough that the desired eye sits inside it at any test pitch.
+    fn engulfing_crate_world() -> World {
+        World {
+            statics: vec![Aabb::new(Vec3::new(50.0, 0.0, 65.5), Vec3::new(80.0, 14.0, 75.0)).into()],
             terrains: vec![],
         }
     }
@@ -218,34 +242,55 @@ mod tests {
     }
 
     #[test]
-    fn an_obstruction_clamps_the_arm_the_same_frame() {
-        // The wall's near face is 1.5m behind the target: a single update pulls the arm from the
-        // full boom to inside that distance - no frames of the camera easing through the wall.
+    fn a_crate_crossing_the_boom_no_longer_clamps_the_arm() {
+        // The policy change: the crate obstructs the line from anchor to eye, but the desired eye
+        // itself is in open air past it, so the arm ignores the crate entirely and stays at the
+        // full boom - the camera holds steady and the occlusion fade carries the view instead.
         let target = Vec3::new(64.0, 5.0, 64.0);
-        let world = walled_world();
+        let world = crossing_crate_world();
+        let cam = FollowCamera { yaw: 0.0, pitch: 0.0, boom: CAMERA_DISTANCE, arm: CAMERA_DISTANCE,
+            anchor: target, position: target + Vec3::Z * CAMERA_DISTANCE };
+        let next = update(&cam, target, Vec2::ZERO, &world, DT);
+        assert_eq!(next.arm, CAMERA_DISTANCE, "the arm must ignore a crate it is not inside");
+        assert!(
+            (next.position - (target + Vec3::Z * CAMERA_DISTANCE)).length() < 1e-4,
+            "the eye should sit at the desired boom point: {:?}",
+            next.position
+        );
+    }
+
+    #[test]
+    fn a_desired_eye_inside_a_crate_clamps_the_arm_the_same_frame() {
+        // The clamp that remains: the desired eye lands inside the deep crate, so the old swept
+        // clamp applies - the near face is 1.5m behind the target and a single update pulls the
+        // arm from the full boom to inside that distance, no frames of easing through the wall.
+        let target = Vec3::new(64.0, 5.0, 64.0);
+        let world = engulfing_crate_world();
         let cam = FollowCamera { yaw: 0.0, pitch: 0.0, boom: CAMERA_DISTANCE, arm: CAMERA_DISTANCE,
             anchor: target, position: target + Vec3::Z * CAMERA_DISTANCE };
         let clamped = update(&cam, target, Vec2::ZERO, &world, DT);
-        assert!(clamped.arm < 1.5, "arm should clamp inside the wall distance at once: {}", clamped.arm);
+        assert!(clamped.arm < 1.5, "arm should clamp inside the crate distance at once: {}", clamped.arm);
         assert!(clamped.arm > 0.5, "but not collapse onto the target: {}", clamped.arm);
-        assert!(clamped.position.z < 65.5, "camera should sit in front of the wall: {}", clamped.position.z);
+        assert!(clamped.position.z < 65.5, "camera should sit in front of the crate: {}", clamped.position.z);
         assert_eq!(clamped.boom, CAMERA_DISTANCE, "obstruction must not write into the desired boom");
     }
 
     #[test]
     fn clearance_recovers_to_the_exact_prior_eye() {
-        // Obstruction then clearance: because the wall never wrote into yaw, pitch, or the desired
-        // boom, recovery converges back to the eye position the player had before the wall.
+        // Clamp then clearance, re-justified for the contains-gated arm: while the desired eye
+        // sits inside the deep crate the clamp holds the arm in, and because the clamp never
+        // wrote into yaw, pitch, or the desired boom, recovery in the open converges back to the
+        // exact eye position the player had before.
         let target = Vec3::new(64.0, 5.0, 64.0);
         let open = empty_world();
-        let walled = walled_world();
+        let crated = engulfing_crate_world();
         let mut cam = FollowCamera::spawn(target);
         let before = cam.position;
 
         for _ in 0..120 {
-            cam = update(&cam, target, Vec2::ZERO, &walled, DT);
+            cam = update(&cam, target, Vec2::ZERO, &crated, DT);
         }
-        assert!(cam.arm < CAMERA_DISTANCE * 0.5, "the wall should have pulled the arm in: {}", cam.arm);
+        assert!(cam.arm < CAMERA_DISTANCE * 0.5, "the crate should have pulled the arm in: {}", cam.arm);
         assert!((cam.position - before).length() > 1.0, "the clamped eye should have moved well inward");
 
         // 10 seconds open: 25 half-lives of recovery, the residual gap is sub-micrometre.
@@ -256,7 +301,7 @@ mod tests {
         assert_eq!(cam.pitch, PITCH_DEFAULT);
         assert!(
             (cam.position - before).length() < 1e-3,
-            "the eye should recover to where it was before the wall: {} vs {}",
+            "the eye should recover to where it was before the crate: {} vs {}",
             cam.position,
             before
         );
