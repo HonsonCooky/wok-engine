@@ -21,10 +21,6 @@ pub const SIM_DT: f32 = 1.0 / 60.0;
 /// spiral of death. Past the clamp the leftover time is dropped and the game slows down instead.
 pub const MAX_STEPS_PER_FRAME: u32 = 8;
 
-/// Constant downward acceleration in m/s^2. Deliberately stronger than Earth's 9.8: game jumps read
-/// floaty at physical gravity, and a fast fall makes landing feel intentional.
-pub const GRAVITY: Vec3 = Vec3::new(0.0, -25.0, 0.0);
-
 /// cos(45 degrees): the steepest slope that still counts as walkable ground, passed to both the
 /// slide and the terrain rest so the two grounded signals agree.
 pub const WALKABLE_COS: f32 = std::f32::consts::FRAC_1_SQRT_2;
@@ -49,13 +45,16 @@ pub const PLAYER_SEGMENT: f32 = PLAYER_HEIGHT - 2.0 * PLAYER_RADIUS;
 pub const MOVE_SPEED: f32 = 7.5;
 
 /// Horizontal acceleration toward the intended velocity, in m/s^2, grounded with input. From rest
-/// to top speed in MOVE_SPEED / GROUND_ACCEL seconds (0.19s, twelve fixed steps): quick enough to
-/// stay responsive, slow enough that starting reads as pushing off rather than snapping to speed.
-pub const GROUND_ACCEL: f32 = 40.0;
+/// to top speed in MOVE_SPEED / GROUND_ACCEL seconds (0.083s, five fixed steps): the precision-kit
+/// verdict against the old 40 (0.19s), which read slidey under keyboard taps - a digital key asks
+/// for full speed now, and a long ramp-up smears every small correction.
+pub const GROUND_ACCEL: f32 = 90.0;
 
-/// Horizontal deceleration toward rest, in m/s^2, grounded with no input. A touch stronger than
-/// the acceleration so stopping reads planted rather than slippery: top speed to rest in 0.12s.
-pub const GROUND_FRICTION: f32 = 50.0;
+/// Horizontal deceleration toward rest, in m/s^2, grounded with no input. Stronger than the
+/// acceleration so stopping reads planted: top speed to rest in 0.05s, sliding
+/// MOVE_SPEED^2 / (2 * GROUND_FRICTION) metres (~0.19m; the old 50 slid ~0.56m, most of a tile,
+/// which is what made precision landings overshoot).
+pub const GROUND_FRICTION: f32 = 150.0;
 
 /// Airborne multiplier on the speed-change acceleration. Under the redirection model
 /// (`crate::air`) this scales how fast airborne speed magnitude approaches the intended speed;
@@ -78,10 +77,54 @@ pub const AIR_JUMPS: u32 = 1;
 /// jump so the double jump reads as a recovery, not a free second full jump.
 pub const AIR_JUMP_SCALE: f32 = 0.9;
 
-/// Upward velocity granted by a jump, in m/s. With this gravity it clears about 1.9m at the apex
-/// (v^2 / 2g; apex scales with velocity squared, so the 1.5x apex verdict is a sqrt(1.5) bump on
-/// the launch velocity, 8.0 -> 9.8).
-pub const JUMP_VELOCITY: f32 = 9.8;
+// ---- the parameterized jump ----
+//
+// The jump is parameterized the way it is judged in play (Pittman's "tuning a jump" model): a
+// designer retunes WHERE the apex is and WHEN it arrives, and the physics constants follow. Under
+// constant ascent gravity g, a launch velocity v rises for t = v / g seconds and peaks at
+// h = v^2 / 2g metres. Solving that pair for (g, v) given (h, t):
+//
+//     g = 2h / t^2        v = g * t = 2h / t
+//
+// The old hand-picked GRAVITY (25) and JUMP_VELOCITY (9.8) retire into these derived values: at
+// the starting parameters they come out at 26.3 and 10.0, the same jump within a few percent, now
+// steered by the two numbers a play-test verdict actually talks about.
+
+/// Apex height of a full (held) ground jump, in metres: the ~1.9m the raised-jump verdict landed
+/// on, restated as the parameter instead of a consequence.
+pub const JUMP_APEX_HEIGHT: f32 = 1.9;
+
+/// Time from launch to that apex, in seconds. Shorter is snappier, longer is floatier; 0.38s is
+/// the old 25-gravity arc's rise time, the keep-the-feel starting point.
+pub const JUMP_TIME_TO_APEX: f32 = 0.38;
+
+/// Ascent gravity magnitude in m/s^2, derived: 2h / t^2. Applies while the player is rising.
+pub const ASCENT_GRAVITY: f32 = 2.0 * JUMP_APEX_HEIGHT / (JUMP_TIME_TO_APEX * JUMP_TIME_TO_APEX);
+
+/// Upward velocity granted by a ground (or coyote) jump, in m/s, derived: 2h / t.
+pub const JUMP_VELOCITY: f32 = 2.0 * JUMP_APEX_HEIGHT / JUMP_TIME_TO_APEX;
+
+/// Gravity multiplier while descending. Symmetric arcs read floaty on the way down: the eye
+/// expects a jump to commit to its landing. Scaling only the descent keeps the tuned apex and rise
+/// untouched while the fall arrives sqrt(FALL_GRAVITY_MULT) times sooner.
+pub const FALL_GRAVITY_MULT: f32 = 1.7;
+
+/// Descent gravity magnitude in m/s^2: the ascent gravity under the fall multiplier. The split is
+/// applied by `sim::gravity` on the vertical velocity's sign.
+pub const FALL_GRAVITY: f32 = ASCENT_GRAVITY * FALL_GRAVITY_MULT;
+
+/// Variable jump height: releasing the jump control while still rising scales the vertical
+/// velocity by this, once per jump, so a tap gives a short hop and a hold gives the full apex.
+/// Apex scales with velocity squared, so the minimum hop is about JUMP_CUT_FACTOR^2 of the full
+/// height (~0.38m at 0.45): real enough to clear a step, short enough to read as a tap.
+pub const JUMP_CUT_FACTOR: f32 = 0.45;
+
+/// Coyote time, in seconds of simulation time: how long after walking off an edge (leaving the
+/// ground without jumping) a ground jump remains available. The player judges the jump against the
+/// drawn body, which is right at the edge when the simulation has already left it; the grace
+/// window makes the late press land the full jump instead of silently spending the air jump. A
+/// jump consumes the window immediately, so it can never stack a free extra jump.
+pub const COYOTE_S: f32 = 0.10;
 
 /// How long a jump press stays buffered waiting for ground, in seconds of simulation time. A
 /// press up to this long before landing fires on the landing step instead of being swallowed by
@@ -244,10 +287,42 @@ mod tests {
     }
 
     #[test]
-    fn gravity_points_down_and_only_down() {
-        assert!(GRAVITY.y < 0.0);
-        assert_eq!(GRAVITY.x, 0.0);
-        assert_eq!(GRAVITY.z, 0.0);
+    fn the_derived_jump_constants_round_trip_to_the_parameters() {
+        // The derivation's whole point: plugging the derived (g, v) back into the kinematics must
+        // return the authored parameters. Apex height v^2 / 2g = h and rise time v / g = t, to
+        // float roundoff of the constant arithmetic.
+        let apex = JUMP_VELOCITY * JUMP_VELOCITY / (2.0 * ASCENT_GRAVITY);
+        let rise = JUMP_VELOCITY / ASCENT_GRAVITY;
+        assert!((apex - JUMP_APEX_HEIGHT).abs() < 1e-5, "derived apex {apex} vs parameter {JUMP_APEX_HEIGHT}");
+        assert!((rise - JUMP_TIME_TO_APEX).abs() < 1e-6, "derived rise {rise} vs parameter {JUMP_TIME_TO_APEX}");
+    }
+
+    #[test]
+    fn the_fall_is_heavier_than_the_rise_but_still_a_fall() {
+        // The asymmetric arc: descent gravity must exceed ascent gravity (a multiplier of 1 would
+        // make the split dead code), and both must be real downward pulls.
+        assert!(ASCENT_GRAVITY > 0.0);
+        assert!(FALL_GRAVITY_MULT > 1.0, "the fall multiplier must actually shorten the descent");
+        assert!(FALL_GRAVITY > ASCENT_GRAVITY);
+    }
+
+    #[test]
+    fn the_jump_cut_is_a_real_partial_cut() {
+        // 0 would kill a tapped jump outright (vertical velocity zeroed at release); 1 would make
+        // variable height a no-op. The minimum hop, JUMP_CUT_FACTOR^2 of the apex, must still
+        // clear something: a short hop, not a stumble.
+        assert!(JUMP_CUT_FACTOR > 0.0 && JUMP_CUT_FACTOR < 1.0);
+        let min_hop = JUMP_CUT_FACTOR * JUMP_CUT_FACTOR * JUMP_APEX_HEIGHT;
+        assert!(min_hop > 0.2, "minimum hop {min_hop} too small to read as a jump");
+    }
+
+    #[test]
+    fn the_coyote_window_is_grace_not_flight() {
+        // The window must survive quantization (at least a couple of fixed steps, or a single
+        // dropped frame eats it) and stay well inside the jump's own rise, or hovering off ledges
+        // stops reading as forgiveness and starts reading as a mechanic.
+        assert!(COYOTE_S >= 2.0 * SIM_DT, "a window under two steps is luck, not grace");
+        assert!(COYOTE_S <= JUMP_TIME_TO_APEX * 0.5, "the grace must stay small against the jump itself");
     }
 
     #[test]
@@ -259,12 +334,11 @@ mod tests {
 
     #[test]
     fn a_jump_clears_something_worth_jumping() {
-        // Apex height under constant gravity: v^2 / 2g. The 1.5x verdict put it at ~1.9m: clears a
-        // man-height crate with room to feel generous, still well under the demo's tall prefabs,
-        // or they stop being obstacles.
-        let apex = JUMP_VELOCITY * JUMP_VELOCITY / (2.0 * -GRAVITY.y);
-        assert!(apex > 1.5, "apex {apex} fell below the raised-jump verdict (~1.9m)");
-        assert!(apex < 4.0, "apex {apex} clears the demo's tall prefabs");
+        // The apex is the parameter now, so the demo's obstacle bounds pin it directly: above a
+        // man-height crate with room to feel generous, still under the tall prefabs, or they stop
+        // being obstacles.
+        assert!(JUMP_APEX_HEIGHT > 1.5, "apex {JUMP_APEX_HEIGHT} fell below the raised-jump verdict (~1.9m)");
+        assert!(JUMP_APEX_HEIGHT < 4.0, "apex {JUMP_APEX_HEIGHT} clears the demo's tall prefabs");
     }
 
     #[test]
@@ -285,21 +359,32 @@ mod tests {
 
     #[test]
     fn acceleration_starts_fast_and_friction_stops_harder() {
-        // From rest to top speed in a fraction of a second: locomotion must stay responsive even
-        // though velocity is no longer set outright.
-        assert!(MOVE_SPEED / GROUND_ACCEL < 0.25, "too slow to top speed: reads as ice");
-        // Stopping at least as hard as starting: releasing the stick must not read slippery.
+        // The precision-kit crispness bar: from rest to top speed within two tenths of a second
+        // (the keyboard-tap responsiveness verdict), and stopping at least as hard as starting so
+        // releasing input never reads slippery.
+        assert!(MOVE_SPEED / GROUND_ACCEL < 0.2, "too slow to top speed: reads as ice");
         assert!(GROUND_FRICTION >= GROUND_ACCEL);
         // Airborne control is real but weaker than grounded: momentum survives a jump.
         assert!(AIR_CONTROL > 0.0 && AIR_CONTROL < 1.0);
     }
 
     #[test]
+    fn a_full_speed_stop_lands_inside_a_quarter_metre() {
+        // The constant-rate decay covers v^2 / 2f metres from top speed to rest: the slide the
+        // player feels after releasing the key. A quarter metre is the precision bar (about half a
+        // body width); the old friction of 50 slid ~0.56m, the felt cause of overshot landings.
+        let stop_distance = MOVE_SPEED * MOVE_SPEED / (2.0 * GROUND_FRICTION);
+        assert!(stop_distance <= 0.25, "stop distance {stop_distance} overshoots a precision landing");
+        assert!(stop_distance > 0.05, "a stop this abrupt would read as hitting a wall");
+    }
+
+    #[test]
     fn an_air_redirect_can_reverse_heading_within_one_jump() {
         // The redirection promise: a full half-circle turn (the worst redirect) at AIR_TURN_RATE
-        // must fit inside a jump's hang time (2v/g up and down), or the do-over the air model
-        // sells cannot finish before landing.
-        let hang_time = 2.0 * JUMP_VELOCITY / -GRAVITY.y;
+        // must fit inside a jump's hang time, or the do-over the air model sells cannot finish
+        // before landing. The arc is asymmetric now: the rise takes JUMP_TIME_TO_APEX and the
+        // descent falls the apex height under the heavier fall gravity, sqrt(2h / g_fall).
+        let hang_time = JUMP_TIME_TO_APEX + (2.0 * JUMP_APEX_HEIGHT / FALL_GRAVITY).sqrt();
         let reversal = std::f32::consts::PI / AIR_TURN_RATE;
         assert!(reversal < hang_time, "reversal {reversal}s must fit the jump's {hang_time}s");
     }
@@ -327,9 +412,11 @@ mod tests {
     #[test]
     fn the_snap_distance_covers_a_full_speed_step_down_the_steepest_walkable_slope() {
         // One step of full-speed walking descends at most MOVE_SPEED * SIM_DT * tan(max slope);
-        // with WALKABLE_COS = cos(45 deg) that gradient is 1, so the bound rises with every speed
-        // retune (7.5 m/s puts it at 0.125m). The glue must cover it, or a fast downhill walk
-        // outruns the snap and flickers airborne - the exact bug the glue removes.
+        // with WALKABLE_COS = cos(45 deg) that gradient is 1, so the bound is set by the top speed
+        // alone (7.5 m/s puts it at 0.125m) - the crispness retune of accel and friction moves how
+        // fast that speed is reached, not the worst per-step descent, so the bound stands. The
+        // glue must cover it, or a fast downhill walk outruns the snap and flickers airborne - the
+        // exact bug the glue removes.
         let max_walkable_gradient = (1.0 - WALKABLE_COS * WALKABLE_COS).sqrt() / WALKABLE_COS;
         assert!(SNAP_DOWN_DISTANCE >= MOVE_SPEED * SIM_DT * max_walkable_gradient);
         // And it must stay a glue, not a teleport: well under the player's own height.

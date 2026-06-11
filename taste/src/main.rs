@@ -35,6 +35,8 @@ mod intent;
 mod jump;
 mod landing;
 #[cfg(test)]
+mod precision;
+#[cfg(test)]
 mod replay;
 mod sim;
 mod world;

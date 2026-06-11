@@ -11,10 +11,12 @@
 //!   input. The buffer keeps a press alive `JUMP_BUFFER_S` of simulation time, so it fires on the
 //!   landing step instead.
 //!
-//! The latch asks "can this step jump", not "is this step grounded": with the double jump, an
-//! airborne step with an air jump in hand consumes the press too, so a press latched on a
-//! zero-step frame near the apex fires the air jump on the next step instead of waiting for
-//! ground. Once the air jump is spent, presses buffer for the landing exactly as before.
+//! The latch asks "can this step jump", not "is this step grounded": with the double jump and the
+//! coyote window, an airborne step with an air jump in hand - or still inside the coyote grace -
+//! consumes the press too, so a press latched on a zero-step frame near the apex fires the air
+//! jump on the next step instead of waiting for ground. Once the air jump is spent, presses
+//! buffer for the landing exactly as before. The caller passes `Player::can_jump`, the same check
+//! the step itself makes, so the latch and the step cannot disagree.
 //!
 //! Consuming clears the latch, so one press is exactly one jump (ground or air): a multi-step
 //! catch-up frame cannot bounce twice on one press (the guarantee the old first-step-only
@@ -42,8 +44,9 @@ impl JumpLatch {
     }
 
     /// Ask, once per fixed step, whether this step should jump. `can_jump` is whether the player
-    /// at step entry has a jump to give: grounded, or airborne with an air jump remaining (the
-    /// state the step's own jump check reads, so the latch and the step agree). A pending press
+    /// at step entry has a jump to give - `Player::can_jump`: grounded, inside the coyote window,
+    /// or with an air jump remaining (the state the step's own jump check reads, so the latch and
+    /// the step agree). A pending press
     /// fires and is consumed on the first step that can jump; a step that cannot ages it by
     /// `SIM_DT` and drops it once it is older than `JUMP_BUFFER_S`.
     pub fn consume(&mut self, can_jump: bool) -> bool {
@@ -107,7 +110,7 @@ mod tests {
         // next step is airborne with the air jump in hand (can_jump true), so the press fires the
         // air jump through the very same latch the ground jump uses - a zero-step frame cannot
         // eat the double jump. Driven through the real step so the wiring matches the app's.
-        use crate::constants::{AIR_JUMP_SCALE, GRAVITY, JUMP_VELOCITY};
+        use crate::constants::{AIR_JUMP_SCALE, ASCENT_GRAVITY, JUMP_VELOCITY};
         use crate::sim::{self, Player, StepInput};
         use crate::world::{ChunkTerrain, World};
         use glam::Vec3;
@@ -118,25 +121,29 @@ mod tests {
         let heightmap =
             Heightmap::new(vec![raw; CHUNK_GRID_LEN], vec![SurfaceTag::new("g")], vec![0; CHUNK_GRID_LEN]).unwrap();
         let world = World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }] };
-        // Near the apex of a jump: airborne, barely rising, the air jump unspent.
+        // Near the apex of a jump: airborne, barely rising, the air jump unspent, the coyote
+        // grace long expired.
         let p = Player {
             motion: Motion { position: Vec3::new(64.0, 20.0, 64.0), velocity: Vec3::new(0.0, 0.2, 0.0) },
             grounded: false,
             air_jumps: crate::constants::AIR_JUMPS,
+            coyote: 0.0,
+            cut_armed: false,
         };
 
         let mut latch = JumpLatch::new();
         latch.press(); // the frame that raised this edge ran zero fixed steps
-        let fired = latch.consume(p.grounded || p.air_jumps > 0);
+        let fired = latch.consume(p.can_jump());
         assert!(fired, "an airborne step with an air jump in hand consumes the press");
-        let next = sim::step(p, StepInput { move_dir: Vec3::ZERO, jump: fired }, &world);
+        let next = sim::step(p, StepInput { move_dir: Vec3::ZERO, jump: fired, jump_held: true }, &world);
         assert!(
-            (next.motion.velocity.y - (JUMP_VELOCITY * AIR_JUMP_SCALE + GRAVITY.y * crate::constants::SIM_DT)).abs()
+            (next.motion.velocity.y - (JUMP_VELOCITY * AIR_JUMP_SCALE - ASCENT_GRAVITY * crate::constants::SIM_DT))
+                .abs()
                 < 1e-5,
             "the latched press must fire the air jump: vy = {}",
             next.motion.velocity.y
         );
-        assert!(!latch.consume(next.grounded || next.air_jumps > 0), "the press is spent: one press, one jump");
+        assert!(!latch.consume(next.can_jump()), "the press is spent: one press, one jump");
     }
 
     #[test]

@@ -57,9 +57,9 @@ const MARKER_LIFT: f32 = 0.01;
 const MARKER_COLOR: Vec3 = Vec3::new(1.0, 0.0, 1.0);
 
 /// Vertical headroom added to the shadow region's top: the player must keep casting at the jump
-/// apex (JUMP_VELOCITY^2 / 2g is about 1.9m) plus half the capsule's height above the tracked
-/// position, even when standing on the region's highest point. Game knowledge, so it lives here
-/// rather than in the renderer's fit; the relationship is pinned by a test below.
+/// apex (JUMP_APEX_HEIGHT, the tuning parameter itself) plus half the capsule's height above the
+/// tracked position, even when standing on the region's highest point. Game knowledge, so it lives
+/// here rather than in the renderer's fit; the relationship is pinned by a test below.
 const SHADOW_HEADROOM_M: f32 = 3.0;
 
 /// Draw order of the primitive mesh cache; `primitive_index` must match.
@@ -156,17 +156,22 @@ impl TasteApp {
     /// Run this frame's fixed steps. The camera yaw is resolved into a move direction once per
     /// frame (the camera turns at frame rate, between steps it is constant). The jump edge goes
     /// through the latch (`crate::jump`): it survives a frame that runs zero steps, fires on the
-    /// first step that can jump - grounded, or airborne with an air jump in hand - inside the
-    /// buffer window, and is consumed there, so a multi-step catch-up frame still cannot bounce
-    /// twice on one press, and a zero-step frame cannot eat the double jump.
+    /// first step that can jump - `Player::can_jump`: grounded, inside the coyote window, or with
+    /// an air jump in hand - inside the buffer window, and is consumed there, so a multi-step
+    /// catch-up frame still cannot bounce twice on one press, and a zero-step frame cannot eat the
+    /// double jump. The held level rides along unlatched: it is state, not an edge, so whichever
+    /// step samples it sees the truth, and the cut inside the step reads the release from it.
     fn simulate(&mut self, intent: &Intent, steps: u32) {
         if intent.jump {
             self.jump.press();
         }
         let move_dir = sim::move_direction(self.camera.yaw, intent.move_forward, intent.move_right);
         for _ in 0..steps {
-            let can_jump = self.player.grounded || self.player.air_jumps > 0;
-            let input = StepInput { move_dir, jump: self.jump.consume(can_jump) };
+            let input = StepInput {
+                move_dir,
+                jump: self.jump.consume(self.player.can_jump()),
+                jump_held: intent.jump_held,
+            };
             self.player_prev = self.player;
             self.player = sim::step(self.player, input, &self.world);
         }
@@ -377,17 +382,19 @@ fn player_transform(position: Vec3) -> Mat4 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{GRAVITY, JUMP_VELOCITY, PLAYER_HEIGHT};
+    use crate::constants::{JUMP_APEX_HEIGHT, PLAYER_HEIGHT};
     use wok_physics::Capsule;
 
     #[test]
+    // Asserting on constants is the point: the test pins a relationship between tuning values so
+    // a retune that breaks it fails loudly (the same stance as the constants module's tests).
+    #[allow(clippy::assertions_on_constants)]
     fn the_shadow_headroom_clears_the_jump_apex() {
         // The headroom must cover the apex plus the capsule's upper half from the region's highest
         // point, or the shadow pops off mid-jump; pinned so a jump retune cannot out-jump the fit.
-        let apex = JUMP_VELOCITY * JUMP_VELOCITY / (2.0 * -GRAVITY.y);
         assert!(
-            SHADOW_HEADROOM_M >= apex + PLAYER_HEIGHT * 0.5,
-            "headroom {SHADOW_HEADROOM_M} cannot cover the apex {apex} plus the capsule's upper half"
+            SHADOW_HEADROOM_M >= JUMP_APEX_HEIGHT + PLAYER_HEIGHT * 0.5,
+            "headroom {SHADOW_HEADROOM_M} cannot cover the apex {JUMP_APEX_HEIGHT} plus the capsule's upper half"
         );
     }
 

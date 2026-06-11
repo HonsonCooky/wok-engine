@@ -4,9 +4,11 @@
 //! player's [`Motion`] and grounded flag, and each fixed step sequences wok-physics's pure pieces in
 //! the composition the Level 2 locomotion harness proved out (wok-physics/tests/locomotion_replay):
 //!
-//!     steer the horizontal velocity toward intent (grounded approach or air redirection,
-//!                                                  plus the jump impulses - the game's policy)
-//!     -> integrate one fixed step under gravity   (wok-physics: integrate)
+//!     steer the horizontal velocity toward intent (grounded approach or air redirection, plus
+//!                                                  the jump impulses, coyote grace, and the
+//!                                                  variable-height cut - the game's policy)
+//!     -> integrate one fixed step under gravity   (wok-physics: integrate; ascent gravity while
+//!                                                  rising, the heavier fall gravity otherwise)
 //!     -> collide-and-slide against static AABBs   (wok-physics: collide_and_slide)
 //!     -> rest the slid capsule on the terrain     (wok-physics: rest_on_heightmap, chunk-local)
 //!
@@ -26,8 +28,9 @@ use wok_physics::{Capsule, Motion, boom_direction, collide_and_slide, integrate,
 
 use crate::air;
 use crate::constants::{
-    AIR_JUMP_SCALE, AIR_JUMPS, GRAVITY, GROUND_ACCEL, GROUND_FRICTION, JUMP_VELOCITY, MOVE_SPEED, PLAYER_HEIGHT,
-    PLAYER_RADIUS, SIM_DT, SNAP_DOWN_DISTANCE, SPAWN_HEIGHT, WALKABLE_COS,
+    AIR_JUMP_SCALE, AIR_JUMPS, ASCENT_GRAVITY, COYOTE_S, FALL_GRAVITY, GROUND_ACCEL, GROUND_FRICTION,
+    JUMP_CUT_FACTOR, JUMP_VELOCITY, MOVE_SPEED, PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT, SNAP_DOWN_DISTANCE,
+    SPAWN_HEIGHT, WALKABLE_COS,
 };
 use crate::landing::supported_below;
 use crate::world::{CHUNK_SIZE_M, World};
@@ -41,14 +44,46 @@ pub struct Player {
     /// Air jumps still available: spent by jumping airborne, restored to `AIR_JUMPS` on any
     /// grounding. Part of the stepped state, so replay covers it like position and velocity.
     pub air_jumps: u32,
+    /// Coyote grace remaining, in seconds of simulation time: refreshed to `COYOTE_S` while
+    /// grounded, burned down one `SIM_DT` per airborne step, zeroed by any jump. While positive an
+    /// airborne press still fires a full ground jump without spending the air jump - the
+    /// walked-off-a-ledge forgiveness. Stepped state, so replay covers it.
+    pub coyote: f32,
+    /// Whether this ascent still has its jump cut available: armed by every jump (ground, coyote,
+    /// or air), spent by the cut, cleared on grounding. The once-per-jump guarantee behind
+    /// variable jump height.
+    pub cut_armed: bool,
+}
+
+impl Player {
+    /// Does this player, at step entry, have a jump to give: grounded, inside the coyote window,
+    /// or holding an air jump? The single definition the jump latch and the step's own jump check
+    /// both read, so the latch can never fire a press the step would drop.
+    pub fn can_jump(&self) -> bool {
+        self.grounded || self.coyote > 0.0 || self.air_jumps > 0
+    }
 }
 
 /// One fixed step's input, already resolved against the camera: a world-space horizontal move
-/// direction of length at most one, and whether a jump was asked for.
+/// direction of length at most one, whether a jump was asked for, and whether the jump control is
+/// down at all.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct StepInput {
     pub move_dir: Vec3,
     pub jump: bool,
+    /// Is the jump control held this step? A level, not an edge: the jump cut reads the release
+    /// as this going low while the body still rises. A level survives zero-step frames without a
+    /// latch (the state persists until a step samples it), and it is the only release signal both
+    /// devices can supply - the platform exposes no gamepad button-release edge.
+    pub jump_held: bool,
+}
+
+/// The gravity in force for a body whose vertical velocity is `vy`, as the acceleration
+/// `integrate` takes. Rising bodies decelerate under the jump's derived ascent gravity; everything
+/// else (descent, standing) falls under the `FALL_GRAVITY_MULT`-scaled descent gravity. The split
+/// is what makes the arc asymmetric: the rise keeps the tuned apex and time, the fall commits.
+pub fn gravity(vy: f32) -> Vec3 {
+    Vec3::new(0.0, if vy > 0.0 { -ASCENT_GRAVITY } else { -FALL_GRAVITY }, 0.0)
 }
 
 /// Resolve the intent's movement axes against the camera yaw into a world-space horizontal move
@@ -84,7 +119,13 @@ pub fn spawn(world: &World) -> Player {
         let ground = t.heightmap.height_at(half, half);
         t.origin + Vec3::new(half, ground + SPAWN_HEIGHT, half)
     });
-    Player { motion: Motion { position, velocity: Vec3::ZERO }, grounded: false, air_jumps: AIR_JUMPS }
+    Player {
+        motion: Motion { position, velocity: Vec3::ZERO },
+        grounded: false,
+        air_jumps: AIR_JUMPS,
+        coyote: 0.0,
+        cut_armed: false,
+    }
 }
 
 /// Move `current` toward `target` by at most `max_delta`, arriving exactly: the constant-rate
@@ -120,16 +161,23 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     m.velocity.x = horizontal.x;
     m.velocity.z = horizontal.z;
 
-    // The jump impulse: grounded presses push off the ground at full strength. Airborne presses
-    // spend an air jump when one remains - the R&C do-over: vertical velocity is SET (not added)
-    // to the scaled launch speed, and the horizontal velocity is redirected outright to the
-    // current stick direction at the current speed, so the double jump is a full commitment to
-    // the new heading; with no stick held the heading is kept. The latch upstream guarantees one
-    // press is one jump; this block only decides what a delivered press does.
+    // The jump impulse: grounded presses - and airborne presses inside the coyote window - push
+    // off at full strength without touching the air jump; the window is the walked-off-a-ledge
+    // grace, and the press spends it outright so it can never stack a second free jump. Past the
+    // window, airborne presses spend an air jump when one remains - the R&C do-over: vertical
+    // velocity is SET (not added) to the scaled launch speed, and the horizontal velocity is
+    // redirected outright to the current stick direction at the current speed, so the double jump
+    // is a full commitment to the new heading; with no stick held the heading is kept. The latch
+    // upstream guarantees one press is one jump; this block only decides what a delivered press
+    // does. Every fired jump arms the cut below.
     let mut air_jumps = player.air_jumps;
+    let mut coyote = player.coyote;
+    let mut cut_armed = player.cut_armed;
+    let mut jumped = false;
     if input.jump {
-        if player.grounded {
+        if player.grounded || coyote > 0.0 {
             m.velocity.y = JUMP_VELOCITY;
+            jumped = true;
         } else if air_jumps > 0 {
             air_jumps -= 1;
             m.velocity.y = JUMP_VELOCITY * AIR_JUMP_SCALE;
@@ -139,11 +187,25 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
                 m.velocity.x = dir.x * speed;
                 m.velocity.z = dir.z * speed;
             }
+            jumped = true;
         }
+        coyote = 0.0;
+        cut_armed |= jumped;
     }
 
-    // One fixed step under gravity, then slide the resulting move along any static geometry it meets.
-    let next = integrate(m, GRAVITY, SIM_DT);
+    // Variable jump height: the first step that finds the jump control released while the body
+    // still rises scales the climb by JUMP_CUT_FACTOR and disarms - once per jump, ground or air.
+    // Reading the held level (rather than a release edge) means a press-and-release that fired
+    // from the buffer on the landing step cuts immediately: a tap is a short hop however the
+    // press was delivered.
+    if cut_armed && !input.jump_held && m.velocity.y > 0.0 {
+        m.velocity.y *= JUMP_CUT_FACTOR;
+        cut_armed = false;
+    }
+
+    // One fixed step under gravity - ascent gravity while rising, the heavier fall gravity
+    // otherwise - then slide the resulting move along any static geometry it meets.
+    let next = integrate(m, gravity(m.velocity.y), SIM_DT);
     let capsule = Capsule::upright(m.position, PLAYER_HEIGHT, PLAYER_RADIUS);
     let slid =
         collide_and_slide(capsule, next.position - m.position, next.velocity, &world.statics, Vec3::Y, WALKABLE_COS);
@@ -183,7 +245,6 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     // ground (the support is within the glue distance), take its position and remain grounded.
     // A drop taller than the glue leaves the probe unlifted and ungrounded, so real ledges and
     // jumps still go airborne.
-    let jumped = input.jump && player.grounded;
     if player.grounded && !jumped && !grounded
         && let Some(t) = world.terrain_under(position.x, position.z)
     {
@@ -197,9 +258,13 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
         }
     }
 
-    // Any grounding restores the air jumps: the double jump is per airtime, not per life.
+    // Any grounding restores the air jumps and refreshes the coyote grace (and retires the cut:
+    // the next jump arms its own); airborne, the grace burns down one step of simulation time.
+    // The double jump is per airtime, not per life.
     let air_jumps = if grounded { AIR_JUMPS } else { air_jumps };
-    Player { motion: Motion { position, velocity }, grounded, air_jumps }
+    let coyote = if grounded { COYOTE_S } else { (coyote - SIM_DT).max(0.0) };
+    let cut_armed = !grounded && cut_armed;
+    Player { motion: Motion { position, velocity }, grounded, air_jumps, coyote, cut_armed }
 }
 
 #[cfg(test)]
@@ -245,7 +310,13 @@ mod tests {
     }
 
     fn player_at(position: Vec3) -> Player {
-        Player { motion: Motion { position, velocity: Vec3::ZERO }, grounded: false, air_jumps: AIR_JUMPS }
+        Player {
+            motion: Motion { position, velocity: Vec3::ZERO },
+            grounded: false,
+            air_jumps: AIR_JUMPS,
+            coyote: 0.0,
+            cut_armed: false,
+        }
     }
 
     #[test]
@@ -277,13 +348,16 @@ mod tests {
         World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }] }
     }
 
-    /// A player standing at rest mid-chunk: capsule base exactly on the surface, grounded.
+    /// A player standing at rest mid-chunk: capsule base exactly on the surface, grounded (with
+    /// the coyote grace a grounded step would carry).
     fn at_rest(world: &World) -> Player {
         let ground = world.terrains[0].heightmap.height_at(64.0, 64.0);
         Player {
             motion: Motion { position: Vec3::new(64.0, ground + PLAYER_HEIGHT * 0.5, 64.0), velocity: Vec3::ZERO },
             grounded: true,
             air_jumps: AIR_JUMPS,
+            coyote: crate::constants::COYOTE_S,
+            cut_armed: false,
         }
     }
 
@@ -296,7 +370,7 @@ mod tests {
         // Constant-rate approach from rest: v(t) = GROUND_ACCEL * t, so 95% of top speed arrives
         // at 0.95 * MOVE_SPEED / GROUND_ACCEL seconds; the ceil grants the partial step.
         let world = flat_world(2.0);
-        let run = StepInput { move_dir: Vec3::X, jump: false };
+        let run = StepInput { move_dir: Vec3::X, jump: false, jump_held: false };
         let steps = (0.95 * MOVE_SPEED / GROUND_ACCEL / SIM_DT).ceil() as usize;
         let mut p = at_rest(&world);
         for _ in 0..steps {
@@ -333,7 +407,7 @@ mod tests {
         // airborne step from rest gains AIR_CONTROL times the grounded gain, along the stick.
         use crate::constants::AIR_CONTROL;
         let world = flat_world(2.0);
-        let run = StepInput { move_dir: Vec3::X, jump: false };
+        let run = StepInput { move_dir: Vec3::X, jump: false, jump_held: false };
         let ground_dv = step(at_rest(&world), run, &world).motion.velocity.x;
         let airborne = player_at(Vec3::new(64.0, 30.0, 64.0));
         let air_dv = step(airborne, run, &world).motion.velocity.x;

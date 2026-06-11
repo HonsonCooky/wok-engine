@@ -38,6 +38,12 @@ pub struct Intent {
     /// Space or the south button was pressed this frame (an edge, not a hold: holding does not
     /// bounce).
     pub jump: bool,
+    /// Space or the south button is down this frame: the level under the press edge. Variable
+    /// jump height reads the release as this level going low while the body still rises. A level
+    /// rather than a release edge for two reasons: an edge raised on a zero-step frame would need
+    /// its own latch to survive (the press edge's exact problem), and the platform exposes no
+    /// gamepad button-release set, so a release edge could not be mapped for the pad at all.
+    pub jump_held: bool,
     /// Radians of orbit to add this frame: `x` to yaw, `y` to pitch. The base mapping turns the
     /// view with the drag or deflection - the boom convention makes view-right a negative yaw
     /// delta - and raises the camera as the input pushes forward; the per-device `MOUSE_INVERT_*`
@@ -82,6 +88,8 @@ pub fn map_input(input: &InputState, dt: f32) -> Intent {
         move_right: axis('d', 'a') + move_stick.x,
         jump: input.key_pressed(NamedKey::Space)
             || pad.is_some_and(|p| p.buttons_pressed.contains(&Button::South)),
+        jump_held: input.key_held(NamedKey::Space)
+            || pad.is_some_and(|p| p.buttons_held.contains(&Button::South)),
         look_delta: mouse + stick,
         quit: input.key_pressed(NamedKey::Escape)
             || pad.is_some_and(|p| p.buttons_pressed.contains(&Button::Select)),
@@ -201,6 +209,18 @@ mod tests {
     }
 
     #[test]
+    fn holding_space_is_the_jump_level_not_the_edge() {
+        // The level the jump cut reads: held space reports jump_held without re-raising the press
+        // edge, and releasing reports neither - the cut sees the level go low.
+        let mut input = input_with(&[], false);
+        input.keys_held.insert(Key::Named(NamedKey::Space));
+        let intent = map_input(&input, DT);
+        assert!(intent.jump_held && !intent.jump);
+        let released = map_input(&input_with(&[], false), DT);
+        assert!(!released.jump_held);
+    }
+
+    #[test]
     fn mouse_motion_always_drives_look_and_a_still_mouse_is_silent() {
         // No held-button gate: the pointer belongs to the game (locked and hidden), so raw motion
         // is look with no button held, and a motionless mouse contributes exactly zero.
@@ -294,6 +314,16 @@ mod tests {
     fn the_south_button_is_a_jump_edge() {
         assert!(map_input(&input_with_pad(pad((0.0, 0.0), (0.0, 0.0), true)), DT).jump);
         assert!(!map_input(&input_with_pad(pad((0.0, 0.0), (0.0, 0.0), false)), DT).jump);
+    }
+
+    #[test]
+    fn the_held_south_button_is_the_jump_level() {
+        // The pad's side of the level: buttons_held carries the hold (the platform exposes no
+        // gamepad release edge, which is why the cut reads a level at all).
+        let mut gamepad = pad((0.0, 0.0), (0.0, 0.0), false);
+        gamepad.buttons_held.insert(Button::South);
+        let intent = map_input(&input_with_pad(gamepad), DT);
+        assert!(intent.jump_held && !intent.jump);
     }
 
     #[test]

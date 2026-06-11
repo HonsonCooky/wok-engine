@@ -204,6 +204,8 @@ mod tests {
             motion: Motion { position: Vec3::new(64.95, 4.0 + PLAYER_HEIGHT * 0.5 + 0.05, 64.0), velocity: Vec3::ZERO },
             grounded: false,
             air_jumps: crate::constants::AIR_JUMPS,
+            coyote: 0.0,
+            cut_armed: false,
         };
         for _ in 0..60 {
             p = sim::step(p, StepInput::default(), &world);
@@ -211,7 +213,7 @@ mod tests {
         assert!(p.grounded && base_y(&p) > 3.9, "fixture: should stand on the crate top: {:?}", p);
 
         for _ in 0..3 {
-            p = sim::step(p, StepInput { move_dir: Vec3::X, jump: false }, &world);
+            p = sim::step(p, StepInput { move_dir: Vec3::X, jump: false, jump_held: false }, &world);
         }
         // Two seconds is generous for a 2m drop (the free fall is 0.4s); before the fix the graze
         // held the body hovering beside the crate for five.
@@ -269,6 +271,8 @@ mod tests {
                         motion: Motion { position: Vec3::new(64.0, top + PLAYER_HEIGHT * 0.5 + 0.05, 64.0), velocity: Vec3::ZERO },
                         grounded: false,
                         air_jumps: crate::constants::AIR_JUMPS,
+                        coyote: 0.0,
+                        cut_armed: false,
                     };
                     for _ in 0..60 {
                         p = sim::step(p, StepInput::default(), &world);
@@ -277,15 +281,15 @@ mod tests {
 
                     // A short run-up, then the jump with the direction still held.
                     for _ in 0..6 {
-                        p = sim::step(p, StepInput { move_dir: dir, jump: false }, &world);
+                        p = sim::step(p, StepInput { move_dir: dir, jump: false, jump_held: false }, &world);
                     }
-                    p = sim::step(p, StepInput { move_dir: dir, jump: true }, &world);
+                    p = sim::step(p, StepInput { move_dir: dir, jump: true, jump_held: true }, &world);
                     assert!(!p.grounded, "{label}: the jump step must leave the ground");
 
                     let mut settled = false;
                     for i in 0..300 {
                         let move_dir = if i < hold_after { dir } else { Vec3::ZERO };
-                        p = sim::step(p, StepInput { move_dir, jump: false }, &world);
+                        p = sim::step(p, StepInput { move_dir, jump: false, jump_held: false }, &world);
                         if p.grounded {
                             assert!(
                                 on_terrain(&p) || on_top(&p),
@@ -314,6 +318,8 @@ mod tests {
             motion: Motion { position: Vec3::new(65.2, 5.0, 64.0), velocity: Vec3::ZERO },
             grounded: false,
             air_jumps: crate::constants::AIR_JUMPS,
+            coyote: 0.0,
+            cut_armed: false,
         };
         let p = descend_idle(p, &world, 120);
         let ground = world.terrains[0].heightmap.height_at(p.motion.position.x, p.motion.position.z);

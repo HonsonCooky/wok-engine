@@ -108,16 +108,19 @@ fn fixture_world() -> World {
 // ---- the scripted run ----
 
 /// The script: fall from the air and land, walk +x into the wall and pin against it, jump once at
-/// the wall, then slide diagonally along it. Every locomotion arc the demo shows, in one sequence.
+/// the wall (held through the apex, so the full arc runs uncut; the release lands in the descent,
+/// where the cut never applies), then slide diagonally along it. Every locomotion arc the demo
+/// shows, in one sequence.
 fn scripted_inputs() -> Vec<StepInput> {
     let forward = Vec3::new(1.0, 0.0, 0.0);
     let diagonal = Vec3::new(1.0, 0.0, 1.0).normalize();
     let mut inputs = Vec::new();
     inputs.extend(std::iter::repeat_n(StepInput::default(), 90));
-    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false }, 150));
-    inputs.push(StepInput { move_dir: forward, jump: true });
-    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false }, 59));
-    inputs.extend(std::iter::repeat_n(StepInput { move_dir: diagonal, jump: false }, 60));
+    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false, jump_held: false }, 150));
+    inputs.push(StepInput { move_dir: forward, jump: true, jump_held: true });
+    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false, jump_held: true }, 30));
+    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false, jump_held: false }, 29));
+    inputs.extend(std::iter::repeat_n(StepInput { move_dir: diagonal, jump: false, jump_held: false }, 60));
     inputs
 }
 
@@ -140,7 +143,13 @@ fn bits(v: Vec3) -> [u32; 3] {
 
 /// A player at `position` with no velocity, airborne until proven otherwise.
 fn player_at(position: Vec3) -> Player {
-    Player { motion: Motion { position, velocity: Vec3::ZERO }, grounded: false, air_jumps: AIR_JUMPS }
+    Player {
+        motion: Motion { position, velocity: Vec3::ZERO },
+        grounded: false,
+        air_jumps: AIR_JUMPS,
+        coyote: 0.0,
+        cut_armed: false,
+    }
 }
 
 /// Settle a player under no input for `steps` fixed steps.
@@ -245,7 +254,7 @@ fn walking_downhill_stays_grounded_every_step_with_monotonic_descent() {
     let settled = settle(&world, player_at(Vec3::new(x, terrain.height_at(x, z) + PLAYER_HEIGHT, z)), 120);
     assert!(settled.grounded, "should start the walk settled on the ramp");
 
-    let downhill = StepInput { move_dir: Vec3::new(-1.0, 0.0, 0.0), jump: false };
+    let downhill = StepInput { move_dir: Vec3::new(-1.0, 0.0, 0.0), jump: false, jump_held: false };
     let mut state = settled;
     let mut prev_y = state.motion.position.y;
     for i in 0..240 {
@@ -281,7 +290,7 @@ fn walking_off_a_ledge_taller_than_the_glue_goes_airborne() {
     assert!(on_box.grounded, "should be standing on the box");
     assert!(base_height(on_box.motion.position) > FLAT_HEIGHT_M + drop - 0.1, "should rest on the box top");
 
-    let off = StepInput { move_dir: Vec3::new(1.0, 0.0, 0.0), jump: false };
+    let off = StepInput { move_dir: Vec3::new(1.0, 0.0, 0.0), jump: false, jump_held: false };
     let mut state = on_box;
     let mut went_airborne = false;
     for _ in 0..120 {
@@ -309,15 +318,15 @@ fn a_jump_from_a_downhill_walk_still_leaves_the_ground() {
     let downhill = Vec3::new(-1.0, 0.0, 0.0);
     let mut state = settled;
     for _ in 0..60 {
-        state = sim::step(state, StepInput { move_dir: downhill, jump: false }, &world);
+        state = sim::step(state, StepInput { move_dir: downhill, jump: false, jump_held: false }, &world);
     }
     assert!(state.grounded, "should still be walking the ramp when the jump comes");
     let before = state.motion.position;
 
-    state = sim::step(state, StepInput { move_dir: downhill, jump: true }, &world);
+    state = sim::step(state, StepInput { move_dir: downhill, jump: true, jump_held: true }, &world);
     assert!(!state.grounded, "the jump step must leave the ground");
     for _ in 0..5 {
-        state = sim::step(state, StepInput { move_dir: downhill, jump: false }, &world);
+        state = sim::step(state, StepInput { move_dir: downhill, jump: false, jump_held: true }, &world);
     }
     assert!(!state.grounded, "should still be rising shortly after the jump");
     assert!(
@@ -341,6 +350,11 @@ fn an_identical_scripted_run_reproduces_bitwise() {
         assert_eq!(bits(a.motion.position), bits(b.motion.position), "position differs at step {i}");
         assert_eq!(bits(a.motion.velocity), bits(b.motion.velocity), "velocity differs at step {i}");
         assert_eq!(a.grounded, b.grounded, "grounded flag differs at step {i}");
+        // The precision kit grew the stepped state: the forgiveness timers and flags must replay
+        // exactly too, or a divergence could hide in state the position has not expressed yet.
+        assert_eq!(a.air_jumps, b.air_jumps, "air jumps differ at step {i}");
+        assert_eq!(a.coyote.to_bits(), b.coyote.to_bits(), "coyote grace differs at step {i}");
+        assert_eq!(a.cut_armed, b.cut_armed, "cut arming differs at step {i}");
     }
 }
 
@@ -360,7 +374,10 @@ fn the_scripted_run_actually_exercises_the_arcs() {
     assert!(at_wall.motion.position.x <= pin + 1e-2, "penetrated the wall: x = {}", at_wall.motion.position.x);
     assert!(at_wall.motion.position.x >= pin - 1e-1, "never reached the wall: x = {}", at_wall.motion.position.x);
 
-    // The jump at step 240: airborne shortly after, having gained height.
+    // The jump at step 240, held through the apex so the cut never fires: airborne shortly
+    // after, having gained real height. Five steps in, the uncut arc has climbed most of a metre
+    // (the launch velocity is 10 m/s and ascent gravity has only shaved ~0.7 m/s per step's
+    // worth); 0.2m is the loose floor that still catches a cut or dead jump.
     assert!(!traj[245].grounded, "the jump should leave the ground");
     assert!(
         traj[245].motion.position.y > traj[239].motion.position.y + 0.2,
