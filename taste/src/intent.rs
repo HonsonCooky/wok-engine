@@ -36,14 +36,9 @@ pub struct Intent {
     /// Right minus left (D minus A, or the left stick's rightward deflection).
     pub move_right: f32,
     /// Space or the south button was pressed this frame (an edge, not a hold: holding does not
-    /// bounce).
+    /// bounce). The edge is the whole jump signal: every jump flies the full authored arc, so
+    /// nothing downstream reads how long the control stays down.
     pub jump: bool,
-    /// Space or the south button is down this frame: the level under the press edge. Variable
-    /// jump height reads the release as this level going low while the body still rises. A level
-    /// rather than a release edge for two reasons: an edge raised on a zero-step frame would need
-    /// its own latch to survive (the press edge's exact problem), and the platform exposes no
-    /// gamepad button-release set, so a release edge could not be mapped for the pad at all.
-    pub jump_held: bool,
     /// Radians of orbit to add this frame: `x` to yaw, `y` to pitch. The base mapping turns the
     /// view with the drag or deflection - the boom convention makes view-right a negative yaw
     /// delta - and raises the camera as the input pushes forward; the per-device `MOUSE_INVERT_*`
@@ -88,8 +83,6 @@ pub fn map_input(input: &InputState, dt: f32) -> Intent {
         move_right: axis('d', 'a') + move_stick.x,
         jump: input.key_pressed(NamedKey::Space)
             || pad.is_some_and(|p| p.buttons_pressed.contains(&Button::South)),
-        jump_held: input.key_held(NamedKey::Space)
-            || pad.is_some_and(|p| p.buttons_held.contains(&Button::South)),
         look_delta: mouse + stick,
         quit: input.key_pressed(NamedKey::Escape)
             || pad.is_some_and(|p| p.buttons_pressed.contains(&Button::Select)),
@@ -209,15 +202,12 @@ mod tests {
     }
 
     #[test]
-    fn holding_space_is_the_jump_level_not_the_edge() {
-        // The level the jump cut reads: held space reports jump_held without re-raising the press
-        // edge, and releasing reports neither - the cut sees the level go low.
+    fn holding_space_does_not_re_raise_the_jump_edge() {
+        // The edge is the whole jump signal: held space (no fresh press) asks for no jump, so
+        // holding can never bounce a second jump out of one press.
         let mut input = input_with(&[], false);
         input.keys_held.insert(Key::Named(NamedKey::Space));
-        let intent = map_input(&input, DT);
-        assert!(intent.jump_held && !intent.jump);
-        let released = map_input(&input_with(&[], false), DT);
-        assert!(!released.jump_held);
+        assert!(!map_input(&input, DT).jump);
     }
 
     #[test]
@@ -317,13 +307,12 @@ mod tests {
     }
 
     #[test]
-    fn the_held_south_button_is_the_jump_level() {
-        // The pad's side of the level: buttons_held carries the hold (the platform exposes no
-        // gamepad release edge, which is why the cut reads a level at all).
+    fn the_held_south_button_does_not_re_raise_the_jump_edge() {
+        // The pad's side of the same rule: buttons_held carries the hold, and a hold is not a
+        // press.
         let mut gamepad = pad((0.0, 0.0), (0.0, 0.0), false);
         gamepad.buttons_held.insert(Button::South);
-        let intent = map_input(&input_with_pad(gamepad), DT);
-        assert!(intent.jump_held && !intent.jump);
+        assert!(!map_input(&input_with_pad(gamepad), DT).jump);
     }
 
     #[test]

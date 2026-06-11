@@ -174,14 +174,18 @@ mod tests {
     const DT: f32 = 1.0 / 60.0;
 
     fn empty_world() -> World {
-        World { statics: vec![], terrains: vec![] }
+        World::default()
     }
 
     fn flat_world(height_m: f32) -> World {
         let raw = Heightmap::meters_to_raw(height_m);
         let heightmap =
             Heightmap::new(vec![raw; CHUNK_GRID_LEN], vec![SurfaceTag::new("g")], vec![0; CHUNK_GRID_LEN]).unwrap();
-        World { statics: vec![], terrains: vec![crate::world::ChunkTerrain { origin: Vec3::ZERO, heightmap }] }
+        World {
+            statics: vec![],
+            terrains: vec![crate::world::ChunkTerrain { origin: Vec3::ZERO, heightmap }],
+            ..World::default()
+        }
     }
 
     /// A thin crate crossing the +Z boom of a target at z = 64: its near face is at z = 65.5 and
@@ -191,6 +195,7 @@ mod tests {
         World {
             statics: vec![Aabb::new(Vec3::new(50.0, 0.0, 65.5), Vec3::new(80.0, 10.0, 67.0)).into()],
             terrains: vec![],
+            ..World::default()
         }
     }
 
@@ -200,6 +205,7 @@ mod tests {
         World {
             statics: vec![Aabb::new(Vec3::new(50.0, 0.0, 65.5), Vec3::new(80.0, 14.0, 75.0)).into()],
             terrains: vec![],
+            ..World::default()
         }
     }
 

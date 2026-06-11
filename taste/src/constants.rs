@@ -32,6 +32,14 @@ pub const WALKABLE_COS: f32 = std::f32::consts::FRAC_1_SQRT_2;
 /// also qualifies; wall-grade contacts and all unsupported resolution keep their true normals.
 pub const WALKABLE_NORMAL_Y: f32 = 0.7;
 
+/// The wall stop's incidence window, in degrees from head-on. A wall-grade contact whose
+/// horizontal motion points within this angle of straight into the wall kills its tangential
+/// redirect: the player stops at the wall instead of skating along it (the play verdict: running
+/// at a wall should read as a stop, not a deflection). Beyond the window, glancing contacts slide
+/// exactly as the engine resolves them; vertical motion (gravity along a wall) never enters the
+/// test. Policy in `crate::slide`.
+pub const WALL_STOP_DEG: f32 = 45.0;
+
 // ---- player ----
 
 /// Player capsule total height (tip to tip) and radius, in metres. The segment length follows from
@@ -97,8 +105,9 @@ pub const AIR_JUMP_SCALE: f32 = 0.9;
 // the starting parameters they come out at 26.3 and 10.0, the same jump within a few percent, now
 // steered by the two numbers a play-test verdict actually talks about.
 
-/// Apex height of a full (held) ground jump, in metres: the ~1.9m the raised-jump verdict landed
-/// on, restated as the parameter instead of a consequence.
+/// Apex height of a ground jump, in metres: the ~1.9m the raised-jump verdict landed on, restated
+/// as the parameter instead of a consequence. Every jump flies this full arc - height never
+/// depends on how long the control is held (the verdict that removed the jump cut).
 pub const JUMP_APEX_HEIGHT: f32 = 1.9;
 
 /// Time from launch to that apex, in seconds. Shorter is snappier, longer is floatier; 0.38s is
@@ -119,12 +128,6 @@ pub const FALL_GRAVITY_MULT: f32 = 1.7;
 /// Descent gravity magnitude in m/s^2: the ascent gravity under the fall multiplier. The split is
 /// applied by `sim::gravity` on the vertical velocity's sign.
 pub const FALL_GRAVITY: f32 = ASCENT_GRAVITY * FALL_GRAVITY_MULT;
-
-/// Variable jump height: releasing the jump control while still rising scales the vertical
-/// velocity by this, once per jump, so a tap gives a short hop and a hold gives the full apex.
-/// Apex scales with velocity squared, so the minimum hop is about JUMP_CUT_FACTOR^2 of the full
-/// height (~0.38m at 0.45): real enough to clear a step, short enough to read as a tap.
-pub const JUMP_CUT_FACTOR: f32 = 0.45;
 
 /// Coyote time, in seconds of simulation time: how long after walking off an edge (leaving the
 /// ground without jumping) a ground jump remains available. The player judges the jump against the
@@ -252,12 +255,6 @@ pub const STICK_LOOK_RATE: f32 = 2.5;
 /// retires to an opt-in diagnostic.
 pub const DEBUG_GROUND_MARKER: bool = false;
 
-/// Default for the hitbox overlay (F1 flips it at runtime): every loaded hitbox collider drawn as
-/// a line cage plus the player capsule as rings and verticals, through the renderer's debug line
-/// pass. The drawn scene shows visible shapes; this shows what the simulation actually collides
-/// with, so visual-only and trigger-only placeholders stop being invisible to a play-tester.
-pub const DEBUG_HITBOXES: bool = false;
-
 /// Draw a small cross at the camera's look-at point (the look-ahead target), through the line
 /// pass. On while the look-ahead framing is being tuned: it shows exactly where the view leads,
 /// which is otherwise invisible in play.
@@ -314,16 +311,6 @@ mod tests {
     }
 
     #[test]
-    fn the_jump_cut_is_a_real_partial_cut() {
-        // 0 would kill a tapped jump outright (vertical velocity zeroed at release); 1 would make
-        // variable height a no-op. The minimum hop, JUMP_CUT_FACTOR^2 of the apex, must still
-        // clear something: a short hop, not a stumble.
-        assert!(JUMP_CUT_FACTOR > 0.0 && JUMP_CUT_FACTOR < 1.0);
-        let min_hop = JUMP_CUT_FACTOR * JUMP_CUT_FACTOR * JUMP_APEX_HEIGHT;
-        assert!(min_hop > 0.2, "minimum hop {min_hop} too small to read as a jump");
-    }
-
-    #[test]
     fn the_coyote_window_is_grace_not_flight() {
         // The window must survive quantization (at least a couple of fixed steps, or a single
         // dropped frame eats it) and stay well inside the jump's own rise, or hovering off ledges
@@ -361,6 +348,13 @@ mod tests {
         // must sit well above any wall-grade normal, or walls would stop pushing back.
         assert!(WALKABLE_NORMAL_Y <= WALKABLE_COS);
         assert!(WALKABLE_NORMAL_Y > 0.5);
+    }
+
+    #[test]
+    fn the_wall_stop_window_is_a_real_window() {
+        // 0 would make the stop unreachable (only an exact head-on hit, measure-zero in float);
+        // 90 or more would stop every wall contact and walls would have no slide at all.
+        assert!(WALL_STOP_DEG > 0.0 && WALL_STOP_DEG < 90.0);
     }
 
     #[test]

@@ -107,20 +107,23 @@ fn fixture_world() -> World {
 
 // ---- the scripted run ----
 
-/// The script: fall from the air and land, walk +x into the wall and pin against it, jump once at
-/// the wall (held through the apex, so the full arc runs uncut; the release lands in the descent,
-/// where the cut never applies), then slide diagonally along it. Every locomotion arc the demo
-/// shows, in one sequence.
+/// The script: fall from the air and land, walk +x head-on into the wall and stop pinned against
+/// it (the wall-stop incidence policy: head-on is inside WALL_STOP_DEG, so the contact reads as a
+/// stop, which for an exactly head-on approach is also bitwise the engine's resolve), jump once at
+/// the wall (every jump flies the full authored arc now), then slide along it at a glancing angle.
+/// The slide direction leans 2:1 along the wall - about 63 degrees from head-on, clearly outside
+/// the 45-degree stop window - because the old 1:1 diagonal sits exactly ON the window's edge,
+/// where float roundoff would decide stop-versus-slide and the test would pin luck. Every
+/// locomotion arc the demo shows, in one sequence.
 fn scripted_inputs() -> Vec<StepInput> {
     let forward = Vec3::new(1.0, 0.0, 0.0);
-    let diagonal = Vec3::new(1.0, 0.0, 1.0).normalize();
+    let glancing = Vec3::new(1.0, 0.0, 2.0).normalize();
     let mut inputs = Vec::new();
     inputs.extend(std::iter::repeat_n(StepInput::default(), 90));
-    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false, jump_held: false }, 150));
-    inputs.push(StepInput { move_dir: forward, jump: true, jump_held: true });
-    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false, jump_held: true }, 30));
-    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false, jump_held: false }, 29));
-    inputs.extend(std::iter::repeat_n(StepInput { move_dir: diagonal, jump: false, jump_held: false }, 60));
+    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false }, 150));
+    inputs.push(StepInput { move_dir: forward, jump: true });
+    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false }, 59));
+    inputs.extend(std::iter::repeat_n(StepInput { move_dir: glancing, jump: false }, 60));
     inputs
 }
 
@@ -148,7 +151,6 @@ fn player_at(position: Vec3) -> Player {
         grounded: false,
         air_jumps: AIR_JUMPS,
         coyote: 0.0,
-        cut_armed: false,
     }
 }
 
@@ -254,7 +256,7 @@ fn walking_downhill_stays_grounded_every_step_with_monotonic_descent() {
     let settled = settle(&world, player_at(Vec3::new(x, terrain.height_at(x, z) + PLAYER_HEIGHT, z)), 120);
     assert!(settled.grounded, "should start the walk settled on the ramp");
 
-    let downhill = StepInput { move_dir: Vec3::new(-1.0, 0.0, 0.0), jump: false, jump_held: false };
+    let downhill = StepInput { move_dir: Vec3::new(-1.0, 0.0, 0.0), jump: false };
     let mut state = settled;
     let mut prev_y = state.motion.position.y;
     for i in 0..240 {
@@ -290,7 +292,7 @@ fn walking_off_a_ledge_taller_than_the_glue_goes_airborne() {
     assert!(on_box.grounded, "should be standing on the box");
     assert!(base_height(on_box.motion.position) > FLAT_HEIGHT_M + drop - 0.1, "should rest on the box top");
 
-    let off = StepInput { move_dir: Vec3::new(1.0, 0.0, 0.0), jump: false, jump_held: false };
+    let off = StepInput { move_dir: Vec3::new(1.0, 0.0, 0.0), jump: false };
     let mut state = on_box;
     let mut went_airborne = false;
     for _ in 0..120 {
@@ -318,15 +320,15 @@ fn a_jump_from_a_downhill_walk_still_leaves_the_ground() {
     let downhill = Vec3::new(-1.0, 0.0, 0.0);
     let mut state = settled;
     for _ in 0..60 {
-        state = sim::step(state, StepInput { move_dir: downhill, jump: false, jump_held: false }, &world);
+        state = sim::step(state, StepInput { move_dir: downhill, jump: false }, &world);
     }
     assert!(state.grounded, "should still be walking the ramp when the jump comes");
     let before = state.motion.position;
 
-    state = sim::step(state, StepInput { move_dir: downhill, jump: true, jump_held: true }, &world);
+    state = sim::step(state, StepInput { move_dir: downhill, jump: true }, &world);
     assert!(!state.grounded, "the jump step must leave the ground");
     for _ in 0..5 {
-        state = sim::step(state, StepInput { move_dir: downhill, jump: false, jump_held: true }, &world);
+        state = sim::step(state, StepInput { move_dir: downhill, jump: false }, &world);
     }
     assert!(!state.grounded, "should still be rising shortly after the jump");
     assert!(
@@ -350,18 +352,17 @@ fn an_identical_scripted_run_reproduces_bitwise() {
         assert_eq!(bits(a.motion.position), bits(b.motion.position), "position differs at step {i}");
         assert_eq!(bits(a.motion.velocity), bits(b.motion.velocity), "velocity differs at step {i}");
         assert_eq!(a.grounded, b.grounded, "grounded flag differs at step {i}");
-        // The precision kit grew the stepped state: the forgiveness timers and flags must replay
-        // exactly too, or a divergence could hide in state the position has not expressed yet.
+        // The precision kit grew the stepped state: the forgiveness timers must replay exactly
+        // too, or a divergence could hide in state the position has not expressed yet.
         assert_eq!(a.air_jumps, b.air_jumps, "air jumps differ at step {i}");
         assert_eq!(a.coyote.to_bits(), b.coyote.to_bits(), "coyote grace differs at step {i}");
-        assert_eq!(a.cut_armed, b.cut_armed, "cut arming differs at step {i}");
     }
 }
 
 #[test]
 fn the_scripted_run_actually_exercises_the_arcs() {
-    // Guard against a degenerate script silently passing the bitwise test: the run really did fall,
-    // land, reach the wall, leave the ground on the jump, and slide along the wall.
+    // Guard against a degenerate script silently passing the bitwise test: the run really did
+    // fall, land, stop at the wall, leave the ground on the jump, and slide along the wall.
     let world = fixture_world();
     let inputs = scripted_inputs();
     let traj = run(&world, &inputs);
@@ -369,15 +370,23 @@ fn the_scripted_run_actually_exercises_the_arcs() {
     assert!(!traj[0].grounded, "the run starts in the air");
     assert!(traj[89].grounded, "the idle phase should end landed on the flat ground");
 
+    // The head-on walk ends stopped at the wall's face: under the wall-stop policy the contact
+    // kills the run outright, and with the approach exactly head-on (no tangential component to
+    // kill) the body sits where the engine's projection would also have left it - pinned.
     let pin = WALL_NEAR_X - PLAYER_RADIUS;
     let at_wall = &traj[239];
     assert!(at_wall.motion.position.x <= pin + 1e-2, "penetrated the wall: x = {}", at_wall.motion.position.x);
     assert!(at_wall.motion.position.x >= pin - 1e-1, "never reached the wall: x = {}", at_wall.motion.position.x);
+    let stopped = at_wall.motion.velocity;
+    assert!(
+        Vec3::new(stopped.x, 0.0, stopped.z).length() < 1e-3,
+        "the head-on contact must read as a stop: {stopped:?}"
+    );
 
-    // The jump at step 240, held through the apex so the cut never fires: airborne shortly
-    // after, having gained real height. Five steps in, the uncut arc has climbed most of a metre
-    // (the launch velocity is 10 m/s and ascent gravity has only shaved ~0.7 m/s per step's
-    // worth); 0.2m is the loose floor that still catches a cut or dead jump.
+    // The jump at step 240 flies the full authored arc: airborne shortly after, having gained
+    // real height. Five steps in, the arc has climbed most of a metre (the launch velocity is
+    // 10 m/s and ascent gravity has only shaved ~0.7 m/s per step's worth); 0.2m is the loose
+    // floor that still catches a dead jump.
     assert!(!traj[245].grounded, "the jump should leave the ground");
     assert!(
         traj[245].motion.position.y > traj[239].motion.position.y + 0.2,
@@ -386,7 +395,8 @@ fn the_scripted_run_actually_exercises_the_arcs() {
         traj[245].motion.position.y
     );
 
-    // The diagonal phase slides along the wall: z advances, x stays pinned.
+    // The glancing phase (outside the stop window) slides along the wall: z advances, x stays
+    // pinned.
     let before = &traj[299];
     let last = traj.last().unwrap();
     assert!(last.motion.position.z > before.motion.position.z + 2.0, "should have slid along the wall in z");

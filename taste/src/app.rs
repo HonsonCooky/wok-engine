@@ -15,10 +15,9 @@
 //! player, a true capsule mesh generated at the collider's exact dimensions (`wok_mesh::capsule_mesh`
 //! paired with `Capsule::upright`) in a color nothing else uses. Prefabs crossing the eye-to-anchor
 //! segment draw partially faded (`crate::fade`, taste-only: neither the editor nor the viewer has a
-//! player to occlude). F1 toggles the hitbox overlay
-//! (`crate::debug`): every static collider and the player capsule as line cages, drawn x-ray
-//! through the renderer's debug line pass after the meshes so the cages read through the very
-//! geometry they describe.
+//! player to occlude). F1 cycles the hitbox overlay (`crate::debug`) through its modes - off,
+//! depth-tested faces, x-ray drawn shapes, x-ray everything - drawn through the renderer's debug
+//! line pass after the meshes, each mode with its own depth policy.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -35,11 +34,11 @@ use wok_scene::{Aabb, ChunkCoord, Primitive, SurfaceTag, VisibleItem};
 
 use crate::clock::FixedClock;
 use crate::constants::{
-    DEBUG_GROUND_MARKER, DEBUG_HITBOXES, MAX_STEPS_PER_FRAME, PLAYER_COLOR, PLAYER_RADIUS,
+    DEBUG_GROUND_MARKER, MAX_STEPS_PER_FRAME, PLAYER_COLOR, PLAYER_RADIUS,
     PLAYER_SEGMENT, SHOW_RETICLE, SIM_DT,
 };
 use crate::content::LoadedContent;
-use crate::debug;
+use crate::debug::{self, OverlayMode};
 use crate::fade::{OcclusionFade, segment_hits_aabb};
 use crate::follow::{self, FollowCamera};
 use crate::intent::{Intent, map_input};
@@ -117,8 +116,8 @@ pub struct TasteApp {
     fade: OcclusionFade,
     clock: FixedClock,
     size: (u32, u32),
-    /// The hitbox overlay (`crate::debug`), seeded from `DEBUG_HITBOXES` and flipped by F1.
-    debug_hitboxes: bool,
+    /// The hitbox overlay's mode (`crate::debug`), starting off and cycled by F1.
+    overlay: OverlayMode,
     gpu: Option<Gpu>,
 }
 
@@ -148,7 +147,7 @@ impl TasteApp {
             fade: OcclusionFade::new(),
             clock: FixedClock::new(SIM_DT, MAX_STEPS_PER_FRAME),
             size: (0, 0),
-            debug_hitboxes: DEBUG_HITBOXES,
+            overlay: OverlayMode::default(),
             gpu: None,
         })
     }
@@ -159,19 +158,14 @@ impl TasteApp {
     /// first step that can jump - `Player::can_jump`: grounded, inside the coyote window, or with
     /// an air jump in hand - inside the buffer window, and is consumed there, so a multi-step
     /// catch-up frame still cannot bounce twice on one press, and a zero-step frame cannot eat the
-    /// double jump. The held level rides along unlatched: it is state, not an edge, so whichever
-    /// step samples it sees the truth, and the cut inside the step reads the release from it.
+    /// double jump.
     fn simulate(&mut self, intent: &Intent, steps: u32) {
         if intent.jump {
             self.jump.press();
         }
         let move_dir = sim::move_direction(self.camera.yaw, intent.move_forward, intent.move_right);
         for _ in 0..steps {
-            let input = StepInput {
-                move_dir,
-                jump: self.jump.consume(self.player.can_jump()),
-                jump_held: intent.jump_held,
-            };
+            let input = StepInput { move_dir, jump: self.jump.consume(self.player.can_jump()) };
             self.player_prev = self.player;
             self.player = sim::step(self.player, input, &self.world);
         }
@@ -265,18 +259,19 @@ impl TasteApp {
             self.shadow_region,
             &items,
         );
-        // Two line-pass submissions, one per depth policy. The F1 hitbox cages draw x-ray: they
-        // describe colliders the drawn geometry encloses, so depth-tested they hide behind the
-        // very surfaces they diagnose. The look-ahead reticle stays depth-tested: it is a
-        // world-anchored framing cue, and reading through hills would lie about where it sits.
-        if self.debug_hitboxes {
+        // Two line-pass submissions, depth policy per source. The hitbox overlay's policy is the
+        // mode's own (`OverlayMode::depth`): Faces compares cage edges against drawn surfaces, so
+        // it tests; the x-ray modes read through the very geometry their cages describe. The
+        // look-ahead reticle stays depth-tested: it is a world-anchored framing cue, and reading
+        // through hills would lie about where it sits.
+        if self.overlay != OverlayMode::Off {
             renderer.render_lines(
                 &ctx.platform.device,
                 &ctx.platform.queue,
                 &mut frame.encoder,
                 &frame.view,
-                &debug::debug_lines(&self.world, view_pos),
-                DepthMode::XRay,
+                &debug::overlay_lines(self.overlay, &self.world, view_pos),
+                self.overlay.depth(),
             );
         }
         if SHOW_RETICLE {
@@ -315,6 +310,8 @@ impl App for TasteApp {
         // Diagnostic: which present mode the platform picked (vsync was requested; AutoVsync and
         // Fifo honour it). Jitter hunting starts with knowing whether frames are paced at all.
         println!("taste: present mode {:?}", config.present_mode);
+        // The overlay's controls are invisible in play until used; the one line documents them.
+        println!("taste: F1 cycles the hitbox overlay: off -> faces -> visible -> all");
         let renderer = Renderer::new(&platform.device, config.format, config.width, config.height);
         self.size = (config.width, config.height);
 
@@ -341,10 +338,10 @@ impl App for TasteApp {
             self.size = (ctx.width, ctx.height);
         }
 
-        // The overlay toggle reads the raw input directly: it is a diagnostic, not part of what
+        // The overlay cycle reads the raw input directly: it is a diagnostic, not part of what
         // the player meant, so it stays out of the Intent the simulation consumes.
         if ctx.input.key_pressed(NamedKey::F1) {
-            self.debug_hitboxes = !self.debug_hitboxes;
+            self.overlay = self.overlay.next();
         }
 
         let intent = map_input(&ctx.input, ctx.dt);

@@ -24,10 +24,19 @@
 //!   of re-colliding with it every iteration and stalling at the cap. On an exactly flat top the
 //!   second projection is a bitwise no-op.
 //!
-//! Wall-grade contacts (below the threshold) and every unsupported resolution - airborne motion,
-//! corner grazes, the body past an edge - keep true normals, so wall slides, deflections around
-//! round shapes, and genuine edge departures are untouched. Terrain is not in scope at all: it
-//! grounds through its own rest path in `sim::step`.
+//! Unsupported resolutions with a ground-grade normal - airborne motion, corner grazes, the body
+//! past an edge - keep true normals, so deflections around round shapes and genuine edge
+//! departures are untouched. Terrain is not in scope at all: it grounds through its own rest path
+//! in `sim::step`.
+//!
+//! Wall-grade contacts (normal below the ground threshold) carry the second policy, the incidence
+//! stop: when the horizontal motion points within `WALL_STOP_DEG` of straight into the wall, the
+//! tangential redirect is killed - the horizontal motion and velocity die in the contact, and the
+//! player stops at the wall instead of skating along it (the play verdict: running at a wall
+//! should read as running INTO it). Vertical motion is exempt - it is projected onto the true
+//! plane as always, so gravity still slides a body down a wall - and contacts outside the window
+//! (glancing approaches) slide exactly as the engine resolves them, bit for bit. A flat ceiling
+//! has no horizontal normal to measure incidence against, so it always takes the engine path.
 //!
 //! Deterministic: a fixed iteration cap, the engine sweep's slice-order contract, the support
 //! probe's fixed arithmetic; no RNG, no state.
@@ -35,7 +44,7 @@
 use glam::Vec3;
 use wok_physics::{Capsule, Collider, SlideResult, sweep_capsule_colliders};
 
-use crate::constants::{WALKABLE_COS, WALKABLE_NORMAL_Y};
+use crate::constants::{WALKABLE_COS, WALKABLE_NORMAL_Y, WALL_STOP_DEG};
 use crate::landing::supported_below;
 
 /// Small separation kept between the capsule and surfaces while sliding: the engine slide's value,
@@ -83,6 +92,13 @@ pub fn slide_player(capsule: Capsule, displacement: Vec3, velocity: Vec3, collid
                     // then the true plane so surviving horizontal motion follows the surface.
                     remaining = project_on_plane(project_on_plane(leftover, Vec3::Y), hit.normal);
                     velocity = project_on_plane(project_on_plane(velocity, Vec3::Y), hit.normal);
+                } else if hit.normal.y < WALKABLE_NORMAL_Y && head_on(leftover, hit.normal) {
+                    // The wall stop: inside the incidence window the tangential redirect dies -
+                    // only the vertical part of the motion and velocity survives, projected onto
+                    // the true plane so a tilted wall is still never pushed into. On an exactly
+                    // vertical wall that projection is a no-op and the body simply stops.
+                    remaining = project_on_plane(Vec3::new(0.0, leftover.y, 0.0), hit.normal);
+                    velocity = project_on_plane(Vec3::new(0.0, velocity.y, 0.0), hit.normal);
                 } else {
                     // True-normal resolution: the engine's own projection, bit for bit.
                     remaining = project_on_plane(leftover, hit.normal);
@@ -99,6 +115,20 @@ pub fn slide_player(capsule: Capsule, displacement: Vec3, velocity: Vec3, collid
 /// length (the sweep's normals are, and so is +Y).
 fn project_on_plane(v: Vec3, normal: Vec3) -> Vec3 {
     v - normal * v.dot(normal)
+}
+
+/// Is this wall contact head-on: does the horizontal part of `motion` point within `WALL_STOP_DEG`
+/// of straight into the wall (the wall's inward horizontal direction, `-normal` flattened)? The
+/// comparison `-h.dot(w) >= |h| * |w| * cos(window)` is the angle test without normalizing; the
+/// strict `> 0.0` guard makes the degenerate cases false: no horizontal motion means no incidence
+/// to measure (a pure vertical graze keeps the engine resolve), and no horizontal normal means a
+/// flat ceiling or floor, which this policy never touches. Inclusive at the window's edge,
+/// matching "within".
+fn head_on(motion: Vec3, normal: Vec3) -> bool {
+    let h = Vec3::new(motion.x, 0.0, motion.z);
+    let w = Vec3::new(normal.x, 0.0, normal.z);
+    let into_wall = -h.dot(w);
+    into_wall > 0.0 && into_wall >= h.length() * w.length() * WALL_STOP_DEG.to_radians().cos()
 }
 
 #[cfg(test)]
@@ -135,20 +165,88 @@ mod tests {
         Vec3::new(center.x + d, bottom_sphere_y - PLAYER_RADIUS + PLAYER_HEIGHT * 0.5 + 0.002, center.z)
     }
 
+    // ---- the wall stop's incidence window ----
+    //
+    // One wall along z, near face at x = 65 (inward normal -x), and a capsule a nudge from it so
+    // every approach below genuinely contacts: the old bitwise wall test started 0.55m out with a
+    // 0.25m motion and never touched the wall at all, so it pinned nothing.
+
+    fn wall() -> [Collider; 1] {
+        [Collider::from(Aabb::new(Vec3::new(65.0, 0.0, 0.0), Vec3::new(66.0, 6.0, 128.0)))]
+    }
+
+    fn at_the_wall() -> Capsule {
+        upright(Vec3::new(64.5, 2.75, 64.0))
+    }
+
+    /// One walk-speed step's motion and velocity at `degrees` off head-on (+x is straight into the
+    /// wall, the tangent runs +z).
+    fn approach(degrees: f32) -> (Vec3, Vec3) {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let dir = Vec3::new(cos, 0.0, sin);
+        (dir * (crate::constants::MOVE_SPEED * SIM_DT), dir * crate::constants::MOVE_SPEED)
+    }
+
     #[test]
-    fn a_wall_slide_is_bitwise_the_engines() {
-        // Wall-grade contacts never qualify for the flat resolve, so the policy slide must hand
-        // back exactly the engine's answer: direction, position, and grounded flag, bit for bit.
-        let statics = [
-            Collider::from(Aabb::new(Vec3::new(65.0, 0.0, 0.0), Vec3::new(66.0, 6.0, 128.0))),
-            Collider::from(Aabb::new(Vec3::new(0.0, 0.0, 70.0), Vec3::new(128.0, 6.0, 71.0))),
-        ];
-        let cap = upright(Vec3::new(64.0, 2.75, 64.0));
-        let d = Vec3::new(0.2, -0.01, 0.15);
-        let v = Vec3::new(7.0, -0.7, 5.0);
+    fn a_head_on_wall_contact_stops_dead() {
+        // The verdict's centre: running straight at a wall ends the run. The body pins at the
+        // wall's face and the whole velocity dies - nothing redirects, nothing skates.
+        let statics = wall();
+        let cap = at_the_wall();
+        let (d, v) = approach(0.0);
+        let r = slide_player(cap, d, v, &statics);
+        assert_eq!(r.velocity, Vec3::ZERO, "a head-on hit must kill the velocity outright");
+        assert_eq!(r.position.z, cap.center().z, "no tangential drift out of a head-on hit");
+        assert!(r.position.x <= 65.0 - PLAYER_RADIUS, "the body stays outside the wall");
+        assert!(r.position.x > cap.center().x, "the pre-contact advance still happens");
+    }
+
+    #[test]
+    fn a_30_degree_approach_stops_where_the_engine_would_skate() {
+        // Inside the window but off-axis: the engine's projection would keep most of the
+        // tangential motion (the skate the verdict rejected); the policy kills it. The engine
+        // fixture pin alongside proves the test sits where the two genuinely diverge.
+        let statics = wall();
+        let cap = at_the_wall();
+        let (d, v) = approach(30.0);
+
+        let engines = collide_and_slide(cap, d, v, &statics, Vec3::Y, WALKABLE_COS);
+        assert!(engines.velocity.z > 1.0, "fixture: the engine must show the skate this stops");
+
+        let ours = slide_player(cap, d, v, &statics);
+        assert_eq!(ours.velocity, Vec3::ZERO, "inside the window the redirect dies");
+        assert!(
+            ours.position.z < engines.position.z,
+            "the stop must not travel the engine's tangential distance"
+        );
+    }
+
+    #[test]
+    fn a_60_degree_approach_slides_bitwise_as_the_engine() {
+        // Outside the window, glancing contacts are not the policy's business: position, velocity,
+        // and grounded flag must be the engine's answer bit for bit.
+        let statics = wall();
+        let cap = at_the_wall();
+        let (d, v) = approach(60.0);
         let ours = slide_player(cap, d, v, &statics);
         let engines = collide_and_slide(cap, d, v, &statics, Vec3::Y, WALKABLE_COS);
-        assert_eq!(ours, engines, "wall resolution must be the engine's, unchanged");
+        assert_eq!(ours, engines, "a glancing wall contact must be the engine's, unchanged");
+        assert!(ours.velocity.z > 1.0, "fixture: the glancing approach really does keep sliding");
+    }
+
+    #[test]
+    fn gravity_still_falls_through_a_head_on_stop() {
+        // The vertical exemption: a falling body that hits the wall head-on loses its run, not
+        // its fall - the wall is vertical, so the downward velocity survives untouched (bitwise:
+        // projecting a vertical vector onto a vertical wall's plane is a no-op).
+        let statics = wall();
+        let cap = at_the_wall();
+        let (mut d, mut v) = approach(0.0);
+        d.y = -0.02;
+        v.y = -3.0;
+        let r = slide_player(cap, d, v, &statics);
+        assert_eq!(r.velocity, Vec3::new(0.0, -3.0, 0.0), "the fall must survive the wall stop");
+        assert!(r.position.y < cap.center().y, "the body keeps descending along the wall");
     }
 
     #[test]
@@ -208,7 +306,7 @@ mod tests {
         let raw = Heightmap::meters_to_raw(height_m);
         let heightmap =
             Heightmap::new(vec![raw; CHUNK_GRID_LEN], vec![SurfaceTag::new("g")], vec![0; CHUNK_GRID_LEN]).unwrap();
-        World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }] }
+        World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }], ..World::default() }
     }
 
     fn standing(x: f32, z: f32, base_y: f32) -> Player {
@@ -217,7 +315,6 @@ mod tests {
             grounded: false,
             air_jumps: AIR_JUMPS,
             coyote: 0.0,
-            cut_armed: false,
         }
     }
 
@@ -291,7 +388,7 @@ mod tests {
         }
         assert!(p.grounded, "fixture: should stand on the crate top");
 
-        let off = StepInput { move_dir: Vec3::X, jump: false, jump_held: false };
+        let off = StepInput { move_dir: Vec3::X, jump: false };
         let mut went_airborne = false;
         for _ in 0..180 {
             p = sim::step(p, off, &world);

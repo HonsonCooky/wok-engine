@@ -120,7 +120,11 @@ mod tests {
         let raw = Heightmap::meters_to_raw(2.0);
         let heightmap =
             Heightmap::new(vec![raw; CHUNK_GRID_LEN], vec![SurfaceTag::new("g")], vec![0; CHUNK_GRID_LEN]).unwrap();
-        let world = World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }] };
+        let world = World {
+            statics: vec![],
+            terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }],
+            ..World::default()
+        };
         // Near the apex of a jump: airborne, barely rising, the air jump unspent, the coyote
         // grace long expired.
         let p = Player {
@@ -128,14 +132,13 @@ mod tests {
             grounded: false,
             air_jumps: crate::constants::AIR_JUMPS,
             coyote: 0.0,
-            cut_armed: false,
         };
 
         let mut latch = JumpLatch::new();
         latch.press(); // the frame that raised this edge ran zero fixed steps
         let fired = latch.consume(p.can_jump());
         assert!(fired, "an airborne step with an air jump in hand consumes the press");
-        let next = sim::step(p, StepInput { move_dir: Vec3::ZERO, jump: fired, jump_held: true }, &world);
+        let next = sim::step(p, StepInput { move_dir: Vec3::ZERO, jump: fired }, &world);
         assert!(
             (next.motion.velocity.y - (JUMP_VELOCITY * AIR_JUMP_SCALE - ASCENT_GRAVITY * crate::constants::SIM_DT))
                 .abs()

@@ -22,7 +22,7 @@ fn flat_world(height_m: f32) -> World {
     let raw = Heightmap::meters_to_raw(height_m);
     let heightmap =
         Heightmap::new(vec![raw; CHUNK_GRID_LEN], vec![SurfaceTag::new("g")], vec![0; CHUNK_GRID_LEN]).unwrap();
-    World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }] }
+    World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }], ..World::default() }
 }
 
 /// A player standing at rest mid-chunk: capsule base exactly on the surface, grounded (carrying
@@ -34,7 +34,6 @@ fn at_rest(world: &World) -> Player {
         grounded: true,
         air_jumps: AIR_JUMPS,
         coyote: COYOTE_S,
-        cut_armed: false,
     }
 }
 
@@ -46,7 +45,6 @@ fn airborne_at_speed(velocity: Vec3) -> Player {
         grounded: false,
         air_jumps: AIR_JUMPS,
         coyote: 0.0,
-        cut_armed: false,
     }
 }
 
@@ -62,7 +60,7 @@ fn an_airborne_reversal_redirects_without_passing_through_a_stop() {
     let world = flat_world(2.0);
     let entry = MOVE_SPEED;
     let mut p = airborne_at_speed(Vec3::new(entry, 0.0, 0.0));
-    let back = StepInput { move_dir: Vec3::NEG_X, jump: false, jump_held: false };
+    let back = StepInput { move_dir: Vec3::NEG_X, jump: false };
     let steps = (std::f32::consts::PI / AIR_TURN_RATE / SIM_DT).ceil() as usize;
     for i in 0..steps {
         p = sim::step(p, back, &world);
@@ -78,7 +76,7 @@ fn an_airborne_reversal_redirects_without_passing_through_a_stop() {
 #[test]
 fn the_double_jump_fires_airborne_exactly_once_and_resets_on_landing() {
     let world = flat_world(2.0);
-    let jump = StepInput { move_dir: Vec3::ZERO, jump: true, jump_held: true };
+    let jump = StepInput { move_dir: Vec3::ZERO, jump: true };
 
     // Ground jump, then the air jump: vertical velocity is set to the scaled launch speed. The
     // ground jump consumed the coyote grace, so the second press cannot fire a second free ground
@@ -120,13 +118,13 @@ fn the_air_jump_redirects_to_the_stick_at_current_speed() {
     let world = flat_world(2.0);
     let entry = 5.0;
     let p = airborne_at_speed(Vec3::new(entry, 0.0, 0.0));
-    let turned = sim::step(p, StepInput { move_dir: Vec3::Z, jump: true, jump_held: true }, &world);
+    let turned = sim::step(p, StepInput { move_dir: Vec3::Z, jump: true }, &world);
     // One steer step rotates first; the jump then redirects fully, so the heading is exactly
     // the stick's and the magnitude is the steered speed.
     assert!(turned.motion.velocity.x.abs() < EPS, "the old heading is gone: {:?}", turned.motion.velocity);
     assert!(turned.motion.velocity.z > 0.9 * entry, "the speed survives the redirect: {:?}", turned.motion.velocity);
 
-    let kept = sim::step(p, StepInput { move_dir: Vec3::ZERO, jump: true, jump_held: true }, &world);
+    let kept = sim::step(p, StepInput { move_dir: Vec3::ZERO, jump: true }, &world);
     assert!(
         (kept.motion.velocity.x - entry).abs() < EPS && kept.motion.velocity.z.abs() < EPS,
         "no stick keeps the current heading: {:?}",

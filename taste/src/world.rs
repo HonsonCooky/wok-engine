@@ -40,10 +40,21 @@ pub struct ChunkTerrain {
     pub heightmap: Heightmap,
 }
 
-/// Everything the fixed-step loop collides against, reduced once after content load.
+/// Everything the fixed-step loop collides against, reduced once after content load - plus the
+/// overlay-only arrays the hitbox overlay reads, carried through the same reduction so the cages
+/// it draws can never drift from the colliders the simulation actually uses.
+#[derive(Default)]
 pub struct World {
     /// Solid hitboxes from every loaded chunk, classified into world-space colliders.
     pub statics: Vec<Collider>,
+    /// Parallel to `statics`: whether each collider's placeholder geometry draws (the slicer's
+    /// `also_visible`, see `wok_scene::Hitbox`). Overlay-only - the simulation never reads it;
+    /// the overlay reads it defensively (missing entries read visible) so hand-built test worlds
+    /// need not fill it.
+    pub statics_visible: Vec<bool>,
+    /// Trigger volumes classified into world-space colliders, for the overlay's all-cages mode
+    /// only: the simulation never collides with a trigger, so they stay out of `statics`.
+    pub trigger_volumes: Vec<Collider>,
     /// Terrain per chunk that has it, in the store's deterministic coordinate order.
     pub terrains: Vec<ChunkTerrain>,
 }
@@ -53,18 +64,23 @@ impl World {
     /// store's coordinate order, so identical content produces identical arrays (the determinism
     /// contract carried through the reduction).
     pub fn from_store(store: &ChunkStore) -> World {
-        let mut statics = Vec::new();
-        let mut terrains = Vec::new();
+        let mut world = World::default();
         for (coord, runtime) in store.iter_loaded() {
             let origin = chunk_origin(coord);
             for hitbox in &runtime.hitboxes {
-                statics.push(classify_collider(hitbox.primitive, hitbox.transform).translated(origin));
+                world.statics.push(classify_collider(hitbox.primitive, hitbox.transform).translated(origin));
+                world.statics_visible.push(hitbox.also_visible);
+            }
+            for trigger in &runtime.triggers {
+                world
+                    .trigger_volumes
+                    .push(classify_collider(trigger.primitive, trigger.transform).translated(origin));
             }
             if let Some(heightmap) = runtime.heightmap.clone() {
-                terrains.push(ChunkTerrain { origin, heightmap });
+                world.terrains.push(ChunkTerrain { origin, heightmap });
             }
         }
-        World { statics, terrains }
+        world
     }
 
     /// World-space bounds of everything the loaded chunks hold - terrain plus placed visible and
@@ -141,8 +157,8 @@ mod tests {
         // the drawn surface would shear apart by the difference - the diagnosis item A3.
         let coord = ChunkCoord::new(2, -1);
         let world = World {
-            statics: vec![],
             terrains: vec![ChunkTerrain { origin: chunk_origin(coord), heightmap: flat(3.0) }],
+            ..World::default()
         };
         let local = glam::Vec3::new(40.25, 3.0, 100.5);
         let world_point = glam::Mat4::from_translation(chunk_origin(coord)).transform_point3(local);
@@ -153,15 +169,69 @@ mod tests {
     #[test]
     fn terrain_under_resolves_by_chunk_extent() {
         let world = World {
-            statics: vec![],
             terrains: vec![
                 ChunkTerrain { origin: chunk_origin(ChunkCoord::new(0, 0)), heightmap: flat(1.0) },
                 ChunkTerrain { origin: chunk_origin(ChunkCoord::new(1, 0)), heightmap: flat(2.0) },
             ],
+            ..World::default()
         };
         assert_eq!(world.terrain_under(64.0, 64.0).unwrap().origin.x, 0.0);
         assert_eq!(world.terrain_under(200.0, 64.0).unwrap().origin.x, 128.0);
         assert!(world.terrain_under(64.0, -10.0).is_none(), "off the south edge is no chunk");
         assert!(world.terrain_under(300.0, 64.0).is_none(), "past the last chunk is no chunk");
+    }
+
+    #[test]
+    fn the_reduction_carries_visibility_and_triggers_for_the_overlay() {
+        // The overlay's data path through the real store: a chunk holding a solid placeholder
+        // (drawn), a mesh-replaced solid (collides, placeholder not drawn), and a trigger volume
+        // must reduce to two statics with [true, false] visibility in placement order, plus the
+        // trigger classified separately - and the trigger must never reach `statics`.
+        use std::collections::HashMap;
+        use wok_content::ChunkStore;
+        use wok_scene::{
+            Chunk, ChunkStreaming, InstanceId, MeshRef, Placement, Prefab, PrefabRef, PrefabState, Primitive,
+            Shape, Transform,
+        };
+
+        let shape = |is_visible: bool| Shape {
+            primitive: Primitive::Cube,
+            transform: Transform::IDENTITY,
+            surface: None,
+            is_hitbox: true,
+            is_visible,
+        };
+        let prefab = |visible: bool, mesh: Option<MeshRef>| Prefab {
+            states: vec![PrefabState { name: "default".into(), shapes: vec![shape(visible)], mesh }],
+            default_state: "default".into(),
+        };
+        let place = |name: &str, id: u32, x: f32| Placement {
+            prefab: PrefabRef::new(name),
+            instance_id: InstanceId(id),
+            name: None,
+            transform: Transform { translation: Vec3::new(x, 1.0, 4.0), ..Transform::IDENTITY },
+            state: None,
+        };
+
+        let mut prefabs = HashMap::new();
+        prefabs.insert(PrefabRef::new("crate"), prefab(true, None));
+        prefabs.insert(PrefabRef::new("tree"), prefab(true, Some(MeshRef::new("oak"))));
+        prefabs.insert(PrefabRef::new("zone"), prefab(false, None));
+        let chunk = Chunk {
+            coord: ChunkCoord::new(0, 0),
+            placements: vec![place("crate", 1, 4.0), place("tree", 2, 10.0), place("zone", 3, 20.0)],
+            streaming: ChunkStreaming::default(),
+        };
+        let mut store = ChunkStore::new();
+        store.load(chunk, None, &prefabs).expect("the fixture chunk should load");
+
+        let world = World::from_store(&store);
+        assert_eq!(world.statics.len(), 2, "the trigger must stay out of collision");
+        assert_eq!(world.statics_visible, vec![true, false], "drawn crate, mesh-hidden tree");
+        assert_eq!(world.trigger_volumes.len(), 1);
+        assert!(
+            matches!(world.trigger_volumes[0], Collider::Aabb(_)),
+            "the trigger classifies through the same path as the statics"
+        );
     }
 }

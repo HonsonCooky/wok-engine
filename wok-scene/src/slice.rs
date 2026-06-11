@@ -63,6 +63,13 @@ pub struct Hitbox {
     pub primitive: Primitive,
     pub transform: Mat4,
     pub surface: Option<SurfaceTag>,
+    /// Whether this hitbox's own placeholder geometry is drawn. The shape always carries
+    /// `is_visible` (that is what routed it here instead of to the triggers), but under a
+    /// mesh-replaced state the primitive itself never reaches the screen - the mesh draws in its
+    /// place - and a consumer correlating colliders to drawn shapes (a hitbox overlay) cannot
+    /// recover that from the runtime arrays alone, because the hitbox and the mesh item share no
+    /// key. Recorded at the one moment the answer is known: the slice.
+    pub also_visible: bool,
 }
 
 /// One trigger volume, tagged with the placement instance that owns it so game logic can route
@@ -129,6 +136,9 @@ pub fn slice_chunk<S: BuildHasher>(
                         primitive: shape.primitive,
                         transform,
                         surface: shape.surface.clone(),
+                        // Drawn unless a mesh stands in for the state's visible shapes (the same
+                        // condition that suppressed the primitive's visible item above).
+                        also_visible: !has_mesh,
                     });
                 } else {
                     out.triggers.push(Trigger {
@@ -222,6 +232,8 @@ mod tests {
         assert!(sliced.triggers.is_empty());
         assert!(matches!(sliced.visible[0], VisibleItem::Primitive { primitive: Primitive::Cube, .. }));
         assert_eq!(sliced.hitboxes[0].primitive, Primitive::Cube);
+        // The placeholder itself draws, and the hitbox records that.
+        assert!(sliced.hitboxes[0].also_visible);
     }
 
     #[test]
@@ -274,6 +286,10 @@ mod tests {
         // Hitbox and trigger still come from the shapes.
         assert_eq!(sliced.hitboxes.len(), 1);
         assert_eq!(sliced.hitboxes[0].primitive, Primitive::Cylinder);
+        // The cylinder's own placeholder never draws (the mesh stands in for it), and the hitbox
+        // records that: a consumer correlating cages to drawn placeholder geometry must treat
+        // this collider as invisible.
+        assert!(!sliced.hitboxes[0].also_visible);
         assert_eq!(sliced.triggers.len(), 1);
         assert_eq!(sliced.triggers[0].instance, InstanceId(3));
     }

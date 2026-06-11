@@ -5,8 +5,8 @@
 //! the composition the Level 2 locomotion harness proved out (wok-physics/tests/locomotion_replay):
 //!
 //!     steer the horizontal velocity toward intent (grounded approach or air redirection, plus
-//!                                                  the jump impulses, coyote grace, and the
-//!                                                  variable-height cut - the game's policy)
+//!                                                  the jump impulses and coyote grace - the
+//!                                                  game's policy)
 //!     -> integrate one fixed step under gravity   (wok-physics: integrate; ascent gravity while
 //!                                                  rising, the heavier fall gravity otherwise)
 //!     -> collide-and-slide against the statics    (crate::slide over wok-physics's sweep:
@@ -31,7 +31,7 @@ use crate::air;
 use crate::slide::slide_player;
 use crate::constants::{
     AIR_JUMP_SCALE, AIR_JUMPS, ASCENT_GRAVITY, COYOTE_S, FALL_GRAVITY, GROUND_ACCEL, GROUND_FRICTION,
-    JUMP_CUT_FACTOR, JUMP_VELOCITY, MOVE_SPEED, PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT, SNAP_DOWN_DISTANCE,
+    JUMP_VELOCITY, MOVE_SPEED, PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT, SNAP_DOWN_DISTANCE,
     SPAWN_HEIGHT, WALKABLE_COS,
 };
 use crate::landing::supported_below;
@@ -51,10 +51,6 @@ pub struct Player {
     /// airborne press still fires a full ground jump without spending the air jump - the
     /// walked-off-a-ledge forgiveness. Stepped state, so replay covers it.
     pub coyote: f32,
-    /// Whether this ascent still has its jump cut available: armed by every jump (ground, coyote,
-    /// or air), spent by the cut, cleared on grounding. The once-per-jump guarantee behind
-    /// variable jump height.
-    pub cut_armed: bool,
 }
 
 impl Player {
@@ -67,17 +63,13 @@ impl Player {
 }
 
 /// One fixed step's input, already resolved against the camera: a world-space horizontal move
-/// direction of length at most one, whether a jump was asked for, and whether the jump control is
-/// down at all.
+/// direction of length at most one, and whether a jump was asked for. The press is the whole
+/// signal: every jump flies the full authored arc (the play verdict against variable height), so
+/// the simulation never reads how long the control stays down.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct StepInput {
     pub move_dir: Vec3,
     pub jump: bool,
-    /// Is the jump control held this step? A level, not an edge: the jump cut reads the release
-    /// as this going low while the body still rises. A level survives zero-step frames without a
-    /// latch (the state persists until a step samples it), and it is the only release signal both
-    /// devices can supply - the platform exposes no gamepad button-release edge.
-    pub jump_held: bool,
 }
 
 /// The gravity in force for a body whose vertical velocity is `vy`, as the acceleration
@@ -126,7 +118,6 @@ pub fn spawn(world: &World) -> Player {
         grounded: false,
         air_jumps: AIR_JUMPS,
         coyote: 0.0,
-        cut_armed: false,
     }
 }
 
@@ -171,10 +162,10 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     // redirected outright to the current stick direction at the current speed, so the double jump
     // is a full commitment to the new heading; with no stick held the heading is kept. The latch
     // upstream guarantees one press is one jump; this block only decides what a delivered press
-    // does. Every fired jump arms the cut below.
+    // does. Every jump flies the full authored arc: hold duration never enters the simulation
+    // (the play verdict against variable height).
     let mut air_jumps = player.air_jumps;
     let mut coyote = player.coyote;
-    let mut cut_armed = player.cut_armed;
     let mut jumped = false;
     if input.jump {
         if player.grounded || coyote > 0.0 {
@@ -192,17 +183,6 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
             jumped = true;
         }
         coyote = 0.0;
-        cut_armed |= jumped;
-    }
-
-    // Variable jump height: the first step that finds the jump control released while the body
-    // still rises scales the climb by JUMP_CUT_FACTOR and disarms - once per jump, ground or air.
-    // Reading the held level (rather than a release edge) means a press-and-release that fired
-    // from the buffer on the landing step cuts immediately: a tap is a short hop however the
-    // press was delivered.
-    if cut_armed && !input.jump_held && m.velocity.y > 0.0 {
-        m.velocity.y *= JUMP_CUT_FACTOR;
-        cut_armed = false;
     }
 
     // One fixed step under gravity - ascent gravity while rising, the heavier fall gravity
@@ -262,13 +242,11 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
         }
     }
 
-    // Any grounding restores the air jumps and refreshes the coyote grace (and retires the cut:
-    // the next jump arms its own); airborne, the grace burns down one step of simulation time.
-    // The double jump is per airtime, not per life.
+    // Any grounding restores the air jumps and refreshes the coyote grace; airborne, the grace
+    // burns down one step of simulation time. The double jump is per airtime, not per life.
     let air_jumps = if grounded { AIR_JUMPS } else { air_jumps };
     let coyote = if grounded { COYOTE_S } else { (coyote - SIM_DT).max(0.0) };
-    let cut_armed = !grounded && cut_armed;
-    Player { motion: Motion { position, velocity }, grounded, air_jumps, coyote, cut_armed }
+    Player { motion: Motion { position, velocity }, grounded, air_jumps, coyote }
 }
 
 #[cfg(test)]
@@ -319,7 +297,6 @@ mod tests {
             grounded: false,
             air_jumps: AIR_JUMPS,
             coyote: 0.0,
-            cut_armed: false,
         }
     }
 
@@ -349,7 +326,7 @@ mod tests {
         let raw = Heightmap::meters_to_raw(height_m);
         let heightmap =
             Heightmap::new(vec![raw; CHUNK_GRID_LEN], vec![SurfaceTag::new("g")], vec![0; CHUNK_GRID_LEN]).unwrap();
-        World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }] }
+        World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }], ..World::default() }
     }
 
     /// A player standing at rest mid-chunk: capsule base exactly on the surface, grounded (with
@@ -361,7 +338,6 @@ mod tests {
             grounded: true,
             air_jumps: AIR_JUMPS,
             coyote: crate::constants::COYOTE_S,
-            cut_armed: false,
         }
     }
 
@@ -374,7 +350,7 @@ mod tests {
         // Constant-rate approach from rest: v(t) = GROUND_ACCEL * t, so 95% of top speed arrives
         // at 0.95 * MOVE_SPEED / GROUND_ACCEL seconds; the ceil grants the partial step.
         let world = flat_world(2.0);
-        let run = StepInput { move_dir: Vec3::X, jump: false, jump_held: false };
+        let run = StepInput { move_dir: Vec3::X, jump: false };
         let steps = (0.95 * MOVE_SPEED / GROUND_ACCEL / SIM_DT).ceil() as usize;
         let mut p = at_rest(&world);
         for _ in 0..steps {
@@ -411,7 +387,7 @@ mod tests {
         // airborne step from rest gains AIR_CONTROL times the grounded gain, along the stick.
         use crate::constants::AIR_CONTROL;
         let world = flat_world(2.0);
-        let run = StepInput { move_dir: Vec3::X, jump: false, jump_held: false };
+        let run = StepInput { move_dir: Vec3::X, jump: false };
         let ground_dv = step(at_rest(&world), run, &world).motion.velocity.x;
         let airborne = player_at(Vec3::new(64.0, 30.0, 64.0));
         let air_dv = step(airborne, run, &world).motion.velocity.x;

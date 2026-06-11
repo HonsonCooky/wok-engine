@@ -1,28 +1,73 @@
-//! The hitbox overlay: line-cage geometry for the F1 debug toggle (`DEBUG_HITBOXES` is the
-//! default).
+//! The hitbox overlay: line-cage geometry for the F1 diagnostic, in four cycled modes.
 //!
 //! Pure geometry building, no GPU: one call per frame turns the simulation's world into the
 //! `LineSegment` list the renderer's debug line pass draws. The cages show what the fixed-step
-//! loop actually collides with - every world-space static collider in its own true shape (box
-//! cage, sphere rings, cylinder rings-and-verticals) and the player capsule at its exact collider
+//! loop actually collides with - world-space static colliders in their own true shapes (box cage,
+//! sphere rings, cylinder rings-and-verticals) and the player capsule at its exact collider
 //! dimensions - so a play-tester can see collision-vs-visual disagreements directly instead of
 //! inferring them from bumps. The skeleton must match the truth: a sphere drawn as its box would
 //! reintroduce exactly the lie the round colliders removed.
+//!
+//! The modes answer different questions. Faces draws the drawn-shape cages depth-tested, so only
+//! edges on faces the camera can see render: cage and surface compare face by face without x-ray
+//! clutter. Visible draws the same set x-ray, the classic see-collision-through-geometry view.
+//! All adds what the scene hides - trigger volumes and hitboxes whose placeholder never draws
+//! (mesh-replaced states) - in their own color, so the invisible reads as different at a glance.
+//! Which colliders count as drawn comes from the world's `statics_visible` (the slicer's
+//! `also_visible`, carried through the reduction); the player cage rides every drawing mode.
 
 use std::f32::consts::TAU;
 
 use glam::{Quat, Vec3};
 use wok_physics::Collider;
-use wok_render::LineSegment;
+use wok_render::{DepthMode, LineSegment};
 use wok_scene::Aabb;
 
 use crate::constants::{PLAYER_RADIUS, PLAYER_SEGMENT};
 use crate::world::World;
 
-/// Hitbox cages: pure green at full saturation. The overlay draws x-ray (through the geometry it
-/// describes), so a cage line lands on lit surface of any color and must out-shout all of it;
-/// nothing in the scene palette is pure green (the terrain's green is muted).
+/// The hitbox overlay's modes, cycled by F1 in declaration order. Starts off: the overlay is a
+/// diagnostic, not part of the game's look.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OverlayMode {
+    #[default]
+    Off,
+    /// Drawn-shape collider cages, depth-tested: only edges on faces the camera can see render.
+    Faces,
+    /// Drawn-shape collider cages, x-ray: collision read through the geometry it describes.
+    Visible,
+    /// Every collider x-ray - trigger volumes and undrawn hitboxes included, in their own color.
+    All,
+}
+
+impl OverlayMode {
+    /// The next mode in the F1 cycle: Off -> Faces -> Visible -> All -> Off.
+    pub fn next(self) -> OverlayMode {
+        match self {
+            OverlayMode::Off => OverlayMode::Faces,
+            OverlayMode::Faces => OverlayMode::Visible,
+            OverlayMode::Visible => OverlayMode::All,
+            OverlayMode::All => OverlayMode::Off,
+        }
+    }
+
+    /// The depth policy of a drawing mode: Faces exists to compare cage edges against the drawn
+    /// surfaces, so it tests; the other modes read through the very geometry their cages describe,
+    /// which is the point of an x-ray.
+    pub fn depth(self) -> DepthMode {
+        if self == OverlayMode::Faces { DepthMode::Tested } else { DepthMode::XRay }
+    }
+}
+
+/// Hitbox cages: pure green at full saturation. The overlay draws on top of lit surface of any
+/// color and must out-shout all of it; nothing in the scene palette is pure green (the terrain's
+/// green is muted).
 const HITBOX_COLOR: Vec3 = Vec3::new(0.0, 1.0, 0.0);
+
+/// Cages for colliders nothing draws - trigger volumes and mesh-hidden hitboxes, the All mode's
+/// addition: pure cyan, as loud as the hitbox green but unmistakably not it, so a cage with no
+/// geometry inside reads as "invisible by design" rather than as a missing mesh.
+const INVISIBLE_COLOR: Vec3 = Vec3::new(0.0, 1.0, 1.0);
 
 /// The player capsule cage: pure yellow at full saturation, readable over the bean's signal
 /// orange even when the x-ray draw puts the cage on top of the body.
@@ -42,25 +87,44 @@ const RING_SEGMENTS: usize = 16;
 /// Verticals on the capsule cage, evenly spaced around the wall.
 const CAGE_VERTICALS: usize = 4;
 
-/// The frame's debug overlay: every static collider in `world` as a cage in its own shape, plus
-/// the player capsule as a line cage at `player_pos` (the interpolated draw position, so the cage
-/// tracks the drawn bean, not the raw sim step).
-pub fn debug_lines(world: &World, player_pos: Vec3) -> Vec<LineSegment> {
-    let mut lines = Vec::with_capacity(world.statics.len() * 3 * RING_SEGMENTS + 2 * RING_SEGMENTS + CAGE_VERTICALS);
-    for collider in &world.statics {
-        match *collider {
-            Collider::Aabb(ref aabb) => aabb_lines(aabb, &mut lines),
-            Collider::Sphere { center, radius } => sphere_lines(center, radius, &mut lines),
-            Collider::VertCylinder { center, radius, half_height } => {
-                cylinder_lines(center, radius, half_height, &mut lines);
-            }
-            Collider::Obb { center, half_extents, rotation } => {
-                obb_lines(center, half_extents, rotation, &mut lines);
-            }
+/// The frame's hitbox overlay for `mode`: the mode's collider set as cages in their own shapes,
+/// plus the player capsule at `player_pos` (the interpolated draw position, so the cage tracks
+/// the drawn bean, not the raw sim step). Off returns nothing. Missing `statics_visible` entries
+/// read as drawn, so hand-built worlds that only fill `statics` still overlay every collider.
+pub fn overlay_lines(mode: OverlayMode, world: &World, player_pos: Vec3) -> Vec<LineSegment> {
+    let mut lines = Vec::new();
+    if mode == OverlayMode::Off {
+        return lines;
+    }
+    let drawn_only = matches!(mode, OverlayMode::Faces | OverlayMode::Visible);
+    for (i, collider) in world.statics.iter().enumerate() {
+        let drawn = world.statics_visible.get(i).copied().unwrap_or(true);
+        if drawn_only && !drawn {
+            continue;
+        }
+        collider_lines(collider, if drawn { HITBOX_COLOR } else { INVISIBLE_COLOR }, &mut lines);
+    }
+    if mode == OverlayMode::All {
+        for collider in &world.trigger_volumes {
+            collider_lines(collider, INVISIBLE_COLOR, &mut lines);
         }
     }
     capsule_lines(player_pos, &mut lines);
     lines
+}
+
+/// One collider's cage in its own true shape, in `color`.
+fn collider_lines(collider: &Collider, color: Vec3, out: &mut Vec<LineSegment>) {
+    match *collider {
+        Collider::Aabb(ref aabb) => aabb_lines(aabb, color, out),
+        Collider::Sphere { center, radius } => sphere_lines(center, radius, color, out),
+        Collider::VertCylinder { center, radius, half_height } => {
+            rings_and_verticals(center, radius, half_height, color, out);
+        }
+        Collider::Obb { center, half_extents, rotation } => {
+            obb_lines(center, half_extents, rotation, color, out);
+        }
+    }
 }
 
 /// A small three-axis cross at `at`: the camera's look-ahead point, drawn so the framing being
@@ -73,7 +137,7 @@ pub fn reticle_lines(at: Vec3, out: &mut Vec<LineSegment>) {
 }
 
 /// The 12 edges of an AABB.
-fn aabb_lines(aabb: &Aabb, out: &mut Vec<LineSegment>) {
+fn aabb_lines(aabb: &Aabb, color: Vec3, out: &mut Vec<LineSegment>) {
     let (lo, hi) = (aabb.min, aabb.max);
     // Each corner as a bit pattern (x, y, z from lo or hi); an edge joins corners differing in
     // exactly one bit, taken once by only walking toward the hi side.
@@ -87,7 +151,7 @@ fn aabb_lines(aabb: &Aabb, out: &mut Vec<LineSegment>) {
     for i in 0..8 {
         for bit in [1, 2, 4] {
             if i & bit == 0 {
-                out.push(LineSegment { start: corner(i), end: corner(i | bit), color: HITBOX_COLOR });
+                out.push(LineSegment { start: corner(i), end: corner(i | bit), color });
             }
         }
     }
@@ -96,7 +160,7 @@ fn aabb_lines(aabb: &Aabb, out: &mut Vec<LineSegment>) {
 /// The 12 edges of an oriented box: the AABB stroke drawn in the box's own frame, each corner
 /// rotated out by the collider's rotation. The cage must turn with the box - an axis-aligned cage
 /// around a yawed crate would redraw the conservative margin the Obb collider just removed.
-fn obb_lines(center: Vec3, half_extents: Vec3, rotation: Quat, out: &mut Vec<LineSegment>) {
+fn obb_lines(center: Vec3, half_extents: Vec3, rotation: Quat, color: Vec3, out: &mut Vec<LineSegment>) {
     let corner = |i: usize| {
         let local = Vec3::new(
             if i & 1 == 0 { -half_extents.x } else { half_extents.x },
@@ -108,7 +172,7 @@ fn obb_lines(center: Vec3, half_extents: Vec3, rotation: Quat, out: &mut Vec<Lin
     for i in 0..8 {
         for bit in [1, 2, 4] {
             if i & bit == 0 {
-                out.push(LineSegment { start: corner(i), end: corner(i | bit), color: HITBOX_COLOR });
+                out.push(LineSegment { start: corner(i), end: corner(i | bit), color });
             }
         }
     }
@@ -128,16 +192,10 @@ fn circle_lines(center: Vec3, u: Vec3, v: Vec3, radius: f32, color: Vec3, out: &
 
 /// A sphere collider as three orthogonal great circles: the equator plus two meridians, enough
 /// that the cage reads round from any camera angle.
-fn sphere_lines(center: Vec3, radius: f32, out: &mut Vec<LineSegment>) {
-    circle_lines(center, Vec3::X, Vec3::Z, radius, HITBOX_COLOR, out);
-    circle_lines(center, Vec3::X, Vec3::Y, radius, HITBOX_COLOR, out);
-    circle_lines(center, Vec3::Z, Vec3::Y, radius, HITBOX_COLOR, out);
-}
-
-/// A vertical-cylinder collider as a ring at each cap plus verticals spanning the wall: the same
-/// rings-and-verticals stroke as the player capsule, at the collider's exact dimensions.
-fn cylinder_lines(center: Vec3, radius: f32, half_height: f32, out: &mut Vec<LineSegment>) {
-    rings_and_verticals(center, radius, half_height, HITBOX_COLOR, out);
+fn sphere_lines(center: Vec3, radius: f32, color: Vec3, out: &mut Vec<LineSegment>) {
+    circle_lines(center, Vec3::X, Vec3::Z, radius, color, out);
+    circle_lines(center, Vec3::X, Vec3::Y, radius, color, out);
+    circle_lines(center, Vec3::Z, Vec3::Y, radius, color, out);
 }
 
 /// The player capsule as a cage: a ring at each cap equator (where the hemispheres meet the wall,
@@ -162,5 +220,86 @@ fn rings_and_verticals(center: Vec3, radius: f32, half_span: f32, color: Vec3, o
             end: center + on_wall + Vec3::Y * half_span,
             color,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Segments in one box cage and in the player capsule cage, restated from the strokes above
+    /// so the set-selection tests can count cages instead of pattern-matching geometry.
+    const BOX_CAGE: usize = 12;
+    const PLAYER_CAGE: usize = 2 * RING_SEGMENTS + CAGE_VERTICALS;
+
+    fn box_at(x: f32) -> Collider {
+        Collider::from(Aabb::new(Vec3::new(x, 0.0, 0.0), Vec3::new(x + 1.0, 1.0, 1.0)))
+    }
+
+    /// Two statics (one drawn, one mesh-hidden) and one trigger volume: one collider of each
+    /// overlay kind.
+    fn overlay_world() -> World {
+        World {
+            statics: vec![box_at(0.0), box_at(10.0)],
+            statics_visible: vec![true, false],
+            trigger_volumes: vec![box_at(20.0)],
+            ..World::default()
+        }
+    }
+
+    fn count_color(lines: &[LineSegment], color: Vec3) -> usize {
+        lines.iter().filter(|l| l.color == color).count()
+    }
+
+    #[test]
+    fn f1_cycles_off_faces_visible_all_and_around() {
+        let mut mode = OverlayMode::Off;
+        let cycle: Vec<OverlayMode> = (0..5).map(|_| { mode = mode.next(); mode }).collect();
+        assert_eq!(
+            cycle,
+            vec![OverlayMode::Faces, OverlayMode::Visible, OverlayMode::All, OverlayMode::Off, OverlayMode::Faces]
+        );
+    }
+
+    #[test]
+    fn off_draws_nothing_at_all() {
+        assert!(overlay_lines(OverlayMode::Off, &overlay_world(), Vec3::ZERO).is_empty());
+    }
+
+    #[test]
+    fn faces_and_visible_draw_only_the_drawn_shape_cages() {
+        // Both modes select the same set - one drawn box plus the player - and differ only in
+        // depth policy: Faces compares against drawn surfaces, Visible reads through them. A
+        // hitbox whose placeholder never draws stays out of both: there is no face to compare
+        // against and nothing visible to x-ray through.
+        let world = overlay_world();
+        for mode in [OverlayMode::Faces, OverlayMode::Visible] {
+            let lines = overlay_lines(mode, &world, Vec3::ZERO);
+            assert_eq!(lines.len(), BOX_CAGE + PLAYER_CAGE, "{mode:?} draws one box and the player");
+            assert_eq!(count_color(&lines, INVISIBLE_COLOR), 0, "{mode:?} never shows the invisible");
+        }
+        assert_eq!(OverlayMode::Faces.depth(), DepthMode::Tested);
+        assert_eq!(OverlayMode::Visible.depth(), DepthMode::XRay);
+        assert_eq!(OverlayMode::All.depth(), DepthMode::XRay);
+    }
+
+    #[test]
+    fn all_adds_the_invisible_in_its_own_color() {
+        // Every collider cages: the drawn box in hitbox green, the mesh-hidden hitbox and the
+        // trigger volume in the invisible color, so what the scene hides reads as different.
+        let lines = overlay_lines(OverlayMode::All, &overlay_world(), Vec3::ZERO);
+        assert_eq!(lines.len(), 3 * BOX_CAGE + PLAYER_CAGE);
+        assert_eq!(count_color(&lines, HITBOX_COLOR), BOX_CAGE);
+        assert_eq!(count_color(&lines, INVISIBLE_COLOR), 2 * BOX_CAGE);
+        assert_eq!(count_color(&lines, CAPSULE_COLOR), PLAYER_CAGE);
+    }
+
+    #[test]
+    fn a_hand_built_world_without_visibility_flags_draws_every_static() {
+        // Test worlds fill `statics` and nothing else; missing flags must read as drawn, not
+        // silently hide the colliders the overlay exists to show.
+        let world = World { statics: vec![box_at(0.0), box_at(5.0)], ..World::default() };
+        let lines = overlay_lines(OverlayMode::Visible, &world, Vec3::ZERO);
+        assert_eq!(count_color(&lines, HITBOX_COLOR), 2 * BOX_CAGE);
     }
 }

@@ -1,11 +1,12 @@
-//! The precision-kit pins, through the real step: the parameterized jump arc, variable jump
-//! height, coyote time, and their interplay with the buffer and the double jump.
+//! The precision-kit pins, through the real step: the parameterized jump arc, coyote time, and
+//! their interplay with the buffer and the double jump.
 //!
 //! `crate::constants` pins the derived numbers algebraically; these tests drive `sim::step`
 //! itself, so they prove the composition delivers what the parameters promise - the apex arrives
-//! at the authored height and time, a release cuts the climb exactly once, the coyote window
-//! grants a full ground jump without spending the double jump, and a buffered press still lands.
-//! A test-only module like `crate::replay` and `crate::air_feel`.
+//! at the authored height and time (every jump flies the full arc; the play verdict removed
+//! variable height), the coyote window grants a full ground jump without spending the double
+//! jump, and a buffered press still lands. A test-only module like `crate::replay` and
+//! `crate::air_feel`.
 
 // Exact float comparison is intended where it appears: the coyote grace is zeroed by assignment
 // and clamped by `.max(0.0)`, so "exactly 0.0" is the contract, not a tolerance.
@@ -16,7 +17,7 @@ use wok_physics::Motion;
 use wok_scene::{Aabb, CHUNK_GRID_LEN, Heightmap, SurfaceTag};
 
 use crate::constants::{
-    AIR_JUMP_SCALE, AIR_JUMPS, ASCENT_GRAVITY, COYOTE_S, JUMP_APEX_HEIGHT, JUMP_CUT_FACTOR, JUMP_TIME_TO_APEX,
+    AIR_JUMP_SCALE, AIR_JUMPS, ASCENT_GRAVITY, COYOTE_S, JUMP_APEX_HEIGHT, JUMP_TIME_TO_APEX,
     JUMP_VELOCITY, PLAYER_HEIGHT, SIM_DT,
 };
 use crate::jump::JumpLatch;
@@ -29,7 +30,7 @@ fn flat_world(height_m: f32) -> World {
     let raw = Heightmap::meters_to_raw(height_m);
     let heightmap =
         Heightmap::new(vec![raw; CHUNK_GRID_LEN], vec![SurfaceTag::new("g")], vec![0; CHUNK_GRID_LEN]).unwrap();
-    World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }] }
+    World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }], ..World::default() }
 }
 
 /// Flat terrain at 2m with a 2m crate mid-chunk (top face at y = 4): the walk-off ledge the
@@ -49,26 +50,24 @@ fn at_rest(world: &World) -> Player {
         grounded: true,
         air_jumps: AIR_JUMPS,
         coyote: COYOTE_S,
-        cut_armed: false,
     }
 }
 
-fn idle(held: bool) -> StepInput {
-    StepInput { move_dir: Vec3::ZERO, jump: false, jump_held: held }
+fn idle() -> StepInput {
+    StepInput { move_dir: Vec3::ZERO, jump: false }
 }
 
-fn press(held: bool) -> StepInput {
-    StepInput { move_dir: Vec3::ZERO, jump: true, jump_held: held }
+fn press() -> StepInput {
+    StepInput { move_dir: Vec3::ZERO, jump: true }
 }
 
-/// Jump from rest and ride the arc to landing, holding the control for the press step and the
-/// `held_steps - 1` steps after it (0 is a tap: the press itself arrives released). Returns the
-/// trajectory, one entry per step, ending on the landing step.
-fn jump_trajectory(world: &World, held_steps: u32) -> Vec<Player> {
-    let mut p = sim::step(at_rest(world), press(held_steps > 0), world);
+/// Jump from rest and ride the arc to landing. Returns the trajectory, one entry per step, ending
+/// on the landing step.
+fn jump_trajectory(world: &World) -> Vec<Player> {
+    let mut p = sim::step(at_rest(world), press(), world);
     let mut trajectory = vec![p];
     while !p.grounded && trajectory.len() < 240 {
-        p = sim::step(p, idle((trajectory.len() as u32) < held_steps), world);
+        p = sim::step(p, idle(), world);
         trajectory.push(p);
     }
     assert!(p.grounded, "every jump test arc must land again");
@@ -92,14 +91,14 @@ fn apex_of(start_y: f32, trajectory: &[Player]) -> (f32, u32) {
 // ---- the parameterized arc ----
 
 #[test]
-fn a_held_jump_reaches_the_authored_apex_at_the_authored_time() {
-    // The derivation made flesh: stepping the real simulation, a held jump must peak at
+fn a_jump_reaches_the_authored_apex_at_the_authored_time() {
+    // The derivation made flesh: stepping the real simulation, every jump must peak at
     // JUMP_APEX_HEIGHT when JUMP_TIME_TO_APEX has elapsed. The integrator reproduces the constant
     // -gravity parabola exactly, so the only slack is sampling: the true apex falls between fixed
     // steps, at most half a step from the nearest sample (under 3mm of height here).
     let world = flat_world(2.0);
     let start_y = at_rest(&world).motion.position.y;
-    let trajectory = jump_trajectory(&world, u32::MAX);
+    let trajectory = jump_trajectory(&world);
     let (apex, apex_step) = apex_of(start_y, &trajectory);
     assert!((apex - JUMP_APEX_HEIGHT).abs() < 0.01, "apex {apex} vs authored {JUMP_APEX_HEIGHT}");
     let apex_time = apex_step as f32 * SIM_DT;
@@ -116,102 +115,12 @@ fn the_fall_is_shorter_than_the_rise() {
     // down the way it went up.
     let world = flat_world(2.0);
     let start_y = at_rest(&world).motion.position.y;
-    let trajectory = jump_trajectory(&world, u32::MAX);
+    let trajectory = jump_trajectory(&world);
     let (_, apex_step) = apex_of(start_y, &trajectory);
     let descent_steps = trajectory.len() as u32 - apex_step;
     assert!(
         descent_steps < apex_step,
         "descent ({descent_steps} steps) should undercut the rise ({apex_step} steps)"
-    );
-}
-
-// ---- variable jump height ----
-
-#[test]
-fn releasing_mid_ascent_cuts_the_climb_exactly_once() {
-    // The cut's contract, pinned to the velocity: the first released step while rising scales the
-    // vertical velocity by JUMP_CUT_FACTOR (one step of ascent gravity follows), and a second
-    // release later in the same ascent applies gravity alone - once per jump.
-    let world = flat_world(2.0);
-    let mut p = sim::step(at_rest(&world), press(true), &world);
-    for _ in 0..5 {
-        p = sim::step(p, idle(true), &world);
-    }
-    let vy = p.motion.velocity.y;
-    assert!(vy > 0.0, "fixture: must still be rising at the release");
-    p = sim::step(p, idle(false), &world);
-    assert!(
-        (p.motion.velocity.y - (vy * JUMP_CUT_FACTOR - ASCENT_GRAVITY * SIM_DT)).abs() < EPS,
-        "the release must scale the climb by the cut factor: {}",
-        p.motion.velocity.y
-    );
-
-    // Re-hold, then release again while still rising: no second cut.
-    p = sim::step(p, idle(true), &world);
-    let vy = p.motion.velocity.y;
-    assert!(vy > 0.0, "fixture: the cut arc must still be rising for the second release");
-    p = sim::step(p, idle(false), &world);
-    assert!(
-        (p.motion.velocity.y - (vy - ASCENT_GRAVITY * SIM_DT)).abs() < EPS,
-        "a second release in the same ascent must apply gravity alone: {}",
-        p.motion.velocity.y
-    );
-}
-
-#[test]
-fn an_early_release_lowers_the_apex_and_a_tap_is_the_minimum_hop() {
-    // The feel the cut buys: holding sweeps a real range of jump heights. An early release lands
-    // well under the full apex; a tap (press already released) is the floor of that range,
-    // JUMP_CUT_FACTOR^2 of the full height (the cut scales velocity, apex goes with its square).
-    let world = flat_world(2.0);
-    let start_y = at_rest(&world).motion.position.y;
-    let (full, _) = apex_of(start_y, &jump_trajectory(&world, u32::MAX));
-    let (early, _) = apex_of(start_y, &jump_trajectory(&world, 4));
-    let (tap, _) = apex_of(start_y, &jump_trajectory(&world, 0));
-    assert!(early < 0.7 * full, "an early release ({early}) must land well under the full apex ({full})");
-    assert!(tap < early, "the tap ({tap}) is the floor, under the early release ({early})");
-    let min_hop = JUMP_CUT_FACTOR * JUMP_CUT_FACTOR * JUMP_APEX_HEIGHT;
-    assert!((tap - min_hop).abs() < 0.02, "tap apex {tap} vs predicted minimum hop {min_hop}");
-}
-
-#[test]
-fn a_release_after_the_apex_changes_nothing() {
-    // The cut only ever shortens a climb: once the body is falling, releasing is inert, so the
-    // post-release trajectory must be bitwise the held trajectory - the same guarantee replay
-    // leans on, applied to the one input that differs.
-    let world = flat_world(2.0);
-    let held = jump_trajectory(&world, u32::MAX);
-    let released_late = jump_trajectory(&world, 30); // past the ~23-step apex, into the descent
-    assert_eq!(held.len(), released_late.len(), "the arcs must land on the same step");
-    for (i, (a, b)) in held.iter().zip(&released_late).enumerate() {
-        assert_eq!(
-            a.motion.position.y.to_bits(),
-            b.motion.position.y.to_bits(),
-            "a post-apex release must not alter the arc (step {i})"
-        );
-    }
-}
-
-#[test]
-fn the_air_jump_gets_its_own_cut() {
-    // Once per JUMP, not once per airtime: the air jump re-arms the cut, so a release during its
-    // ascent scales it like a ground jump's - both halves of the brief's "works for both".
-    let world = flat_world(2.0);
-    let mut p = sim::step(at_rest(&world), press(true), &world);
-    for _ in 0..3 {
-        p = sim::step(p, idle(true), &world);
-    }
-    p = sim::step(p, press(true), &world); // the air jump, still held
-    for _ in 0..2 {
-        p = sim::step(p, idle(true), &world);
-    }
-    let vy = p.motion.velocity.y;
-    assert!(vy > 0.0, "fixture: the air jump must still be rising at the release");
-    p = sim::step(p, idle(false), &world);
-    assert!(
-        (p.motion.velocity.y - (vy * JUMP_CUT_FACTOR - ASCENT_GRAVITY * SIM_DT)).abs() < EPS,
-        "the air jump's ascent must cut like the ground jump's: {}",
-        p.motion.velocity.y
     );
 }
 
@@ -224,13 +133,12 @@ fn walk_off_the_crate(world: &World) -> Player {
         grounded: false,
         air_jumps: AIR_JUMPS,
         coyote: 0.0,
-        cut_armed: false,
     };
     for _ in 0..60 {
-        p = sim::step(p, idle(false), world);
+        p = sim::step(p, idle(), world);
     }
     assert!(p.grounded, "fixture: should stand on the crate top");
-    let run = StepInput { move_dir: Vec3::X, jump: false, jump_held: false };
+    let run = StepInput { move_dir: Vec3::X, jump: false };
     for _ in 0..120 {
         p = sim::step(p, run, world);
         if !p.grounded {
@@ -249,7 +157,7 @@ fn walking_off_a_ledge_leaves_the_full_jump_available_for_the_window() {
     let mut p = walk_off_the_crate(&world);
     assert!(p.coyote > 0.0, "leaving the ground without jumping must open the coyote window");
 
-    p = sim::step(p, press(true), &world);
+    p = sim::step(p, press(), &world);
     assert!(
         (p.motion.velocity.y - (JUMP_VELOCITY - ASCENT_GRAVITY * SIM_DT)).abs() < EPS,
         "the coyote jump is the full ground jump, not the scaled air jump: {}",
@@ -259,7 +167,7 @@ fn walking_off_a_ledge_leaves_the_full_jump_available_for_the_window() {
     assert_eq!(p.coyote, 0.0, "a jump consumes the coyote grace immediately");
 
     // The double jump is still in hand after the coyote jump.
-    p = sim::step(p, press(true), &world);
+    p = sim::step(p, press(), &world);
     assert_eq!(p.air_jumps, AIR_JUMPS - 1, "the air jump should fire after a coyote jump");
 }
 
@@ -271,12 +179,12 @@ fn the_coyote_window_expires_into_the_air_jump() {
     let mut p = walk_off_the_crate(&world);
     let expiry = (COYOTE_S / SIM_DT).ceil() as u32 + 1;
     for _ in 0..expiry {
-        p = sim::step(p, idle(false), &world);
+        p = sim::step(p, idle(), &world);
     }
     assert!(!p.grounded, "fixture: must still be falling when the window closes");
     assert_eq!(p.coyote, 0.0, "the window must have expired");
 
-    p = sim::step(p, press(true), &world);
+    p = sim::step(p, press(), &world);
     assert!(
         (p.motion.velocity.y - (JUMP_VELOCITY * AIR_JUMP_SCALE - ASCENT_GRAVITY * SIM_DT)).abs() < EPS,
         "past the window the press must spend the air jump: {}",
@@ -291,11 +199,11 @@ fn a_ground_jump_consumes_the_coyote_grace_immediately() {
     // "still allowed to ground jump" hanging in the air, and a quick second press would pogo a
     // free full jump. The second press must spend the air jump instead.
     let world = flat_world(2.0);
-    let p = sim::step(at_rest(&world), press(true), &world);
+    let p = sim::step(at_rest(&world), press(), &world);
     assert!(!p.grounded, "the jump leaves the ground");
     assert_eq!(p.coyote, 0.0, "jumping must close the window the grounded state had open");
 
-    let p = sim::step(p, press(true), &world);
+    let p = sim::step(p, press(), &world);
     assert!(
         (p.motion.velocity.y - (JUMP_VELOCITY * AIR_JUMP_SCALE - ASCENT_GRAVITY * SIM_DT)).abs() < EPS,
         "the immediate second press must be the air jump, not a stacked ground jump: {}",
@@ -314,7 +222,6 @@ fn the_latch_honors_the_coyote_window() {
         grounded: false,
         air_jumps: 0,
         coyote: COYOTE_S * 0.5,
-        cut_armed: false,
     };
     let mut latch = JumpLatch::new();
     latch.press();
@@ -343,7 +250,6 @@ fn a_buffered_press_fires_on_the_landing_step_through_the_real_step() {
         grounded: false,
         air_jumps: 0,
         coyote: 0.0,
-        cut_armed: false,
     };
     let mut latch = JumpLatch::new();
     latch.press();
@@ -351,11 +257,11 @@ fn a_buffered_press_fires_on_the_landing_step_through_the_real_step() {
     for _ in 0..20 {
         if latch.consume(p.can_jump()) {
             assert!(p.grounded, "nothing in hand: the press may only fire once landed");
-            p = sim::step(p, press(true), &world);
+            p = sim::step(p, press(), &world);
             assert!(p.motion.velocity.y > 0.0, "the buffered press must become the landing jump");
             return;
         }
-        p = sim::step(p, idle(false), &world);
+        p = sim::step(p, idle(), &world);
     }
     panic!("the buffered press never fired: landing took too long or the buffer dropped it");
 }
