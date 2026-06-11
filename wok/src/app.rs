@@ -309,10 +309,14 @@ impl App for EditorApp {
         {
             let model = &self.model;
             let ui_state = &mut self.ui;
-            // fps and frame-ms are the once-per-second window averages; the counts stay live.
+            // fps and frame-ms are the once-per-second window averages; the camera speed and the
+            // counts stay live. The speed is read before this frame's camera update (the UI must
+            // run first for its focus queries), so a scroll lands in the readout next frame -
+            // one frame behind the hand, immediate to the eye.
             let stats = Stats {
                 fps: self.fps,
                 frame_ms: self.frame_ms,
+                cam_speed: self.camera.speed,
                 placement_count: model.placement_count(),
                 draw_items: self.draw_items,
             };

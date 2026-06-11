@@ -23,6 +23,7 @@ mod camera;
 mod cli;
 mod content;
 mod details;
+mod drag;
 mod edit_ops;
 mod glyphs;
 mod gui;
@@ -82,7 +83,8 @@ fn start(args: &[String]) -> Result<app::EditorApp, Box<dyn Error>> {
         loaded.prefabs.len()
     );
     println!("wok: controls: WASD move, Q/E down/up, hold right mouse to look, scroll for speed");
-    println!("wok: editing: click to select, Delete removes, Ctrl+S saves, Esc cancels/deselects");
+    println!("wok: editing: click selects, drag the selection moves it (Shift: vertical), Delete removes");
+    println!("wok: Ctrl+S saves, Esc cancels/deselects");
 
     app::EditorApp::new(paths, loaded)
 }

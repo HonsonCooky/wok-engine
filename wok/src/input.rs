@@ -6,16 +6,19 @@
 //! not over a panel and no widget is being dragged) and `keys_free` (no field has keyboard
 //! focus) - so the same physical input never acts in the UI and the viewport at once. The fly
 //! camera keeps right-mouse-hold to look, which leaves the cursor free for the UI by
-//! construction.
+//! construction. The left button picks, places, and (on the already-selected placement) drags to
+//! move, with `crate::drag` owning the drag math.
 
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 use wok_platform::input::InputState;
 use wok_platform::winit::event::MouseButton;
 use wok_platform::winit::keyboard::{Key, NamedKey};
+use wok_scene::Transform;
 
 use crate::camera::{CameraInput, FlyCamera};
 use crate::content::ContentPaths;
-use crate::model::EditorModel;
+use crate::drag::{DragMode, PlacementDrag, drag_offset, dragged_translation};
+use crate::model::{EditorModel, chunk_origin};
 use crate::panels::UiState;
 use crate::pick;
 use crate::sync;
@@ -48,15 +51,17 @@ pub fn camera_input(input: &InputState, pointer_free: bool, keys_free: bool) -> 
     }
 }
 
-/// Raw motion (pixels) under which a right press-and-release still reads as a click rather than
-/// a look-drag: enough for a twitchy hand, far under any deliberate look.
-const RIGHT_CLICK_SLOP_PX: f32 = 4.0;
+/// Motion (pixels) under which a press-and-release still reads as a click rather than a drag:
+/// enough for a twitchy hand, far under any deliberate drag. Shared by the right button (camera
+/// look vs context click) and the left button (placement drag vs pick).
+const CLICK_SLOP_PX: f32 = 4.0;
 
 /// Hotkeys and viewport clicks: Ctrl+S saves, Delete removes the selection, Esc cancels place
 /// mode, then an open context menu, then deselects. A left click places (in place mode) or picks;
-/// a right click (a clean press-release - dragging is camera look) picks and opens the context
-/// menu on what it hit. Ctrl+S deliberately ignores `keys_free`: saving must work mid-edit in a
-/// details field.
+/// a left press on the already-selected placement arms a drag that moves it once it crosses the
+/// slop (Shift moves vertically); a right click (a clean press-release - dragging is camera look)
+/// picks and opens the context menu on what it hit. Ctrl+S deliberately ignores `keys_free`:
+/// saving must work mid-edit in a details field.
 pub fn handle(
     input: &InputState,
     pointer_free: bool,
@@ -120,16 +125,39 @@ pub fn handle(
                 None => ui.placing = Some(prefab),
             }
         } else {
-            model.selection =
+            let picked =
                 pick::pick(&model.chunks, &model.prefabs, &model.heightmaps, camera.position, dir, far);
-            // A viewport selection brings its tree row into view.
-            ui.scroll_to_selection = model.selection.is_some();
+            if picked.is_some() && picked == model.selection {
+                // A press on the already-selected placement arms a drag instead of re-picking:
+                // past the slop it moves the placement; released under it, it was a click on
+                // what is already selected, which changes nothing.
+                ui.drag =
+                    picked.map(|sel| PlacementDrag { sel, press_px: cursor, active: false, anchor: None });
+            } else {
+                model.selection = picked;
+                // A viewport selection brings its tree row into view.
+                ui.scroll_to_selection = model.selection.is_some();
+            }
         }
+    }
+
+    // An armed placement drag advances while the left button stays down and ends with it. The
+    // selection can vanish mid-drag (Esc, Delete, an external reload); the drag dies with it.
+    // Once started, the drag deliberately ignores `pointer_free`: it owns the pointer even when
+    // the cursor crosses a panel, exactly as a panel widget's own drag would over the viewport.
+    if let Some(mut drag) = ui.drag.take()
+        && input.mouse_held(MouseButton::Left)
+        && model.selection == Some(drag.sel)
+    {
+        if let Some(dir) = ray(camera) {
+            drag_selected(input, camera.position, dir, far, model, &mut drag, cursor);
+        }
+        ui.drag = Some(drag);
     }
 
     if pointer_free
         && input.mouse_buttons_released.contains(&MouseButton::Right)
-        && ui.right_drag_px < RIGHT_CLICK_SLOP_PX
+        && ui.right_drag_px < CLICK_SLOP_PX
     {
         let Some(dir) = ray(camera) else { return };
         let picked = pick::pick(&model.chunks, &model.prefabs, &model.heightmaps, camera.position, dir, far);
@@ -140,6 +168,50 @@ pub fn handle(
         } else {
             ui.context_menu = None;
         }
+    }
+}
+
+/// One held frame of a placement drag: enforce the slop, pick the mode by Shift (re-anchoring
+/// whenever the mode is entered, so the placement never jumps to the cursor), and commit the
+/// frame's translation through the model - the same authored-form edit the details panel makes,
+/// so dirty tracking and the unsaved indicator follow for free. A frame whose cursor gives
+/// nothing to track (no terrain under it, a degenerate ray) holds the placement still.
+fn drag_selected(
+    input: &InputState,
+    eye: Vec3,
+    dir: Vec3,
+    far: f32,
+    model: &mut EditorModel,
+    drag: &mut PlacementDrag,
+    cursor: Vec2,
+) {
+    if !drag.active {
+        if (cursor - drag.press_px).length() < CLICK_SLOP_PX {
+            return;
+        }
+        drag.active = true;
+    }
+    let Some(placement) = model.placement(drag.sel) else { return };
+    let current = placement.transform;
+    let state = placement.state.clone();
+    let Some(prefab) = model.prefabs.get(&placement.prefab) else { return };
+    let origin = chunk_origin(drag.sel.coord);
+
+    let mode = if input.key_held(NamedKey::Shift) { DragMode::Vertical } else { DragMode::Terrain };
+    if drag.anchor.map(|(m, _)| m) != Some(mode) {
+        drag.anchor = drag_offset(mode, &current, origin, &model.heightmaps, eye, dir, far)
+            .map(|offset| (mode, offset));
+    }
+    let Some((_, offset)) = drag.anchor else { return };
+    let Some(translation) =
+        dragged_translation(mode, offset, &current, origin, prefab, &model.heightmaps, eye, dir, far)
+    else {
+        return;
+    };
+    if translation != current.translation
+        && let Err(err) = model.edit_placement(drag.sel, Transform { translation, ..current }, state)
+    {
+        eprintln!("wok: drag move failed: {err}");
     }
 }
 

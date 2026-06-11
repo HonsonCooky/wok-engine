@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use wok_scene::{ChunkCoord, PrefabRef, Transform};
 
 use crate::details;
+use crate::drag::PlacementDrag;
 use crate::library;
 use crate::model::{EditorModel, Selection};
 use crate::pages::{Page, PageState};
@@ -40,6 +41,9 @@ pub struct UiState {
     /// Raw mouse motion accumulated while the right button is held, in pixels: how the input
     /// routing tells a look-drag from a context click on release.
     pub right_drag_px: f32,
+    /// A left-button drag on the selected placement in progress, if any; the same 4px rule tells
+    /// it from a click. Lives here because it is interaction state, never authored data.
+    pub drag: Option<PlacementDrag>,
 }
 
 /// An inline rename in progress: the row being renamed and the live text.
