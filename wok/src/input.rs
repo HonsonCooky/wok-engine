@@ -48,9 +48,15 @@ pub fn camera_input(input: &InputState, pointer_free: bool, keys_free: bool) -> 
     }
 }
 
+/// Raw motion (pixels) under which a right press-and-release still reads as a click rather than
+/// a look-drag: enough for a twitchy hand, far under any deliberate look.
+const RIGHT_CLICK_SLOP_PX: f32 = 4.0;
+
 /// Hotkeys and viewport clicks: Ctrl+S saves, Delete removes the selection, Esc cancels place
-/// mode then deselects, a left click places (in place mode) or picks. Ctrl+S deliberately
-/// ignores `keys_free`: saving must work mid-edit in an inspector field.
+/// mode, then an open context menu, then deselects. A left click places (in place mode) or picks;
+/// a right click (a clean press-release - dragging is camera look) picks and opens the context
+/// menu on what it hit. Ctrl+S deliberately ignores `keys_free`: saving must work mid-edit in a
+/// details field.
 pub fn handle(
     input: &InputState,
     pointer_free: bool,
@@ -77,16 +83,32 @@ pub fn handle(
     if keys_free && input.key_pressed(NamedKey::Escape) {
         if ui.placing.is_some() {
             ui.placing = None;
+        } else if ui.context_menu.is_some() {
+            ui.context_menu = None;
         } else {
             model.selection = None;
         }
     }
 
+    // Telling a look-drag from a context click: accumulate raw motion across the whole right
+    // hold; a release that never really moved is the click.
+    if input.mouse_pressed(MouseButton::Right) {
+        ui.right_drag_px = 0.0;
+    }
+    if input.mouse_held(MouseButton::Right) {
+        ui.right_drag_px += Vec2::new(input.mouse_motion.0 as f32, input.mouse_motion.1 as f32).length();
+    }
+
+    let viewport = Vec2::new(size.0 as f32, size.1.max(1) as f32);
+    let cursor = Vec2::new(input.mouse_pos.0 as f32, input.mouse_pos.1 as f32);
+    let ray = |camera: &FlyCamera| {
+        let view_proj = camera.view_proj(viewport.x / viewport.y, far);
+        pick::cursor_ray(view_proj, camera.position, cursor, viewport)
+    };
+
     if pointer_free && input.mouse_pressed(MouseButton::Left) {
-        let size = Vec2::new(size.0 as f32, size.1.max(1) as f32);
-        let view_proj = camera.view_proj(size.x / size.y, far);
-        let cursor = Vec2::new(input.mouse_pos.0 as f32, input.mouse_pos.1 as f32);
-        let Some(dir) = pick::cursor_ray(view_proj, camera.position, cursor, size) else { return };
+        ui.context_menu = None;
+        let Some(dir) = ray(camera) else { return };
         if let Some(prefab) = ui.placing.take() {
             match pick::terrain_hit(&model.heightmaps, camera.position, dir, far) {
                 Some(hit) => {
@@ -100,6 +122,23 @@ pub fn handle(
         } else {
             model.selection =
                 pick::pick(&model.chunks, &model.prefabs, &model.heightmaps, camera.position, dir, far);
+            // A viewport selection brings its tree row into view.
+            ui.scroll_to_selection = model.selection.is_some();
+        }
+    }
+
+    if pointer_free
+        && input.mouse_buttons_released.contains(&MouseButton::Right)
+        && ui.right_drag_px < RIGHT_CLICK_SLOP_PX
+    {
+        let Some(dir) = ray(camera) else { return };
+        let picked = pick::pick(&model.chunks, &model.prefabs, &model.heightmaps, camera.position, dir, far);
+        if picked.is_some() {
+            model.selection = picked;
+            ui.scroll_to_selection = true;
+            ui.context_menu = Some((cursor.x, cursor.y));
+        } else {
+            ui.context_menu = None;
         }
     }
 }

@@ -159,6 +159,8 @@ mod tests {
             placements: vec![Placement {
                 prefab: PrefabRef::new("oak_tree"),
                 instance_id: InstanceId(0),
+                // Named on purpose: the file-level round trip covers the display name too.
+                name: Some("the landmark oak".to_string()),
                 transform: Transform::IDENTITY,
                 state: None,
             }],

@@ -64,6 +64,7 @@ fn placement(prefab: &str, id: u32, center: Vec3, size: Vec3) -> Placement {
     Placement {
         prefab: PrefabRef::new(prefab),
         instance_id: InstanceId(id),
+        name: None,
         transform: Transform { translation: center, rotation: Quat::IDENTITY, scale: size },
         state: None,
     }

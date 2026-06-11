@@ -197,6 +197,7 @@ mod tests {
         Placement {
             prefab: PrefabRef::new(prefab),
             instance_id: InstanceId(id),
+            name: None,
             transform: Transform::IDENTITY,
             state: state.map(String::from),
         }

@@ -187,6 +187,7 @@ mod tests {
                 .map(|&(id, at)| Placement {
                     prefab: PrefabRef::new("ball"),
                     instance_id: InstanceId(id),
+                    name: None,
                     transform: Transform { translation: at, ..Transform::IDENTITY },
                     state: None,
                 })
@@ -285,6 +286,7 @@ mod tests {
         let placement = Placement {
             prefab: PrefabRef::new("ball"),
             instance_id: InstanceId(0),
+            name: None,
             transform: Transform {
                 translation: Vec3::new(10.0, 2.0, 10.0),
                 rotation: Quat::from_rotation_y(0.5),

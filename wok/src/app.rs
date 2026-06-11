@@ -17,21 +17,21 @@ use std::error::Error;
 use glam::{Mat4, Vec3};
 use wok_light::LightState;
 use wok_mesh::{MeshGpu, primitive_mesh};
-use wok_physics::world_aabb;
 use wok_platform::winit::event::WindowEvent;
 use wok_platform::{App, FrameCtx, Platform, gfx};
 use wok_render::{Camera, DepthMode, LineSegment, RenderItem, Renderer};
-use wok_scene::{Aabb, ChunkCoord, Primitive, SurfaceTag, VisibleItem, Watcher};
+use wok_scene::{ChunkCoord, Primitive, SurfaceTag, VisibleItem, Watcher};
 
 use crate::camera::{self, FlyCamera};
 use crate::content::{ContentPaths, LoadedContent};
 use crate::gui::Gui;
 use crate::input;
 use crate::lines;
-use crate::model::{CHUNK_SIZE_M, EditorModel, chunk_origin};
+use crate::model::{CHUNK_SIZE_M, EditorModel, chunk_origin, scene_bounds};
 use crate::panels::{self, Action, Stats, UiState};
 use crate::pick;
 use crate::reload;
+use crate::theme;
 
 const TERRAIN_COLOR: Vec3 = Vec3::new(0.40, 0.60, 0.35);
 
@@ -47,39 +47,6 @@ fn primitive_index(primitive: Primitive) -> usize {
         Primitive::Capsule => 3,
         Primitive::Plane => 4,
     }
-}
-
-/// World-space bounds of everything the loaded chunks hold - the shadow region the frame call
-/// passes (caller policy per the render contract). Falls back to a small box around the origin
-/// when nothing is loaded. Recomputed per frame because edits and hot reload can change the store
-/// between any two frames; the scan is a few thousand min/max ops per chunk, frame-state-cheap.
-fn scene_bounds(store: &wok_content::ChunkStore) -> Aabb {
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    let mut grow = |b: Aabb| {
-        min = min.min(b.min);
-        max = max.max(b.max);
-    };
-    for (coord, runtime) in store.iter_loaded() {
-        let origin = chunk_origin(coord);
-        let origin_mat = Mat4::from_translation(origin);
-        if let Some(mesh) = runtime.terrain_mesh.as_ref() {
-            let b = mesh.bounds();
-            grow(Aabb::new(b.min + origin, b.max + origin));
-        }
-        for item in &runtime.visible {
-            if let VisibleItem::Primitive { primitive, transform, .. } = item {
-                grow(world_aabb(*primitive, origin_mat * *transform));
-            }
-        }
-        for hitbox in &runtime.hitboxes {
-            grow(world_aabb(hitbox.primitive, origin_mat * hitbox.transform));
-        }
-    }
-    if min.x > max.x {
-        return Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0));
-    }
-    Aabb::new(min, max)
 }
 
 /// Flat base color for a placeholder by its surface tag; editor presentation policy, not engine
@@ -166,6 +133,25 @@ impl EditorApp {
             }
             Action::ArmPlace(prefab) => self.ui.placing = Some(prefab),
             Action::DisarmPlace => self.ui.placing = None,
+            Action::Duplicate(sel) => match self.model.duplicate(sel) {
+                // The copy is selected by the model; bring its tree row into view.
+                Ok(Some(_)) => self.ui.scroll_to_selection = true,
+                Ok(None) => {}
+                Err(err) => eprintln!("wok: duplicate failed: {err}"),
+            },
+            Action::Rename { sel, name } => {
+                self.model.rename(sel, &name);
+            }
+            Action::Delete(sel) => {
+                if let Err(err) = self.model.delete(sel) {
+                    eprintln!("wok: delete failed: {err}");
+                }
+            }
+            Action::Frame(sel) => {
+                if let Some(bounds) = self.model.world_bounds(sel) {
+                    self.camera = camera::frame(&self.camera, bounds.min, bounds.max);
+                }
+            }
         }
     }
 
@@ -271,7 +257,9 @@ impl App for EditorApp {
                 terrain.insert(coord, MeshGpu::upload(&platform.device, mesh));
             }
         }
-        self.gpu = Some(Gpu { renderer, gui: Gui::new(platform), primitives, terrain });
+        let gui = Gui::new(platform);
+        theme::apply(&gui.ctx);
+        self.gpu = Some(Gpu { renderer, gui, primitives, terrain });
         self.refresh_title(platform);
     }
 
@@ -320,12 +308,11 @@ impl App for EditorApp {
         let (mut pointer_free, mut keys_free) = (true, true);
         {
             let model = &self.model;
-            let ui_state = &self.ui;
+            let ui_state = &mut self.ui;
             // fps and frame-ms are the once-per-second window averages; the counts stay live.
             let stats = Stats {
                 fps: self.fps,
                 frame_ms: self.frame_ms,
-                chunk_count: model.chunks.len(),
                 placement_count: model.placement_count(),
                 draw_items: self.draw_items,
             };

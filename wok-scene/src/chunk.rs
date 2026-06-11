@@ -44,12 +44,17 @@ impl ChunkCoord {
 /// `instance_id` is allocated from the scene's monotonic counter at placement creation time
 /// and stays stable for the lifetime of the placement; see `Scene::allocate_instance_id`.
 /// `state` of `None` resolves to the prefab's `default_state` at runtime; reference resolution
-/// is wok-content's job, not this crate's.
+/// is wok-content's job, not this crate's. `name` is an optional author-facing display name -
+/// pure annotation, never used for reference resolution (references stay by prefab name and
+/// instance id) - shown by tools where present and omitted from the file when `None`, so every
+/// pre-name file loads unchanged.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Placement {
     pub prefab: PrefabRef,
     pub instance_id: InstanceId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub transform: Transform,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
@@ -97,6 +102,7 @@ mod tests {
         Placement {
             prefab: PrefabRef::new("oak_tree"),
             instance_id: InstanceId(id),
+            name: None,
             transform: Transform {
                 translation: Vec3::new(10.0, 0.0, -5.0),
                 ..Transform::IDENTITY
@@ -145,6 +151,36 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let back: Placement = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn placement_round_trips_with_a_display_name() {
+        let mut p = sample_placement(9);
+        p.name = Some("the old oak".into());
+        let json = serde_json::to_string(&p).unwrap();
+        let back: Placement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn an_unnamed_placement_omits_the_name_key() {
+        // The additive-schema promise, write side: None never appears in the file, so saving an
+        // untouched scene produces byte-identical placements to the pre-name format.
+        let json = serde_json::to_string(&sample_placement(7)).unwrap();
+        assert!(!json.contains("\"name\""), "None must be omitted: {json}");
+    }
+
+    #[test]
+    fn a_pre_name_placement_file_loads_unchanged() {
+        // The additive-schema promise, read side: JSON written before the field existed (no
+        // `name` key anywhere) deserializes with `name: None`.
+        let legacy = r#"{
+            "prefab": "oak_tree",
+            "instance_id": 7,
+            "transform": { "pos": [10.0, 0.0, -5.0] }
+        }"#;
+        let back: Placement = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back, sample_placement(7));
     }
 
     // ---- ChunkStreaming ----

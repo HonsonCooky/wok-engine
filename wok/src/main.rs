@@ -22,16 +22,25 @@ mod app;
 mod camera;
 mod cli;
 mod content;
+mod details;
+mod edit_ops;
+mod glyphs;
 mod gui;
 mod input;
+mod library;
 mod lines;
 mod model;
+mod outline;
+mod pages;
 mod panels;
 mod pick;
 mod place;
 mod reload;
 mod sample;
+mod status;
 mod sync;
+mod theme;
+mod tree;
 
 use std::error::Error;
 

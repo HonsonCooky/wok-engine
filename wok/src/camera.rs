@@ -81,6 +81,37 @@ impl FlyCamera {
     }
 }
 
+/// Margin factor on the framing distance: the framed bounds' enclosing sphere fills roughly 70%
+/// of the vertical field of view instead of touching its edges.
+const FRAME_MARGIN: f32 = 1.4;
+
+/// Smallest radius framing treats as real, so a tiny or flat placement still gets a readable
+/// view instead of the camera diving onto it.
+const FRAME_MIN_RADIUS: f32 = 1.0;
+
+/// The framing pitch band, radians: a gentle look down at the subject. Framing keeps the user's
+/// yaw (their sense of direction survives the jump) but a level or upward pitch would frame the
+/// subject against the sky edge-on, so pitch is clamped into this band.
+const FRAME_PITCH_MIN: f32 = -0.9;
+const FRAME_PITCH_MAX: f32 = -0.15;
+
+/// Move the camera to a sensible view of an axis-aligned bounds (the double-click-to-frame jump):
+/// keep the current yaw, clamp pitch into the gentle downward band, and back off along the
+/// resulting forward until the bounds' enclosing sphere fits the vertical fov with margin. Pure:
+/// camera and bounds in, camera out.
+pub fn frame(camera: &FlyCamera, min: Vec3, max: Vec3) -> FlyCamera {
+    let center = (min + max) * 0.5;
+    let radius = ((max - min).length() * 0.5).max(FRAME_MIN_RADIUS);
+    let aimed = FlyCamera {
+        pitch: camera.pitch.clamp(FRAME_PITCH_MIN, FRAME_PITCH_MAX),
+        ..*camera
+    };
+    // A sphere of `radius` subtends the full vertical fov at distance radius / sin(fov / 2);
+    // the margin backs off further so the subject sits inside the frame, not against it.
+    let distance = radius * FRAME_MARGIN / (FOV_Y_RADIANS * 0.5).sin();
+    FlyCamera { position: center - aimed.forward() * distance, ..aimed }
+}
+
 /// Advance the camera by one frame. Pure: identical inputs give an identical next state.
 ///
 /// Look is applied before movement so a frame's motion follows where the user just turned; speed
@@ -200,6 +231,51 @@ mod tests {
         assert_eq!(fast.speed, SPEED_MAX);
         let slow = update(&camera(), &CameraInput { speed_steps: -100.0, ..Default::default() }, 0.016);
         assert_eq!(slow.speed, SPEED_MIN);
+    }
+
+    // ---- framing ----
+
+    #[test]
+    fn framing_looks_straight_at_the_bounds_center() {
+        let cam = FlyCamera { position: Vec3::new(50.0, 3.0, -20.0), yaw: 1.2, pitch: 0.4, speed: 16.0 };
+        let (min, max) = (Vec3::new(10.0, 2.0, 10.0), Vec3::new(12.0, 4.0, 13.0));
+        let framed = frame(&cam, min, max);
+        let center = (min + max) * 0.5;
+        let to_center = (center - framed.position).normalize();
+        assert!(close(to_center, framed.forward()), "forward {:?} vs {to_center:?}", framed.forward());
+    }
+
+    #[test]
+    fn framing_backs_off_far_enough_for_the_bounds_to_fit_the_fov() {
+        let cam = FlyCamera { position: Vec3::ZERO, yaw: 0.3, pitch: -0.4, speed: 16.0 };
+        let (min, max) = (Vec3::new(0.0, 0.0, 0.0), Vec3::new(8.0, 4.0, 6.0));
+        let framed = frame(&cam, min, max);
+        let center = (min + max) * 0.5;
+        let radius = (max - min).length() * 0.5;
+        let fits_at = radius / (FOV_Y_RADIANS * 0.5).sin();
+        assert!((center - framed.position).length() >= fits_at, "the sphere must fit the vertical fov");
+    }
+
+    #[test]
+    fn framing_keeps_yaw_and_clamps_pitch_into_the_downward_band() {
+        let cam = FlyCamera { position: Vec3::ZERO, yaw: 2.1, pitch: 0.8, speed: 16.0 };
+        let framed = frame(&cam, Vec3::ZERO, Vec3::ONE);
+        assert_eq!(framed.yaw, 2.1, "the user's sense of direction survives the jump");
+        assert_eq!(framed.pitch, FRAME_PITCH_MAX, "an upward pitch clamps to the gentle look-down");
+        let steep = FlyCamera { pitch: -1.4, ..cam };
+        assert_eq!(frame(&steep, Vec3::ZERO, Vec3::ONE).pitch, FRAME_PITCH_MIN);
+    }
+
+    #[test]
+    fn framing_degenerate_bounds_still_gives_a_readable_distance() {
+        // A point-sized bounds (a shapeless placement) frames from at least the minimum radius'
+        // distance, never on top of the point.
+        let cam = FlyCamera { position: Vec3::ZERO, yaw: 0.0, pitch: -0.3, speed: 16.0 };
+        let at = Vec3::new(5.0, 2.0, 5.0);
+        let framed = frame(&cam, at, at);
+        let distance = (at - framed.position).length();
+        assert!(distance >= FRAME_MIN_RADIUS, "distance {distance} too close for a readable view");
+        assert!(framed.position.is_finite());
     }
 
     // ---- matrices ----

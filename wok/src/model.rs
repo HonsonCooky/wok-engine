@@ -41,30 +41,46 @@ pub fn chunk_at(world: Vec3) -> ChunkCoord {
     )
 }
 
+/// World-space bounds of everything the loaded chunks hold - the shadow region the frame call
+/// passes (caller policy per the render contract). Falls back to a small box around the origin
+/// when nothing is loaded. Recomputed per frame because edits and hot reload can change the store
+/// between any two frames; the scan is a few thousand min/max ops per chunk, frame-state-cheap.
+pub fn scene_bounds(store: &ChunkStore) -> wok_scene::Aabb {
+    use wok_scene::{Aabb, VisibleItem};
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let mut grow = |b: Aabb| {
+        min = min.min(b.min);
+        max = max.max(b.max);
+    };
+    for (coord, runtime) in store.iter_loaded() {
+        let origin = chunk_origin(coord);
+        let origin_mat = glam::Mat4::from_translation(origin);
+        if let Some(mesh) = runtime.terrain_mesh.as_ref() {
+            let b = mesh.bounds();
+            grow(Aabb::new(b.min + origin, b.max + origin));
+        }
+        for item in &runtime.visible {
+            if let VisibleItem::Primitive { primitive, transform, .. } = item {
+                grow(wok_physics::world_aabb(*primitive, origin_mat * *transform));
+            }
+        }
+        for hitbox in &runtime.hitboxes {
+            grow(wok_physics::world_aabb(hitbox.primitive, origin_mat * hitbox.transform));
+        }
+    }
+    if min.x > max.x {
+        return Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0));
+    }
+    Aabb::new(min, max)
+}
+
 /// The selected placement: its chunk and its scene-stable instance id. The id alone would do
 /// (ids are scene-unique), but carrying the chunk makes every lookup direct.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
     pub coord: ChunkCoord,
     pub id: InstanceId,
-}
-
-/// One row of the scene tree: a placement under its chunk.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlacementRow {
-    pub id: InstanceId,
-    /// The instance label: prefab slug plus instance id (`oak_tree_42`).
-    pub label: String,
-    pub prefab: String,
-    /// The effective state name: the placement's explicit state, else the prefab's default.
-    pub state: String,
-}
-
-/// One chunk node of the scene tree.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ChunkNode {
-    pub coord: ChunkCoord,
-    pub rows: Vec<PlacementRow>,
 }
 
 /// The editor's whole mutable model. Fields are read freely by the UI; mutation goes through the
@@ -198,6 +214,7 @@ impl EditorModel {
         chunk.placements.push(Placement {
             prefab: prefab_ref.clone(),
             instance_id: id,
+            name: None,
             transform,
             state: None,
         });
@@ -223,33 +240,6 @@ impl EditorModel {
         self.validate_selection();
         Ok(true)
     }
-
-    /// The scene-tree model: chunks in coordinate order, placements in authored order, each row
-    /// labeled `{prefab}_{id}` with its prefab name and effective state.
-    pub fn tree(&self) -> Vec<ChunkNode> {
-        self.chunks
-            .iter()
-            .map(|(&coord, chunk)| ChunkNode {
-                coord,
-                rows: chunk
-                    .placements
-                    .iter()
-                    .map(|p| {
-                        let default_state = self
-                            .prefabs
-                            .get(&p.prefab)
-                            .map_or("default", |prefab| prefab.default_state.as_str());
-                        PlacementRow {
-                            id: p.instance_id,
-                            label: format!("{}_{}", p.prefab.as_str(), p.instance_id.0),
-                            prefab: p.prefab.as_str().to_string(),
-                            state: p.state.clone().unwrap_or_else(|| default_state.to_string()),
-                        }
-                    })
-                    .collect(),
-            })
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -266,23 +256,6 @@ mod tests {
             vec![(content.chunk, Some(content.heightmap))],
         )
         .expect("sample content loads")
-    }
-
-    #[test]
-    fn tree_matches_the_sample_fixture_structure() {
-        let model = sample_model();
-        let tree = model.tree();
-        assert_eq!(tree.len(), 1);
-        assert_eq!(tree[0].coord, ChunkCoord::new(0, 0));
-        let labels: Vec<&str> = tree[0].rows.iter().map(|r| r.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            ["crate_0", "crate_1", "crate_2", "boulder_3", "boulder_4", "pillar_5", "pillar_6", "marker_7"]
-        );
-        for row in &tree[0].rows {
-            assert_eq!(row.state, "default", "{}: explicit None resolves to the default", row.label);
-            assert!(row.label.starts_with(row.prefab.as_str()));
-        }
     }
 
     #[test]

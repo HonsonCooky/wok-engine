@@ -32,6 +32,7 @@ fn placement(prefab: &str, id: u32, translation: Vec3) -> Placement {
     Placement {
         prefab: PrefabRef::new(prefab),
         instance_id: InstanceId(id),
+        name: None,
         transform: Transform { translation, ..Transform::IDENTITY },
         state: None,
     }

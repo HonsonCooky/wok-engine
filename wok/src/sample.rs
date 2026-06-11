@@ -101,6 +101,7 @@ pub fn build() -> SampleContent {
         placements.push(Placement {
             prefab: PrefabRef::new(slug),
             instance_id: scene.allocate_instance_id(),
+            name: None,
             transform: rest_on_terrain(prefab, rest, floating, &heightmap),
             state: None,
         });
