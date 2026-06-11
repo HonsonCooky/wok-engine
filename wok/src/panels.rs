@@ -9,7 +9,9 @@
 //! reload. `UiState` is the one thing the UI mutates in place - page choice, the rename buffer,
 //! scroll and menu flags - all presentation, never authored data.
 
-use wok_scene::{PrefabRef, Transform};
+use std::collections::HashSet;
+
+use wok_scene::{ChunkCoord, PrefabRef, Transform};
 
 use crate::details;
 use crate::library;
@@ -28,6 +30,8 @@ pub struct UiState {
     pub placing: Option<PrefabRef>,
     /// An inline rename in progress, if any.
     pub renaming: Option<Rename>,
+    /// Chunks folded shut in the scene tree; absence means open (chunks default open).
+    pub collapsed: HashSet<ChunkCoord>,
     /// Scroll the tree to the selected row this frame: set when selection arrives from the
     /// viewport, consumed by the tree build.
     pub scroll_to_selection: bool,
@@ -70,9 +74,15 @@ pub fn ui(
     actions: &mut Vec<Action>,
 ) {
     status::bar(ctx, &mut ui_state.pages, stats);
+    // Marginless flat frame: the tree's rows paint their own hover and selection fills edge to
+    // edge, so the panel must not inset them; pages that want padding add their own. The fill is
+    // the same panel_fill the status bar uses, so the shell reads as one flat surface, and the
+    // panel's default separator line stays the single hairline against the viewport.
+    let frame = egui::Frame::new().fill(ctx.style().visuals.panel_fill);
     egui::SidePanel::left("wok_side_panel")
         .resizable(true)
         .default_width(300.0)
+        .frame(frame)
         .show(ctx, |ui| match ui_state.pages.current() {
             Page::Scene => tree::page(ui, model, ui_state, actions),
             Page::Prefabs => library::page(ui, model, ui_state, actions),

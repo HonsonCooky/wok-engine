@@ -1,13 +1,15 @@
-//! Painter-drawn glyphs: the page toggles and the tree's kind icons.
+//! Painter-drawn glyphs: the page toggles and the tree's row icons.
 //!
-//! Drawn with egui's painter from strokes and circles rather than icon-font codepoints: the ASCII
-//! source rule rules out unicode glyph literals, an icon font would be a new dependency, and the
-//! handful of marks needed here (a list, a box, a magnifier, five primitive silhouettes) read
-//! fine at 16px as line art. Every glyph draws inside the rect it is given and takes its color
-//! from the caller (the widget's interact visuals), so theming flows through untouched.
+//! Drawn with egui's painter rather than icon-font codepoints: the ASCII source rule rules out
+//! unicode glyph literals, an icon font would be a new dependency, and the handful of marks
+//! needed here read fine when painted directly. The page toggles stay line art (they sit at 18px
+//! where strokes read cleanly); the tree icons are filled silhouettes, because at the tree's 11px
+//! a hairline outline dissolves into the row while a filled shape still reads as a mark - the
+//! same reason Zed's project panel fills its file icons. Every glyph draws inside the rect it is
+//! given and takes its color from the caller, so theming flows through untouched.
 
 use egui::epaint::StrokeKind;
-use egui::{Painter, Pos2, Rect, Stroke, pos2, vec2};
+use egui::{Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
 use wok_scene::Primitive;
 
 use crate::pages::Page;
@@ -53,46 +55,66 @@ pub fn page(painter: &Painter, rect: Rect, page: Page, color: egui::Color32) {
     }
 }
 
-/// A placement row's kind glyph: the dominant primitive's silhouette, or a small dot when the
-/// kind is unknown (missing prefab, mesh-only state).
+/// A placement row's kind glyph: the dominant primitive's filled silhouette, or a small dot when
+/// the kind is unknown (missing prefab, mesh-only state).
 pub fn kind(painter: &Painter, rect: Rect, kind: Option<Primitive>, color: egui::Color32) {
-    let stroke = Stroke::new(WIDTH, color);
-    let r = rect.shrink(rect.width() * 0.22);
+    let r = rect;
     match kind {
         Some(Primitive::Cube) => {
-            painter.rect_stroke(r, 1.0, stroke, StrokeKind::Inside);
+            painter.rect_filled(r.shrink(0.5), 2.0, color);
         }
         Some(Primitive::Ellipsoid) => {
-            painter.circle_stroke(r.center(), r.width() * 0.5, stroke);
+            painter.circle_filled(r.center(), r.width() * 0.46, color);
         }
         Some(Primitive::Cylinder) => {
-            // A tin: the wall, with the top cap hinted by a chord.
-            let wall = Rect::from_center_size(r.center(), vec2(r.width() * 0.7, r.height()));
-            painter.rect_stroke(wall, 2.0, stroke, StrokeKind::Inside);
-            let y = wall.top() + wall.height() * 0.28;
-            painter.line_segment([pos2(wall.left(), y), pos2(wall.right(), y)], stroke);
+            // A tin: a tall rounded slab, rounder than the cube but not a pill.
+            let wall = Rect::from_center_size(r.center(), vec2(r.width() * 0.72, r.height()));
+            painter.rect_filled(wall, wall.width() * 0.38, color);
         }
         Some(Primitive::Capsule) => {
-            // A stadium: the wall with fully rounded ends.
-            let pill = Rect::from_center_size(r.center(), vec2(r.width() * 0.6, r.height()));
-            painter.rect_stroke(pill, pill.width() * 0.5, stroke, StrokeKind::Inside);
+            // A stadium: fully rounded ends.
+            let pill = Rect::from_center_size(r.center(), vec2(r.width() * 0.55, r.height()));
+            painter.rect_filled(pill, pill.width() * 0.5, color);
         }
         Some(Primitive::Plane) => {
             // A ground quad seen at a slant: a flat parallelogram.
             let y = r.center().y;
-            let lean = r.width() * 0.18;
-            let quad: [Pos2; 4] = [
-                pos2(r.left() + lean, y - lean),
-                pos2(r.right(), y - lean),
-                pos2(r.right() - lean, y + lean),
-                pos2(r.left(), y + lean),
-            ];
-            for i in 0..4 {
-                painter.line_segment([quad[i], quad[(i + 1) % 4]], stroke);
-            }
+            let lean = r.width() * 0.22;
+            painter.add(Shape::convex_polygon(
+                vec![
+                    pos2(r.left() + lean, y - lean),
+                    pos2(r.right(), y - lean),
+                    pos2(r.right() - lean, y + lean),
+                    pos2(r.left(), y + lean),
+                ],
+                color,
+                Stroke::NONE,
+            ));
         }
         None => {
-            painter.circle_filled(r.center(), WIDTH, color);
+            painter.circle_filled(r.center(), r.width() * 0.16, color);
         }
     }
+}
+
+/// A chunk row's folder glyph: filled tab-and-body, the project-panel directory mark.
+pub fn folder(painter: &Painter, rect: Rect, color: egui::Color32) {
+    let r = rect;
+    let tab = Rect::from_min_size(r.min, vec2(r.width() * 0.45, r.height() * 0.32));
+    painter.rect_filled(tab, 1.0, color);
+    let body = Rect::from_min_max(pos2(r.left(), r.top() + r.height() * 0.18), r.max);
+    painter.rect_filled(body, 1.5, color);
+}
+
+/// A collapsible row's disclosure chevron: a small filled triangle, right when closed, down when
+/// open.
+pub fn chevron(painter: &Painter, rect: Rect, open: bool, color: egui::Color32) {
+    let c = rect.center();
+    let s = rect.width() * 0.32;
+    let points: [Pos2; 3] = if open {
+        [pos2(c.x - s, c.y - s * 0.5), pos2(c.x + s, c.y - s * 0.5), pos2(c.x, c.y + s * 0.7)]
+    } else {
+        [pos2(c.x - s * 0.5, c.y - s), pos2(c.x + s * 0.7, c.y), pos2(c.x - s * 0.5, c.y + s)]
+    };
+    painter.add(Shape::convex_polygon(points.to_vec(), color, Stroke::NONE));
 }
