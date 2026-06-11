@@ -4,7 +4,8 @@
 //! player's [`Motion`] and grounded flag, and each fixed step sequences wok-physics's pure pieces in
 //! the composition the Level 2 locomotion harness proved out (wok-physics/tests/locomotion_replay):
 //!
-//!     accelerate the horizontal velocity toward intent  (and the jump impulse, the game's policy)
+//!     steer the horizontal velocity toward intent (grounded approach or air redirection,
+//!                                                  plus the jump impulses - the game's policy)
 //!     -> integrate one fixed step under gravity   (wok-physics: integrate)
 //!     -> collide-and-slide against static AABBs   (wok-physics: collide_and_slide)
 //!     -> rest the slid capsule on the terrain     (wok-physics: rest_on_heightmap, chunk-local)
@@ -23,9 +24,10 @@
 use glam::Vec3;
 use wok_physics::{Capsule, Motion, boom_direction, collide_and_slide, integrate, rest_on_heightmap};
 
+use crate::air;
 use crate::constants::{
-    AIR_CONTROL, GRAVITY, GROUND_ACCEL, GROUND_FRICTION, JUMP_VELOCITY, MOVE_SPEED, PLAYER_HEIGHT, PLAYER_RADIUS,
-    SIM_DT, SNAP_DOWN_DISTANCE, SPAWN_HEIGHT, WALKABLE_COS,
+    AIR_JUMP_SCALE, AIR_JUMPS, GRAVITY, GROUND_ACCEL, GROUND_FRICTION, JUMP_VELOCITY, MOVE_SPEED, PLAYER_HEIGHT,
+    PLAYER_RADIUS, SIM_DT, SNAP_DOWN_DISTANCE, SPAWN_HEIGHT, WALKABLE_COS,
 };
 use crate::landing::supported_below;
 use crate::world::{CHUNK_SIZE_M, World};
@@ -36,6 +38,9 @@ use crate::world::{CHUNK_SIZE_M, World};
 pub struct Player {
     pub motion: Motion,
     pub grounded: bool,
+    /// Air jumps still available: spent by jumping airborne, restored to `AIR_JUMPS` on any
+    /// grounding. Part of the stepped state, so replay covers it like position and velocity.
+    pub air_jumps: u32,
 }
 
 /// One fixed step's input, already resolved against the camera: a world-space horizontal move
@@ -79,7 +84,7 @@ pub fn spawn(world: &World) -> Player {
         let ground = t.heightmap.height_at(half, half);
         t.origin + Vec3::new(half, ground + SPAWN_HEIGHT, half)
     });
-    Player { motion: Motion { position, velocity: Vec3::ZERO }, grounded: false }
+    Player { motion: Motion { position, velocity: Vec3::ZERO }, grounded: false, air_jumps: AIR_JUMPS }
 }
 
 /// Move `current` toward `target` by at most `max_delta`, arriving exactly: the constant-rate
@@ -95,30 +100,46 @@ fn approach(current: Vec3, target: Vec3, max_delta: f32) -> Vec3 {
 /// Advance the player by one fixed step. Pure: identical player, input, and world give an identical
 /// next player, bit for bit.
 pub fn step(player: Player, input: StepInput, world: &World) -> Player {
-    // Accelerated locomotion: the horizontal velocity approaches intent * MOVE_SPEED at a constant
-    // rate instead of being set outright, so starts and stops take a beat and read as weight. With
-    // input the rate is GROUND_ACCEL toward the intended velocity, scaled by AIR_CONTROL when
-    // airborne: steering, weaker in the air. Without input, GROUND_FRICTION toward rest - on the
-    // ground only. Friction is a grounded idea: an airborne body with no input keeps its velocity
-    // ballistically, which is both the momentum AIR_CONTROL promises a jump and what lets a body
-    // caught on a crate's corner accumulate slide-off speed and roll free (air friction re-zeroed
-    // that escape velocity every step and pinned the body hovering on the corner point - the last
-    // of the mid-air halts). Top speed is unchanged - the target is the same intent * MOVE_SPEED
-    // the direct set used. Vertical velocity carries the gravity the body has accumulated, plus
-    // the jump impulse when one was asked for and the body has ground to push off.
+    // Locomotion splits by grounding. Grounded, the horizontal velocity approaches intent *
+    // MOVE_SPEED at a constant rate (GROUND_ACCEL with input, GROUND_FRICTION toward rest
+    // without), so starts and stops take a beat and read as weight. Airborne, steering is
+    // redirection (`crate::air`): input rotates the velocity's direction toward the stick at
+    // AIR_TURN_RATE while the speed approaches the intended speed at the AIR_CONTROL-scaled
+    // accel, so a mid-air do-over turns the moving body around instead of braking through a dead
+    // stop; no input stays ballistic - the momentum a jump promises, and what lets a body caught
+    // on a crate's corner accumulate slide-off speed and roll free.
     let mut m = player.motion;
-    let target = Vec3::new(input.move_dir.x, 0.0, input.move_dir.z) * MOVE_SPEED;
-    let rate = match (input.move_dir == Vec3::ZERO, player.grounded) {
-        (false, true) => GROUND_ACCEL,
-        (false, false) => GROUND_ACCEL * AIR_CONTROL,
-        (true, true) => GROUND_FRICTION,
-        (true, false) => 0.0,
+    let horizontal = Vec3::new(m.velocity.x, 0.0, m.velocity.z);
+    let horizontal = if player.grounded {
+        let target = Vec3::new(input.move_dir.x, 0.0, input.move_dir.z) * MOVE_SPEED;
+        let rate = if input.move_dir == Vec3::ZERO { GROUND_FRICTION } else { GROUND_ACCEL };
+        approach(horizontal, target, rate * SIM_DT)
+    } else {
+        air::steer(horizontal, input.move_dir, SIM_DT)
     };
-    let horizontal = approach(Vec3::new(m.velocity.x, 0.0, m.velocity.z), target, rate * SIM_DT);
     m.velocity.x = horizontal.x;
     m.velocity.z = horizontal.z;
-    if input.jump && player.grounded {
-        m.velocity.y = JUMP_VELOCITY;
+
+    // The jump impulse: grounded presses push off the ground at full strength. Airborne presses
+    // spend an air jump when one remains - the R&C do-over: vertical velocity is SET (not added)
+    // to the scaled launch speed, and the horizontal velocity is redirected outright to the
+    // current stick direction at the current speed, so the double jump is a full commitment to
+    // the new heading; with no stick held the heading is kept. The latch upstream guarantees one
+    // press is one jump; this block only decides what a delivered press does.
+    let mut air_jumps = player.air_jumps;
+    if input.jump {
+        if player.grounded {
+            m.velocity.y = JUMP_VELOCITY;
+        } else if air_jumps > 0 {
+            air_jumps -= 1;
+            m.velocity.y = JUMP_VELOCITY * AIR_JUMP_SCALE;
+            if input.move_dir != Vec3::ZERO {
+                let speed = Vec3::new(m.velocity.x, 0.0, m.velocity.z).length();
+                let dir = Vec3::new(input.move_dir.x, 0.0, input.move_dir.z).normalize();
+                m.velocity.x = dir.x * speed;
+                m.velocity.z = dir.z * speed;
+            }
+        }
     }
 
     // One fixed step under gravity, then slide the resulting move along any static geometry it meets.
@@ -176,7 +197,9 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
         }
     }
 
-    Player { motion: Motion { position, velocity }, grounded }
+    // Any grounding restores the air jumps: the double jump is per airtime, not per life.
+    let air_jumps = if grounded { AIR_JUMPS } else { air_jumps };
+    Player { motion: Motion { position, velocity }, grounded, air_jumps }
 }
 
 #[cfg(test)]
@@ -222,7 +245,7 @@ mod tests {
     }
 
     fn player_at(position: Vec3) -> Player {
-        Player { motion: Motion { position, velocity: Vec3::ZERO }, grounded: false }
+        Player { motion: Motion { position, velocity: Vec3::ZERO }, grounded: false, air_jumps: AIR_JUMPS }
     }
 
     #[test]
@@ -260,6 +283,7 @@ mod tests {
         Player {
             motion: Motion { position: Vec3::new(64.0, ground + PLAYER_HEIGHT * 0.5, 64.0), velocity: Vec3::ZERO },
             grounded: true,
+            air_jumps: AIR_JUMPS,
         }
     }
 
@@ -304,16 +328,17 @@ mod tests {
     }
 
     #[test]
-    fn air_acceleration_is_the_ground_rate_scaled_by_air_control() {
+    fn air_acceleration_from_rest_is_the_ground_rate_scaled_by_air_control() {
+        // The redirection model's from-rest degenerate is the old straight air accel: one
+        // airborne step from rest gains AIR_CONTROL times the grounded gain, along the stick.
+        use crate::constants::AIR_CONTROL;
         let world = flat_world(2.0);
         let run = StepInput { move_dir: Vec3::X, jump: false };
         let ground_dv = step(at_rest(&world), run, &world).motion.velocity.x;
-        let airborne = Player {
-            motion: Motion { position: Vec3::new(64.0, 30.0, 64.0), velocity: Vec3::ZERO },
-            grounded: false,
-        };
+        let airborne = player_at(Vec3::new(64.0, 30.0, 64.0));
         let air_dv = step(airborne, run, &world).motion.velocity.x;
         assert!((ground_dv - GROUND_ACCEL * SIM_DT).abs() < EPS, "one grounded step from rest gains accel * dt");
         assert!((air_dv - ground_dv * AIR_CONTROL).abs() < EPS, "air {air_dv} vs ground {ground_dv}");
     }
+
 }

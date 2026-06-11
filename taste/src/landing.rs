@@ -21,6 +21,10 @@
 //!   the horizontal offset from the apex, so the vertical tolerance doubles as the bearing window:
 //!   near the apex a rested capsule reads supported, further out it reads unsupported and slides
 //!   off - which is the feel a boulder should have.
+//! - `Obb`: the highest point where the vertical line under the axis leaves the box (a slab test
+//!   in the box frame). For a yaw-only box that is the top face over the rotated footprint -
+//!   crucially not over the conservative world box's footprint, which is the phantom shelf this
+//!   support test exists to deny.
 //!
 //! Deterministic and position-independent: fixed arithmetic over the collider list in slice order,
 //! reading only relative offsets.
@@ -57,7 +61,36 @@ pub fn supported_below(position: Vec3, statics: &[Collider]) -> bool {
             let d_sq = (position.x - center.x).powi(2) + (position.z - center.z).powi(2);
             d_sq <= radius * radius && near(center.y + half_height)
         }
+        Collider::Obb { center, half_extents, rotation } => {
+            obb_top_under(position, center, half_extents, rotation).is_some_and(near)
+        }
     })
+}
+
+/// The world height where the vertical line under the capsule axis at `position` last leaves the
+/// oriented box, or `None` when the line misses it: a slab test in the box frame. The line
+/// `(x, t, z)` maps to `l0 + t * d` locally (with `d` the rotated world-up), and each local axis
+/// clips the world-y interval `[t_min, t_max]`; the top of the bearing surface under the axis is
+/// `t_max`.
+fn obb_top_under(position: Vec3, center: Vec3, half_extents: Vec3, rotation: glam::Quat) -> Option<f32> {
+    let inv = rotation.conjugate();
+    let l0 = inv * (Vec3::new(position.x, 0.0, position.z) - center);
+    let d = inv * Vec3::Y;
+    let (mut t_min, mut t_max) = (f32::NEG_INFINITY, f32::INFINITY);
+    for i in 0..3 {
+        if d[i].abs() <= 1e-8 {
+            // The line runs parallel to this slab: it must already be inside it.
+            if l0[i].abs() > half_extents[i] {
+                return None;
+            }
+        } else {
+            let a = (-half_extents[i] - l0[i]) / d[i];
+            let b = (half_extents[i] - l0[i]) / d[i];
+            t_min = t_min.max(a.min(b));
+            t_max = t_max.min(a.max(b));
+        }
+    }
+    (t_min <= t_max).then_some(t_max)
 }
 
 #[cfg(test)]
@@ -91,6 +124,28 @@ mod tests {
         let pillar = [Collider::VertCylinder { center: Vec3::new(10.0, 2.0, 10.0), radius: 1.0, half_height: 2.0 }];
         assert!(supported_below(resting_at(10.5, 4.0, 10.0), &pillar), "on the cap");
         assert!(!supported_below(resting_at(11.2, 4.0, 10.0), &pillar), "past the rim");
+    }
+
+    #[test]
+    fn a_yawed_box_supports_its_rotated_footprint_and_not_the_world_box_corner() {
+        // Half-extent 1 yawed 45 degrees about Y, top at y = 3: the footprint is a diamond
+        // reaching sqrt(2) along the world axes, while the conservative world box also covers the
+        // corner region (x = z = 1.3 off the centre) that lies outside the diamond. That corner is
+        // the phantom shelf and must read unsupported; the diamond itself still bears.
+        let center = Vec3::new(10.0, 2.0, 10.0);
+        let yawed = [Collider::Obb {
+            center,
+            half_extents: Vec3::ONE,
+            rotation: glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_4),
+        }];
+        assert!(supported_below(resting_at(10.0, 3.0, 10.0), &yawed), "the top's middle bears");
+        // Along the diagonal the rotated box reaches sqrt(2): still on the top.
+        assert!(supported_below(resting_at(11.3, 3.0, 10.0), &yawed), "the rotated corner reach bears");
+        assert!(
+            !supported_below(resting_at(11.3, 3.0, 11.3), &yawed),
+            "the conservative world box's corner is the retired phantom shelf"
+        );
+        assert!(!supported_below(resting_at(10.0, 3.5, 10.0), &yawed), "hovering above the top is not support");
     }
 
     #[test]
@@ -148,6 +203,7 @@ mod tests {
         let mut p = Player {
             motion: Motion { position: Vec3::new(64.95, 4.0 + PLAYER_HEIGHT * 0.5 + 0.05, 64.0), velocity: Vec3::ZERO },
             grounded: false,
+            air_jumps: crate::constants::AIR_JUMPS,
         };
         for _ in 0..60 {
             p = sim::step(p, StepInput::default(), &world);
@@ -212,6 +268,7 @@ mod tests {
                     let mut p = Player {
                         motion: Motion { position: Vec3::new(64.0, top + PLAYER_HEIGHT * 0.5 + 0.05, 64.0), velocity: Vec3::ZERO },
                         grounded: false,
+                        air_jumps: crate::constants::AIR_JUMPS,
                     };
                     for _ in 0..60 {
                         p = sim::step(p, StepInput::default(), &world);
@@ -256,6 +313,7 @@ mod tests {
         let p = Player {
             motion: Motion { position: Vec3::new(65.2, 5.0, 64.0), velocity: Vec3::ZERO },
             grounded: false,
+            air_jumps: crate::constants::AIR_JUMPS,
         };
         let p = descend_idle(p, &world, 120);
         let ground = world.terrains[0].heightmap.height_at(p.motion.position.x, p.motion.position.z);

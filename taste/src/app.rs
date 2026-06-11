@@ -156,15 +156,17 @@ impl TasteApp {
     /// Run this frame's fixed steps. The camera yaw is resolved into a move direction once per
     /// frame (the camera turns at frame rate, between steps it is constant). The jump edge goes
     /// through the latch (`crate::jump`): it survives a frame that runs zero steps, fires on the
-    /// first grounded step inside the buffer window, and is consumed there, so a multi-step
-    /// catch-up frame still cannot bounce twice on one press.
+    /// first step that can jump - grounded, or airborne with an air jump in hand - inside the
+    /// buffer window, and is consumed there, so a multi-step catch-up frame still cannot bounce
+    /// twice on one press, and a zero-step frame cannot eat the double jump.
     fn simulate(&mut self, intent: &Intent, steps: u32) {
         if intent.jump {
             self.jump.press();
         }
         let move_dir = sim::move_direction(self.camera.yaw, intent.move_forward, intent.move_right);
         for _ in 0..steps {
-            let input = StepInput { move_dir, jump: self.jump.consume(self.player.grounded) };
+            let can_jump = self.player.grounded || self.player.air_jumps > 0;
+            let input = StepInput { move_dir, jump: self.jump.consume(can_jump) };
             self.player_prev = self.player;
             self.player = sim::step(self.player, input, &self.world);
         }

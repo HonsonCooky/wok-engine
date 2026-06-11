@@ -48,15 +48,15 @@ const PREFABS: [(&str, Primitive, Vec3, &str, Rest); 4] = [
 /// The sample placements: prefab slug, chunk-local x/z in metres, yaw in degrees, uniform scale.
 /// Spread around the chunk's middle so the spawn camera sees them against the hills.
 ///
-/// Solid boxes stay axis-aligned: a yawed cube collides as its conservative world AABB, which
-/// reaches past the drawn faces and gives the player an invisible standable shelf (the
-/// phantom-shelf finding). An oriented-box collider is parked until an authored scene wants a
-/// rotated solid box; yaw on round prefabs is free (a sphere or vertical cylinder spun about Y is
-/// itself).
+/// Yaw is free everywhere now: round prefabs spin onto themselves, and a yawed cube classifies as
+/// an oriented box that collides at its drawn faces (the phantom-shelf finding that once kept the
+/// crates axis-aligned is retired). The big lone crate carries the yaw so the honest rotated
+/// collision is visible in play; the capsule marker stays axis-aligned because a capsule still
+/// collides as its conservative box.
 const PLACEMENTS: [(&str, f32, f32, f32, f32); 8] = [
     ("crate", 52.0, 60.0, 0.0, 1.5),
     ("crate", 54.5, 61.8, 0.0, 1.0),
-    ("crate", 66.0, 55.0, 0.0, 2.0),
+    ("crate", 66.0, 55.0, 35.0, 2.0),
     ("boulder", 70.0, 48.0, 0.0, 1.0),
     ("boulder", 45.0, 75.0, 110.0, 1.4),
     ("pillar", 60.0, 70.0, 0.0, 1.0),
@@ -241,10 +241,10 @@ mod tests {
     #[test]
     fn sliced_sample_hitboxes_classify_into_their_true_collider_shapes() {
         // The same store-to-world reduction the game runs over loaded chunks: slice, then classify
-        // each hitbox. The boulder's uniform scale is the point - it is what makes it a Sphere
-        // collider here instead of its conservative box - and the upright pillar comes out a true
-        // vertical cylinder. Cube and capsule placeholders stay boxes.
-        use wok_physics::{Collider, classify_collider};
+        // each hitbox. The boulder's uniform scale is what makes it a Sphere, the upright pillar a
+        // true vertical cylinder, the yawed crate an oriented box at its drawn faces; axis-aligned
+        // crates and the capsule marker stay on the box path.
+        use wok_physics::{Collider, basis_is_axis_aligned, classify_collider};
         let content = build();
         let prefabs: std::collections::HashMap<_, _> = content.prefabs.iter().cloned().collect();
         let sliced = wok_scene::slice_chunk(&content.chunk, &prefabs).expect("the sample chunk slices");
@@ -258,25 +258,33 @@ mod tests {
                 Primitive::Cylinder => {
                     assert!(matches!(collider, Collider::VertCylinder { .. }), "pillar: {collider:?}");
                 }
+                Primitive::Cube if !basis_is_axis_aligned(&hitbox.transform) => {
+                    assert!(matches!(collider, Collider::Obb { .. }), "yawed crate: {collider:?}");
+                }
                 _ => assert!(matches!(collider, Collider::Aabb(_)), "{:?}: {collider:?}", hitbox.primitive),
             }
         }
     }
 
     #[test]
-    fn box_collided_placements_stay_axis_aligned() {
-        // The phantom-shelf guard: prefabs that collide as conservative AABBs (the cube crates and
-        // the capsule marker) must not be yawed, or the AABB outgrows the drawn shape and the
-        // player can stand on the invisible margin. Round prefabs may yaw freely.
+    fn one_crate_is_yawed_and_the_marker_stays_axis_aligned() {
+        // The re-yawed crate pins that the scene exercises the oriented-box path in play; the
+        // capsule marker still collides as its conservative box, so it must stay axis-aligned or
+        // the box would outgrow the drawn shape (the one phantom margin left by scope).
         let content = build();
+        let yawed_crates = content
+            .chunk
+            .placements
+            .iter()
+            .filter(|p| p.prefab.as_str() == "crate" && p.transform.rotation != Quat::IDENTITY)
+            .count();
+        assert_eq!(yawed_crates, 1, "exactly one crate carries the demonstration yaw");
         for placement in &content.chunk.placements {
-            let aabb_grade = matches!(placement.prefab.as_str(), "crate" | "marker");
-            if aabb_grade {
+            if placement.prefab.as_str() == "marker" {
                 assert_eq!(
                     placement.transform.rotation,
                     Quat::IDENTITY,
-                    "{:?} collides as its AABB and must stay axis-aligned",
-                    placement.prefab
+                    "the capsule marker collides as its AABB and must stay axis-aligned"
                 );
             }
         }

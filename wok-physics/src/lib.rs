@@ -55,6 +55,17 @@
 //!   [`spring_arm`] now take `&[Collider]`; AABB-only callers wrap with `Collider::from`, and box
 //!   behavior is unchanged.
 //!
+//! Part 4 (this revision) adds the oriented box, retiring the phantom shelf a rotated solid cube
+//! used to carry (its conservative world AABB reached past the drawn faces):
+//!
+//! - [`collider`] / [`classify`] - [`Collider::Obb`] (centre, per-axis half-extents, a unit-quat
+//!   rotation), classified from a `Cube` under any rigid rotation plus per-axis scale; axis-aligned
+//!   cubes stay on the cheaper `Aabb` path, and the shear guard still falls back conservatively.
+//!   [`basis_is_axis_aligned`] is exported so the editor's conservative-box warning shares the
+//!   classification tolerance.
+//! - [`sweep_obb`] - the box sweep run in the box's local frame (a rotated capsule is still a
+//!   capsule, so the map is exact), contact rotated back.
+//!
 //! Determinism (canon contract): identical inputs and `dt` give identical outputs; resolution over
 //! several colliders and the iterative sweep/slide both run sequentially in a defined order, with no
 //! parallel reduction and fixed iteration caps; the collision math is position-independent (it reads
@@ -73,6 +84,7 @@
 pub mod bounds;
 pub mod camera;
 pub mod capsule;
+pub mod classify;
 pub mod collider;
 pub mod collision;
 mod geom;
@@ -80,17 +92,20 @@ pub mod motion;
 pub mod slide;
 pub mod smoothing;
 pub mod sweep;
+pub mod sweep_obb;
 pub mod sweep_round;
 pub mod terrain;
 
 pub use bounds::{aabb_center, aabb_half_extents, world_aabb};
 pub use camera::{boom_direction, boom_point, spring_arm, terrain_floor};
 pub use capsule::Capsule;
-pub use collider::{Collider, classify_collider};
+pub use classify::{basis_is_axis_aligned, classify_collider};
+pub use collider::Collider;
 pub use collision::{Contact, aabb_contact, aabb_overlap, resolve_statics};
 pub use motion::{Motion, integrate};
 pub use slide::{SlideResult, collide_and_slide};
 pub use smoothing::smooth;
 pub use sweep::{SweptHit, sweep_capsule_aabb, sweep_capsule_aabbs, sweep_capsule_collider, sweep_capsule_colliders};
+pub use sweep_obb::sweep_capsule_obb;
 pub use sweep_round::{sweep_capsule_cylinder, sweep_capsule_sphere};
 pub use terrain::{TerrainRest, rest_on_heightmap, resolve_heightmap};

@@ -9,7 +9,7 @@
 
 use std::f32::consts::TAU;
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use wok_physics::Collider;
 use wok_render::LineSegment;
 use wok_scene::Aabb;
@@ -33,6 +33,9 @@ pub fn collider_lines(collider: &Collider, color: Vec3, out: &mut Vec<LineSegmen
         Collider::VertCylinder { center, radius, half_height } => {
             cylinder_lines(center, radius, half_height, color, out);
         }
+        Collider::Obb { center, half_extents, rotation } => {
+            obb_lines(center, half_extents, rotation, color, out);
+        }
     }
 }
 
@@ -47,6 +50,27 @@ fn aabb_lines(aabb: &Aabb, color: Vec3, out: &mut Vec<LineSegment>) {
             if i & 2 == 0 { lo.y } else { hi.y },
             if i & 4 == 0 { lo.z } else { hi.z },
         )
+    };
+    for i in 0..8 {
+        for bit in [1, 2, 4] {
+            if i & bit == 0 {
+                out.push(LineSegment { start: corner(i), end: corner(i | bit), color });
+            }
+        }
+    }
+}
+
+/// The 12 edges of an oriented box: the AABB stroke in the box's own frame, each corner rotated
+/// out by the collider's rotation, so the cage turns with a yawed crate instead of redrawing the
+/// conservative margin the Obb collider removed.
+fn obb_lines(center: Vec3, half_extents: Vec3, rotation: Quat, color: Vec3, out: &mut Vec<LineSegment>) {
+    let corner = |i: usize| {
+        let local = Vec3::new(
+            if i & 1 == 0 { -half_extents.x } else { half_extents.x },
+            if i & 2 == 0 { -half_extents.y } else { half_extents.y },
+            if i & 4 == 0 { -half_extents.z } else { half_extents.z },
+        );
+        center + rotation * local
     };
     for i in 0..8 {
         for bit in [1, 2, 4] {
@@ -111,6 +135,37 @@ mod tests {
         let cyl = Collider::VertCylinder { center: Vec3::ZERO, radius: 1.0, half_height: 2.0 };
         collider_lines(&cyl, SELECTION_COLOR, &mut out);
         assert_eq!(out.len(), 2 * RING_SEGMENTS + CAGE_VERTICALS);
+
+        out.clear();
+        let obb = Collider::Obb { center: Vec3::ZERO, half_extents: Vec3::ONE, rotation: Quat::from_rotation_y(0.5) };
+        collider_lines(&obb, SELECTION_COLOR, &mut out);
+        assert_eq!(out.len(), 12);
+    }
+
+    #[test]
+    fn an_obb_cage_rotates_with_its_collider() {
+        // Every cage endpoint must be a rotated corner: distance sqrt(3) from the centre (the
+        // box's own corner reach), and mapping it back by the inverse rotation lands on a corner
+        // of the local box. An axis-aligned cage would fail the map-back check.
+        let rotation = Quat::from_rotation_y(0.5);
+        let center = Vec3::new(3.0, 1.0, -2.0);
+        let mut out = Vec::new();
+        collider_lines(
+            &Collider::Obb { center, half_extents: Vec3::ONE, rotation },
+            SELECTION_COLOR,
+            &mut out,
+        );
+        for seg in &out {
+            for p in [seg.start, seg.end] {
+                let local = rotation.conjugate() * (p - center);
+                assert!(
+                    (local.x.abs() - 1.0).abs() < 1e-5
+                        && (local.y.abs() - 1.0).abs() < 1e-5
+                        && (local.z.abs() - 1.0).abs() < 1e-5,
+                    "cage endpoint {p:?} is not a rotated corner (local {local:?})"
+                );
+            }
+        }
     }
 
     #[test]

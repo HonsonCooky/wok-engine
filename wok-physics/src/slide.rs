@@ -297,6 +297,47 @@ mod tests {
     }
 
     #[test]
+    fn sliding_into_a_yawed_wall_runs_along_the_rotated_face() {
+        // A long box yawed about Y: the contact plane is the rotated face, so the slide must
+        // carry the motion along that face's direction - the velocity comes out perpendicular to
+        // the rotated normal, not to a world axis.
+        let yaw = 0.4_f32;
+        let rotation = glam::Quat::from_rotation_y(yaw);
+        let wall = Collider::Obb {
+            center: Vec3::new(4.0, 1.5, 0.0),
+            half_extents: Vec3::new(1.0, 3.0, 50.0),
+            rotation,
+        };
+        let c = player(Vec3::ZERO);
+        let d = Vec3::new(5.0, 0.0, 0.0);
+        let r = collide_and_slide(c, d, d, &[wall], Vec3::Y, WALKABLE_COS);
+
+        let face_normal = rotation * Vec3::NEG_X;
+        assert!(r.velocity.dot(face_normal).abs() < 1e-3, "velocity must lie in the rotated face: {:?}", r.velocity);
+        assert!(r.velocity.length() > 1.0, "the along-face component survives: {:?}", r.velocity);
+        // Slid along the face: the face runs along rotation * Z, so z moved while the capsule
+        // stayed outside the face plane.
+        assert!(r.position.z.abs() > 0.3, "should have slid along the yawed face: {:?}", r.position);
+        assert!((r.position - Vec3::new(4.0, r.position.y, 0.0)).dot(face_normal) >= 1.5 - 2e-3, "penetrated the yawed wall");
+        assert!(!r.grounded, "a vertical face is not ground however it is yawed");
+    }
+
+    #[test]
+    fn resting_on_a_yawed_box_top_reads_grounded() {
+        // Yaw leaves the top face horizontal: standing on a yawed crate grounds exactly as the
+        // axis-aligned one does.
+        let crate_top = Collider::Obb {
+            center: Vec3::new(0.0, 1.0, 0.0),
+            half_extents: Vec3::ONE,
+            rotation: glam::Quat::from_rotation_y(0.6),
+        };
+        let c = player(Vec3::new(0.0, 2.0, 0.0)); // feet on the top at y = 2
+        let r = collide_and_slide(c, Vec3::new(0.0, -0.1, 0.0), Vec3::new(0.0, -1.0, 0.0), &[crate_top], Vec3::Y, WALKABLE_COS);
+        assert!(r.grounded, "the yawed top should ground");
+        assert!(r.velocity.y.abs() < 1e-3, "the downward velocity dies on the top: {:?}", r.velocity);
+    }
+
+    #[test]
     fn a_mixed_collider_slide_is_deterministic() {
         let c = player(Vec3::ZERO);
         let statics = [

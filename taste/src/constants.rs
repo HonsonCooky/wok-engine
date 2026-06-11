@@ -57,12 +57,26 @@ pub const GROUND_ACCEL: f32 = 40.0;
 /// the acceleration so stopping reads planted rather than slippery: top speed to rest in 0.12s.
 pub const GROUND_FRICTION: f32 = 50.0;
 
-/// Airborne multiplier on the steering acceleration. A jump keeps its launch momentum: enough
-/// steering to adjust a landing, not enough to reverse direction mid-air. Raised from 0.3 on the
-/// feel-pass verdict: mid-air adjustment was too weak to place a landing. Friction never applies
-/// airborne - with no input the velocity is ballistic (policy in `crate::sim::step`: air friction
-/// pinned bodies onto crate corners, the last mid-air halt).
+/// Airborne multiplier on the speed-change acceleration. Under the redirection model
+/// (`crate::air`) this scales how fast airborne speed magnitude approaches the intended speed;
+/// direction is AIR_TURN_RATE's job. Friction never applies airborne - with no input the velocity
+/// is ballistic (policy in `crate::sim::step`: air friction pinned bodies onto crate corners, the
+/// last mid-air halt).
 pub const AIR_CONTROL: f32 = 0.55;
+
+/// How fast airborne input rotates the horizontal velocity's direction toward the stick, in
+/// radians per second. Redirection rather than acceleration-through-zero is the BFBB / Ratchet &
+/// Clank air authority: reversing heading mid-jump turns the moving velocity around (a half
+/// circle in ~0.52s, most of a jump's hang time) instead of braking through a dead stop, so a
+/// redirect never collapses the speed.
+pub const AIR_TURN_RATE: f32 = 6.0;
+
+/// Extra jumps available while airborne, restored on any grounding. One is the double jump.
+pub const AIR_JUMPS: u32 = 1;
+
+/// The air jump's launch velocity as a fraction of JUMP_VELOCITY: a touch weaker than the ground
+/// jump so the double jump reads as a recovery, not a free second full jump.
+pub const AIR_JUMP_SCALE: f32 = 0.9;
 
 /// Upward velocity granted by a jump, in m/s. With this gravity it clears about 1.9m at the apex
 /// (v^2 / 2g; apex scales with velocity squared, so the 1.5x apex verdict is a sqrt(1.5) bump on
@@ -278,6 +292,22 @@ mod tests {
         assert!(GROUND_FRICTION >= GROUND_ACCEL);
         // Airborne control is real but weaker than grounded: momentum survives a jump.
         assert!(AIR_CONTROL > 0.0 && AIR_CONTROL < 1.0);
+    }
+
+    #[test]
+    fn an_air_redirect_can_reverse_heading_within_one_jump() {
+        // The redirection promise: a full half-circle turn (the worst redirect) at AIR_TURN_RATE
+        // must fit inside a jump's hang time (2v/g up and down), or the do-over the air model
+        // sells cannot finish before landing.
+        let hang_time = 2.0 * JUMP_VELOCITY / -GRAVITY.y;
+        let reversal = std::f32::consts::PI / AIR_TURN_RATE;
+        assert!(reversal < hang_time, "reversal {reversal}s must fit the jump's {hang_time}s");
+    }
+
+    #[test]
+    fn the_double_jump_is_real_but_weaker_than_the_ground_jump() {
+        assert!(AIR_JUMPS >= 1, "the double jump exists");
+        assert!(AIR_JUMP_SCALE > 0.0 && AIR_JUMP_SCALE <= 1.0, "a recovery, not a stronger second jump");
     }
 
     #[test]

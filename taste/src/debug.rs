@@ -11,7 +11,7 @@
 
 use std::f32::consts::TAU;
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use wok_physics::Collider;
 use wok_render::LineSegment;
 use wok_scene::Aabb;
@@ -54,6 +54,9 @@ pub fn debug_lines(world: &World, player_pos: Vec3) -> Vec<LineSegment> {
             Collider::VertCylinder { center, radius, half_height } => {
                 cylinder_lines(center, radius, half_height, &mut lines);
             }
+            Collider::Obb { center, half_extents, rotation } => {
+                obb_lines(center, half_extents, rotation, &mut lines);
+            }
         }
     }
     capsule_lines(player_pos, &mut lines);
@@ -80,6 +83,27 @@ fn aabb_lines(aabb: &Aabb, out: &mut Vec<LineSegment>) {
             if i & 2 == 0 { lo.y } else { hi.y },
             if i & 4 == 0 { lo.z } else { hi.z },
         )
+    };
+    for i in 0..8 {
+        for bit in [1, 2, 4] {
+            if i & bit == 0 {
+                out.push(LineSegment { start: corner(i), end: corner(i | bit), color: HITBOX_COLOR });
+            }
+        }
+    }
+}
+
+/// The 12 edges of an oriented box: the AABB stroke drawn in the box's own frame, each corner
+/// rotated out by the collider's rotation. The cage must turn with the box - an axis-aligned cage
+/// around a yawed crate would redraw the conservative margin the Obb collider just removed.
+fn obb_lines(center: Vec3, half_extents: Vec3, rotation: Quat, out: &mut Vec<LineSegment>) {
+    let corner = |i: usize| {
+        let local = Vec3::new(
+            if i & 1 == 0 { -half_extents.x } else { half_extents.x },
+            if i & 2 == 0 { -half_extents.y } else { half_extents.y },
+            if i & 4 == 0 { -half_extents.z } else { half_extents.z },
+        );
+        center + rotation * local
     };
     for i in 0..8 {
         for bit in [1, 2, 4] {

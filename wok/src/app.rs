@@ -112,7 +112,13 @@ pub struct EditorApp {
     ui: UiState,
     size: (u32, u32),
     gpu: Option<Gpu>,
-    /// Exponentially smoothed frame time in milliseconds, for the stats overlay.
+    /// Frame-time window for the stats overlay: seconds and frames accumulated since the last
+    /// refresh. The displayed numbers update once a second (the window's average), because
+    /// per-frame fps and ms churn faster than they can be read.
+    stat_accum_s: f32,
+    stat_accum_frames: u32,
+    /// The displayed averages, refreshed once per second from the window above.
+    fps: f32,
     frame_ms: f32,
     /// Render-list length of the previous frame, for the stats overlay.
     draw_items: usize,
@@ -135,6 +141,9 @@ impl EditorApp {
             ui: UiState::default(),
             size: (0, 0),
             gpu: None,
+            stat_accum_s: 0.0,
+            stat_accum_frames: 0,
+            fps: 0.0,
             frame_ms: 0.0,
             draw_items: 0,
             title: String::new(),
@@ -295,8 +304,14 @@ impl App for EditorApp {
         }
 
         if ctx.dt > 0.0 {
-            let ms = ctx.dt * 1000.0;
-            self.frame_ms = if self.frame_ms <= 0.0 { ms } else { 0.9 * self.frame_ms + 0.1 * ms };
+            self.stat_accum_s += ctx.dt;
+            self.stat_accum_frames += 1;
+            if self.stat_accum_s >= 1.0 {
+                self.frame_ms = 1000.0 * self.stat_accum_s / self.stat_accum_frames as f32;
+                self.fps = self.stat_accum_frames as f32 / self.stat_accum_s;
+                self.stat_accum_s = 0.0;
+                self.stat_accum_frames = 0;
+            }
         }
 
         // Run the UI first: its focus queries decide what input the rest of the frame may use.
@@ -306,8 +321,9 @@ impl App for EditorApp {
         {
             let model = &self.model;
             let ui_state = &self.ui;
+            // fps and frame-ms are the once-per-second window averages; the counts stay live.
             let stats = Stats {
-                fps: if self.frame_ms > 0.0 { 1000.0 / self.frame_ms } else { 0.0 },
+                fps: self.fps,
                 frame_ms: self.frame_ms,
                 chunk_count: model.chunks.len(),
                 placement_count: model.placement_count(),

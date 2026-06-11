@@ -22,7 +22,7 @@ use wok_scene::{
     InstanceId, Placement, Prefab, PrefabRef, PrefabState, Primitive, Shape, SurfaceTag, Transform,
 };
 
-use crate::constants::{PLAYER_HEIGHT, PLAYER_RADIUS, SNAP_DOWN_DISTANCE};
+use crate::constants::{AIR_JUMPS, PLAYER_HEIGHT, PLAYER_RADIUS, SNAP_DOWN_DISTANCE};
 use crate::sim::{self, Player, StepInput};
 use crate::world::World;
 
@@ -121,8 +121,7 @@ fn scripted_inputs() -> Vec<StepInput> {
 }
 
 fn run(world: &World, inputs: &[StepInput]) -> Vec<Player> {
-    let start =
-        Player { motion: Motion { position: Vec3::new(6.0, 8.0, 6.0), velocity: Vec3::ZERO }, grounded: false };
+    let start = player_at(Vec3::new(6.0, 8.0, 6.0));
     let mut state = start;
     let mut trajectory = Vec::with_capacity(inputs.len());
     for &input in inputs {
@@ -140,7 +139,7 @@ fn bits(v: Vec3) -> [u32; 3] {
 
 /// A player at `position` with no velocity, airborne until proven otherwise.
 fn player_at(position: Vec3) -> Player {
-    Player { motion: Motion { position, velocity: Vec3::ZERO }, grounded: false }
+    Player { motion: Motion { position, velocity: Vec3::ZERO }, grounded: false, air_jumps: AIR_JUMPS }
 }
 
 /// Settle a player under no input for `steps` fixed steps.

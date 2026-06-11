@@ -18,6 +18,9 @@
 //! place. No tracing subscriber for the same reason as the editor: no engine crate emits tracing
 //! events yet.
 
+mod air;
+#[cfg(test)]
+mod air_feel;
 mod app;
 mod cli;
 mod clock;

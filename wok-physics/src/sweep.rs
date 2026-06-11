@@ -39,6 +39,7 @@ use wok_scene::Aabb;
 use crate::capsule::Capsule;
 use crate::collider::Collider;
 use crate::geom::closest_points_segment_aabb;
+use crate::sweep_obb::sweep_capsule_obb_inflated;
 use crate::sweep_round::{sweep_capsule_cylinder_inflated, sweep_capsule_sphere_inflated};
 
 /// Below this distance the segment is touching or inside the static shape and the closest-points
@@ -156,6 +157,9 @@ fn sweep_collider_one(capsule: &Capsule, delta: Vec3, collider: &Collider, skin:
         Collider::VertCylinder { center, radius, half_height } => {
             sweep_capsule_cylinder_inflated(capsule, delta, center, radius, half_height, skin)
         }
+        Collider::Obb { center, half_extents, rotation } => {
+            sweep_capsule_obb_inflated(capsule, delta, center, half_extents, rotation, skin)
+        }
     }
 }
 
@@ -232,8 +236,9 @@ pub(crate) fn advance_capsule(
 
 /// Outward normal of the box face nearest to `p` (which is on or inside the box), used only for the
 /// degenerate touching/inside case. Picks the least-penetration axis with the fixed tie order
-/// `-x, +x, -y, +y, -z, +z`, mirroring part 1's MTV tie-break.
-fn face_normal(aabb: &Aabb, p: Vec3) -> Vec3 {
+/// `-x, +x, -y, +y, -z, +z`, mirroring part 1's MTV tie-break. `pub(crate)` so the oriented-box
+/// sweep ([`crate::sweep_obb`]) reuses it against its local box.
+pub(crate) fn face_normal(aabb: &Aabb, p: Vec3) -> Vec3 {
     let candidates = [
         (p.x - aabb.min.x, Vec3::NEG_X),
         (aabb.max.x - p.x, Vec3::X),
