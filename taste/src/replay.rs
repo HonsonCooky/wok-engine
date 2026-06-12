@@ -22,8 +22,9 @@ use wok_scene::{
     InstanceId, Placement, Prefab, PrefabRef, PrefabState, Primitive, Shape, SurfaceTag, Transform,
 };
 
-use crate::constants::{AIR_JUMPS, PLAYER_HEIGHT, PLAYER_RADIUS, SNAP_DOWN_DISTANCE};
+use crate::constants::{PLAYER_HEIGHT, PLAYER_RADIUS};
 use crate::sim::{self, Player, StepInput};
+use crate::tuning::Tuning;
 use crate::world::World;
 
 // ---- the fixture world ----
@@ -136,11 +137,14 @@ fn scripted_inputs() -> Vec<StepInput> {
 }
 
 fn run(world: &World, inputs: &[StepInput]) -> Vec<Player> {
+    // Replay constructs the shipped defaults, never the app's live tuning: that is what keeps the
+    // determinism contract intact while the file is free to change under a play session.
+    let tuning = Tuning::default();
     let start = player_at(Vec3::new(6.0, 8.0, 6.0));
     let mut state = start;
     let mut trajectory = Vec::with_capacity(inputs.len());
     for &input in inputs {
-        state = sim::step(state, input, world);
+        state = sim::step(state, input, world, &tuning);
         trajectory.push(state);
     }
     trajectory
@@ -157,16 +161,17 @@ fn player_at(position: Vec3) -> Player {
     Player {
         motion: Motion { position, velocity: Vec3::ZERO },
         grounded: false,
-        air_jumps: AIR_JUMPS,
+        air_jumps: Tuning::default().air_jumps,
         coyote: 0.0,
     }
 }
 
 /// Settle a player under no input for `steps` fixed steps.
 fn settle(world: &World, start: Player, steps: usize) -> Player {
+    let tuning = Tuning::default();
     let mut state = start;
     for _ in 0..steps {
-        state = sim::step(state, StepInput::default(), world);
+        state = sim::step(state, StepInput::default(), world, &tuning);
     }
     state
 }
@@ -267,11 +272,12 @@ fn walking_downhill_stays_grounded_every_step_with_monotonic_descent() {
     let settled = settle(&world, player_at(Vec3::new(x, terrain.height_at(x, z) + PLAYER_HEIGHT, z)), 120);
     assert!(settled.grounded, "should start the walk settled on the ramp");
 
+    let t = Tuning::default();
     let downhill = StepInput { move_dir: Vec3::new(-1.0, 0.0, 0.0), jump: false };
     let mut state = settled;
     let mut prev_y = state.motion.position.y;
     for i in 0..240 {
-        state = sim::step(state, downhill, &world);
+        state = sim::step(state, downhill, &world, &t);
         assert!(state.grounded, "step {i}: flickered airborne walking downhill");
         assert!(state.motion.position.y <= prev_y + 1e-5, "step {i}: rose during a descent");
         prev_y = state.motion.position.y;
@@ -289,7 +295,7 @@ fn walking_off_a_ledge_taller_than_the_glue_goes_airborne() {
     // the terrain) and walking off, the player goes airborne before landing back on the ground.
     let mut world = fixture_world();
     let drop = 2.0;
-    assert!(drop > SNAP_DOWN_DISTANCE, "fixture: the ledge must out-reach the glue");
+    assert!(drop > Tuning::default().snap_down_distance, "fixture: the ledge must out-reach the glue");
     world.statics.push(
         Aabb::from_center_extents(
             Vec3::new(6.0, FLAT_HEIGHT_M + drop * 0.5, 100.0),
@@ -304,10 +310,11 @@ fn walking_off_a_ledge_taller_than_the_glue_goes_airborne() {
     assert!(base_height(on_box.motion.position) > FLAT_HEIGHT_M + drop - 0.1, "should rest on the box top");
 
     let off = StepInput { move_dir: Vec3::new(1.0, 0.0, 0.0), jump: false };
+    let t = Tuning::default();
     let mut state = on_box;
     let mut went_airborne = false;
     for _ in 0..120 {
-        state = sim::step(state, off, &world);
+        state = sim::step(state, off, &world, &t);
         went_airborne |= !state.grounded;
     }
     assert!(went_airborne, "stepping off the ledge should go airborne, not glue down");
@@ -328,18 +335,19 @@ fn a_jump_from_a_downhill_walk_still_leaves_the_ground() {
     let (x, z) = (100.0, 100.0);
     let settled = settle(&world, player_at(Vec3::new(x, terrain.height_at(x, z) + PLAYER_HEIGHT, z)), 120);
 
+    let t = Tuning::default();
     let downhill = Vec3::new(-1.0, 0.0, 0.0);
     let mut state = settled;
     for _ in 0..60 {
-        state = sim::step(state, StepInput { move_dir: downhill, jump: false }, &world);
+        state = sim::step(state, StepInput { move_dir: downhill, jump: false }, &world, &t);
     }
     assert!(state.grounded, "should still be walking the ramp when the jump comes");
     let before = state.motion.position;
 
-    state = sim::step(state, StepInput { move_dir: downhill, jump: true }, &world);
+    state = sim::step(state, StepInput { move_dir: downhill, jump: true }, &world, &t);
     assert!(!state.grounded, "the jump step must leave the ground");
     for _ in 0..5 {
-        state = sim::step(state, StepInput { move_dir: downhill, jump: false }, &world);
+        state = sim::step(state, StepInput { move_dir: downhill, jump: false }, &world, &t);
     }
     assert!(!state.grounded, "should still be rising shortly after the jump");
     assert!(

@@ -20,17 +20,17 @@
 
 use glam::Vec3;
 
-use crate::constants::AIR_TURN_RATE;
+use crate::tuning::Tuning;
 
 /// Below this squared speed the velocity has no usable heading; with nothing to rotate, steering
 /// leaves it alone (the unsteerable standing jump) instead of rotating noise.
 const NO_HEADING_SQ: f32 = 1e-8;
 
 /// One fixed step of airborne steering: the horizontal velocity (`y` must be zero; the caller
-/// splits it off) under `move_dir` (the world-space intent, length at most one) over `dt` seconds.
-/// Pure momentum: only the heading changes, never the speed. No input returns the velocity
-/// unchanged - ballistic.
-pub fn steer(horizontal: Vec3, move_dir: Vec3, dt: f32) -> Vec3 {
+/// splits it off) under `move_dir` (the world-space intent, length at most one) over `dt` seconds,
+/// turning at the tuning's air turn rate. Pure momentum: only the heading changes, never the speed.
+/// No input returns the velocity unchanged - ballistic.
+pub fn steer(horizontal: Vec3, move_dir: Vec3, dt: f32, tuning: &Tuning) -> Vec3 {
     if move_dir == Vec3::ZERO {
         return horizontal;
     }
@@ -39,12 +39,12 @@ pub fn steer(horizontal: Vec3, move_dir: Vec3, dt: f32) -> Vec3 {
         return horizontal;
     }
 
-    // Rotate the current heading toward the stick's by at most AIR_TURN_RATE * dt, the shorter
+    // Rotate the current heading toward the stick's by at most air_turn_rate * dt, the shorter
     // way around the vertical axis; the magnitude rides through untouched.
     let current = horizontal.z.atan2(horizontal.x);
     let wanted = move_dir.z.atan2(move_dir.x);
     let diff = wrap_angle(wanted - current);
-    let turn = diff.clamp(-AIR_TURN_RATE * dt, AIR_TURN_RATE * dt);
+    let turn = diff.clamp(-tuning.air_turn_rate * dt, tuning.air_turn_rate * dt);
     let heading = current + turn;
     Vec3::new(heading.cos(), 0.0, heading.sin()) * speed_sq.sqrt()
 }
@@ -61,7 +61,7 @@ fn wrap_angle(a: f32) -> f32 {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
-    use crate::constants::{MOVE_SPEED, SIM_DT};
+    use crate::constants::SIM_DT;
 
     fn speed(v: Vec3) -> f32 {
         v.length()
@@ -69,8 +69,9 @@ mod tests {
 
     #[test]
     fn no_input_is_ballistic() {
+        let t = Tuning::default();
         let v = Vec3::new(5.0, 0.0, -2.0);
-        assert_eq!(steer(v, Vec3::ZERO, SIM_DT), v, "airborne with no input must not touch velocity");
+        assert_eq!(steer(v, Vec3::ZERO, SIM_DT, &t), v, "airborne with no input must not touch velocity");
     }
 
     #[test]
@@ -79,11 +80,12 @@ mod tests {
         // stays the entry speed at every step (to rotation roundoff) - pure momentum's whole
         // claim, against both the old brake-through-zero model and the retired AIR_ACCEL
         // magnitude approach.
-        let entry = MOVE_SPEED;
+        let t = Tuning::default();
+        let entry = t.move_speed;
         let mut v = Vec3::new(entry, 0.0, 0.0);
-        let steps = (std::f32::consts::PI / AIR_TURN_RATE / SIM_DT).ceil() as usize;
+        let steps = (std::f32::consts::PI / t.air_turn_rate / SIM_DT).ceil() as usize;
         for i in 0..steps {
-            v = steer(v, Vec3::NEG_X, SIM_DT);
+            v = steer(v, Vec3::NEG_X, SIM_DT, &t);
             assert!(
                 (speed(v) - entry).abs() < 1e-3,
                 "step {i}: the speed changed mid-turn ({} vs entry {entry})",
@@ -98,13 +100,14 @@ mod tests {
     fn a_quarter_turn_takes_the_shorter_way_at_the_turn_rate() {
         // Heading +x, stick +z: after exactly half the quarter-turn time the heading has rotated
         // half the way (the rotation is rate-limited, not snapped).
-        let mut v = Vec3::new(MOVE_SPEED, 0.0, 0.0);
-        let quarter_steps = (std::f32::consts::FRAC_PI_2 / AIR_TURN_RATE / SIM_DT).round() as usize;
+        let t = Tuning::default();
+        let mut v = Vec3::new(t.move_speed, 0.0, 0.0);
+        let quarter_steps = (std::f32::consts::FRAC_PI_2 / t.air_turn_rate / SIM_DT).round() as usize;
         for _ in 0..quarter_steps / 2 {
-            v = steer(v, Vec3::Z, SIM_DT);
+            v = steer(v, Vec3::Z, SIM_DT, &t);
         }
         let angle = v.z.atan2(v.x);
-        let expected = AIR_TURN_RATE * SIM_DT * (quarter_steps / 2) as f32;
+        let expected = t.air_turn_rate * SIM_DT * (quarter_steps / 2) as f32;
         assert!((angle - expected).abs() < 1e-4, "angle {angle} vs rate-limited {expected}");
     }
 
@@ -113,8 +116,9 @@ mod tests {
         // Pure momentum's other face: whether entry is slower or faster than the run speed, a
         // steering step leaves the magnitude alone - there is no airborne approach toward an
         // intended speed (AIR_ACCEL retired), and an over-speed body keeps its momentum.
-        for entry in [2.0, MOVE_SPEED, 12.0] {
-            let v = steer(Vec3::new(entry, 0.0, 0.0), Vec3::X, SIM_DT);
+        let t = Tuning::default();
+        for entry in [2.0, t.move_speed, 12.0] {
+            let v = steer(Vec3::new(entry, 0.0, 0.0), Vec3::X, SIM_DT, &t);
             assert!((speed(v) - entry).abs() < 1e-5, "entry {entry}: speed became {}", speed(v));
             assert!(v.z.abs() < 1e-6, "heading must not drift when it already matches");
         }
@@ -127,14 +131,16 @@ mod tests {
         // Deliberate for now. The contingency, to be added only if play demands it, is a small
         // get-moving floor (~2.5 m/s along the stick when the airborne speed is zero) - not a
         // return of airborne acceleration.
-        let v = steer(Vec3::ZERO, Vec3::X, SIM_DT);
+        let t = Tuning::default();
+        let v = steer(Vec3::ZERO, Vec3::X, SIM_DT, &t);
         assert_eq!(v, Vec3::ZERO, "a zero-speed body must stay put under the stick: {v:?}");
     }
 
     #[test]
     fn steering_is_deterministic() {
+        let t = Tuning::default();
         let v = Vec3::new(3.0, 0.0, 4.0);
         let d = Vec3::new(-0.6, 0.0, 0.8);
-        assert_eq!(steer(v, d, SIM_DT), steer(v, d, SIM_DT));
+        assert_eq!(steer(v, d, SIM_DT, &t), steer(v, d, SIM_DT, &t));
     }
 }

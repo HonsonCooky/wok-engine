@@ -47,3 +47,7 @@ wok-platform = { path = "../wok-platform" }
 wok-render = { path = "../wok-render" }
 wok-scene = { path = "../wok-scene" }
 glam.workspace = true
+# Tuning is the one taste-owned serialized type (taste/tuning.json); these are the same workspace
+# pins the engine crates serialize their content through.
+serde.workspace = true
+serde_json.workspace = true

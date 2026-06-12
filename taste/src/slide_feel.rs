@@ -15,11 +15,10 @@ use glam::Vec3;
 use wok_physics::{Collider, Cylinder, Motion};
 use wok_scene::{Aabb, CHUNK_GRID_LEN, Heightmap, SurfaceTag};
 
-use crate::constants::{
-    AIR_JUMPS, FALL_GRAVITY, MOVE_SPEED, PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT, WALL_FRICTION,
-};
+use crate::constants::{PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT};
 use crate::sim::{self, Player, StepInput};
 use crate::slide::slide_player;
+use crate::tuning::Tuning;
 use crate::world::{ChunkTerrain, World};
 
 // ---- the policy at the slide level ----
@@ -31,7 +30,7 @@ fn upright(center: Vec3) -> Cylinder {
 /// One step's gravity-only probe: the displacement and velocity a standing body brings to the
 /// slide (fall gravity; the magnitude only has to be a realistic resting probe).
 fn gravity_probe() -> (Vec3, Vec3) {
-    let vy = -FALL_GRAVITY * SIM_DT;
+    let vy = -Tuning::default().fall_gravity() * SIM_DT;
     (Vec3::new(0.0, vy * SIM_DT, 0.0), Vec3::new(0.0, vy, 0.0))
 }
 
@@ -51,9 +50,10 @@ fn at_the_wall() -> Cylinder {
 /// One walk-speed step's motion and velocity at `degrees` off head-on (+x is straight into the
 /// wall, the tangent runs +z).
 fn approach(degrees: f32) -> (Vec3, Vec3) {
+    let move_speed = Tuning::default().move_speed;
     let (sin, cos) = degrees.to_radians().sin_cos();
     let dir = Vec3::new(cos, 0.0, sin);
-    (dir * (MOVE_SPEED * SIM_DT), dir * MOVE_SPEED)
+    (dir * (move_speed * SIM_DT), dir * move_speed)
 }
 
 #[test]
@@ -62,10 +62,11 @@ fn a_head_on_wall_contact_stops_dead() {
     // face and the whole velocity dies - nothing redirects, nothing skates. The wall is far
     // taller than STEP_HEIGHT (contact point at the body's mid-height), so the step-up never
     // fires even though the slide is told it is grounded.
+    let t = Tuning::default();
     let statics = wall();
     let body = at_the_wall();
     let (d, v) = approach(0.0);
-    let r = slide_player(body, d, v, &statics, true);
+    let r = slide_player(body, d, v, &statics, true, &t);
     assert_eq!(r.velocity, Vec3::ZERO, "a head-on hit must kill the velocity outright");
     assert_eq!(r.position.z, body.center.z, "no tangential drift out of a head-on hit");
     assert!(r.position.x <= 65.0 - PLAYER_RADIUS, "the body stays outside the wall");
@@ -80,10 +81,11 @@ fn a_20_degree_approach_stops_inside_the_window() {
     // pre-contact advance still carries its tangential share (the body really did move until it
     // touched), so the stop's pins are the dead velocity and that a SECOND step from the
     // now-flush body goes nowhere.
+    let t = Tuning::default();
     let statics = wall();
     let body = at_the_wall();
     let (d, v) = approach(20.0);
-    let r = slide_player(body, d, v, &statics, false);
+    let r = slide_player(body, d, v, &statics, false, &t);
     assert_eq!(r.velocity, Vec3::ZERO, "inside the window the redirect dies");
     assert!(
         (r.position.z - body.center.z).abs() <= d.z,
@@ -91,7 +93,7 @@ fn a_20_degree_approach_stops_inside_the_window() {
         r.position.z - body.center.z
     );
 
-    let again = slide_player(upright(r.position), d, v, &statics, false);
+    let again = slide_player(upright(r.position), d, v, &statics, false, &t);
     assert_eq!(again.velocity, Vec3::ZERO);
     assert!(
         (again.position.z - r.position.z).abs() < 1e-4,
@@ -106,12 +108,13 @@ fn a_45_degree_approach_slides_with_exactly_one_steps_scrub() {
     // projection (the wall is vertical, so the tangential component survives in full), and the
     // exit speed is that tangential speed less exactly one step of WALL_FRICTION - the analytic
     // scrub of a glancing wall slide.
+    let t = Tuning::default();
     let statics = wall();
     let body = at_the_wall();
     let (d, v) = approach(45.0);
-    let r = slide_player(body, d, v, &statics, false);
+    let r = slide_player(body, d, v, &statics, false, &t);
     assert!(r.velocity.x.abs() < 1e-5, "the wall kills the into-wall component: {:?}", r.velocity);
-    let expected_z = v.z - WALL_FRICTION * SIM_DT;
+    let expected_z = v.z - t.wall_friction * SIM_DT;
     assert!(
         (r.velocity.z - expected_z).abs() < 1e-4,
         "exit {} should be the tangential {} less one step's scrub",
@@ -127,15 +130,17 @@ fn a_brief_graze_barely_scrubs_and_free_motion_scrubs_nothing() {
     // One contacting step costs one step of WALL_FRICTION - a sliver of the entry speed - and
     // the moment contact ends the scrub ends with it: a following step clear of the wall returns
     // the velocity untouched.
+    let t = Tuning::default();
     let statics = wall();
     let body = at_the_wall();
     let (d, v) = approach(45.0);
-    let grazed = slide_player(body, d, v, &statics, false);
-    let scrub = WALL_FRICTION * SIM_DT;
+    let grazed = slide_player(body, d, v, &statics, false, &t);
+    let scrub = t.wall_friction * SIM_DT;
     assert!((v.z - grazed.velocity.z - scrub).abs() < 1e-4, "one contact step scrubs one step's friction");
     assert!(scrub < 0.1 * v.z, "the graze's dent must be a sliver of the entry speed");
 
-    let away = slide_player(upright(grazed.position), Vec3::new(-0.05, 0.0, 0.1), grazed.velocity, &statics, false);
+    let away =
+        slide_player(upright(grazed.position), Vec3::new(-0.05, 0.0, 0.1), grazed.velocity, &statics, false, &t);
     assert_eq!(away.velocity, grazed.velocity, "no contact, no scrub");
 }
 
@@ -144,10 +149,11 @@ fn a_ceiling_bump_does_not_scrub_the_run() {
     // The scrub is for walls. A flat ceiling's normal is straight down - no horizontal part - so
     // rising into it while running kills the rise (the plane projection) and must leave the run
     // alone: head bumps are not wall slides.
+    let t = Tuning::default();
     let ceiling = [Collider::from(Aabb::new(Vec3::new(60.0, 4.0, 60.0), Vec3::new(68.0, 5.0, 68.0)))];
     let body = upright(Vec3::new(64.0, 4.0 - PLAYER_HEIGHT * 0.5 - 0.005, 64.0));
-    let v = Vec3::new(MOVE_SPEED, 3.0, 0.0);
-    let r = slide_player(body, v * SIM_DT, v, &ceiling, false);
+    let v = Vec3::new(t.move_speed, 3.0, 0.0);
+    let r = slide_player(body, v * SIM_DT, v, &ceiling, false, &t);
     assert_eq!(r.velocity.x, v.x, "the run must survive the head bump unscrubbed");
     assert_eq!(r.velocity.y, 0.0, "the rise dies in the ceiling");
     assert!(!r.supported, "a ceiling can never be support");
@@ -160,10 +166,11 @@ fn gravity_still_falls_through_a_head_on_stop() {
     // projecting a vertical vector onto a vertical wall's plane is a no-op).
     let statics = wall();
     let body = at_the_wall();
+    let t = Tuning::default();
     let (mut d, mut v) = approach(0.0);
     d.y = -0.02;
     v.y = -3.0;
-    let r = slide_player(body, d, v, &statics, false);
+    let r = slide_player(body, d, v, &statics, false, &t);
     assert_eq!(r.velocity, Vec3::new(0.0, -3.0, 0.0), "the fall must survive the wall stop");
     assert!(r.position.y < body.center.y, "the body keeps descending along the wall");
 }
@@ -179,7 +186,7 @@ fn a_contact_over_the_apex_is_support_and_resolves_flat() {
     // Base resting a hair over the apex (y = 3.1): centre at apex + half height + 2mm.
     let body = upright(Vec3::new(64.2, 3.1 + PLAYER_HEIGHT * 0.5 + 0.002, 64.0));
     let (d, v) = gravity_probe();
-    let r = slide_player(body, d, v, &boulder, false);
+    let r = slide_player(body, d, v, &boulder, false, &Tuning::default());
     assert!(r.supported, "the apex under the disc is genuine support");
     assert!(r.grounded, "the apex contact grades as ground");
     let bleed = Vec3::new(r.velocity.x, 0.0, r.velocity.z).length();
@@ -205,7 +212,7 @@ fn a_steep_flank_contact_is_not_support_and_sheds() {
     let base = p.y + 0.003; // a hair above the contact, gravity closes it
     let body = upright(Vec3::new(p.x + PLAYER_RADIUS - 0.05, base + PLAYER_HEIGHT * 0.5, p.z));
     let (d, v) = gravity_probe();
-    let r = slide_player(body, d, v, &boulder, false);
+    let r = slide_player(body, d, v, &boulder, false, &Tuning::default());
     assert!(!r.supported, "a past-the-limit flank must not read as support");
     assert!(!r.grounded, "nor as ground");
     assert!(r.velocity.y < 0.0, "the fall survives the contact: the body is shedding, not standing");
@@ -217,11 +224,12 @@ fn walking_on_a_supported_top_still_makes_progress() {
     // projection lets it run along the surface instead of re-colliding every iteration and being
     // dropped at the cap.
     let boulder = [Collider::Sphere { center: Vec3::new(64.0, 2.0, 64.0), radius: 1.1 }];
+    let t = Tuning::default();
     let body = upright(Vec3::new(64.1, 3.1 + PLAYER_HEIGHT * 0.5 + 0.002, 64.0));
-    let step = MOVE_SPEED * SIM_DT;
+    let step = t.move_speed * SIM_DT;
     let d = Vec3::new(step, -0.005, 0.0);
-    let v = Vec3::new(MOVE_SPEED, -0.3, 0.0);
-    let r = slide_player(body, d, v, &boulder, false);
+    let v = Vec3::new(t.move_speed, -0.3, 0.0);
+    let r = slide_player(body, d, v, &boulder, false, &t);
     let moved = r.position.x - body.center.x;
     assert!(moved > step * 0.5, "a supported walk must keep moving: moved {moved} of {step}");
 }
@@ -239,7 +247,7 @@ fn standing(x: f32, z: f32, base_y: f32) -> Player {
     Player {
         motion: Motion { position: Vec3::new(x, base_y + PLAYER_HEIGHT * 0.5 + 0.02, z), velocity: Vec3::ZERO },
         grounded: false,
-        air_jumps: AIR_JUMPS,
+        air_jumps: Tuning::default().air_jumps,
         coyote: 0.0,
     }
 }
@@ -247,14 +255,15 @@ fn standing(x: f32, z: f32, base_y: f32) -> Player {
 /// Settle, then run `steps` idle steps asserting grounded throughout; returns the horizontal
 /// drift from the settled position.
 fn idle_drift(world: &World, start: Player, steps: usize) -> Vec3 {
+    let t = Tuning::default();
     let mut p = start;
     for _ in 0..30 {
-        p = sim::step(p, StepInput::default(), world);
+        p = sim::step(p, StepInput::default(), world, &t);
     }
     assert!(p.grounded, "fixture: must settle grounded before measuring drift");
     let settled = p.motion.position;
     for i in 0..steps {
-        p = sim::step(p, StepInput::default(), world);
+        p = sim::step(p, StepInput::default(), world, &t);
         assert!(p.grounded, "step {i}: lost the ground while standing still");
     }
     let d = p.motion.position - settled;
@@ -309,16 +318,17 @@ fn walking_deliberately_off_the_edge_still_departs() {
     // below.
     let mut world = flat_world(2.0);
     world.statics.push(Aabb::new(Vec3::new(63.0, 2.0, 63.0), Vec3::new(65.0, 4.0, 65.0)).into());
+    let t = Tuning::default();
     let mut p = standing(64.5, 64.0, 4.0);
     for _ in 0..30 {
-        p = sim::step(p, StepInput::default(), &world);
+        p = sim::step(p, StepInput::default(), &world, &t);
     }
     assert!(p.grounded, "fixture: should stand on the crate top");
 
     let off = StepInput { move_dir: Vec3::X, jump: false };
     let mut went_airborne = false;
     for _ in 0..180 {
-        p = sim::step(p, off, &world);
+        p = sim::step(p, off, &world, &t);
         went_airborne |= !p.grounded;
     }
     assert!(went_airborne, "walking off the edge must still depart");

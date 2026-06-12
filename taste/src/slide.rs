@@ -52,9 +52,8 @@ use glam::Vec3;
 use wok_physics::slide::{MAX_ITERS, MIN_MOVE_SQ, SKIN};
 use wok_physics::{Collider, Cylinder, SweptHit, sweep_cylinder_colliders};
 
-use crate::constants::{
-    PLAYER_RADIUS, SIM_DT, STEP_HEIGHT, WALKABLE_COS, WALKABLE_NORMAL_Y, WALL_FRICTION, WALL_STOP_DEG,
-};
+use crate::constants::{PLAYER_RADIUS, SIM_DT, STEP_HEIGHT};
+use crate::tuning::Tuning;
 
 /// Horizontal slack on the footprint test, beyond `PLAYER_RADIUS`: the sweep reports contact
 /// points on the static surface, a skin outside the body, so a rim-bearing contact can sit a
@@ -94,7 +93,12 @@ pub fn slide_player(
     velocity: Vec3,
     colliders: &[Collider],
     can_step_up: bool,
+    tuning: &Tuning,
 ) -> PlayerSlide {
+    // The walkable grades are derived from the tuning's one walkable angle; bind them once so the
+    // loop reads plain locals and the trig is not repeated per iteration.
+    let walkable_cos = tuning.walkable_cos();
+    let walkable_normal_y = tuning.walkable_normal_y();
     let mut body = cylinder;
     let mut remaining = displacement;
     let mut velocity = velocity;
@@ -115,26 +119,26 @@ pub fn slide_player(
             Some(hit) => {
                 let advance = remaining * hit.toi;
                 body = body.translated(advance);
-                if hit.normal.y >= WALKABLE_COS {
+                if hit.normal.y >= walkable_cos {
                     grounded = true;
                 }
                 let leftover = remaining - advance;
-                if hit.normal.y >= WALKABLE_NORMAL_Y && under_footprint(hit.point, body.center) {
+                if hit.normal.y >= walkable_normal_y && under_footprint(hit.point, body.center) {
                     // Genuine support: flat first (the vertical part dies, as on flat ground),
                     // then the true plane so surviving horizontal motion follows the surface.
                     supported = true;
                     remaining = project_on_plane(project_on_plane(leftover, Vec3::Y), hit.normal);
                     velocity = project_on_plane(project_on_plane(velocity, Vec3::Y), hit.normal);
-                } else if hit.normal.y.abs() < WALKABLE_NORMAL_Y {
+                } else if hit.normal.y.abs() < walkable_normal_y {
                     // A wall: try the step-up first - a climbable lip is not a wall touch.
                     let foot = body.center.y - body.half_height;
                     if can_step_up && !stepped && remaining.y <= 0.0 && hit.point.y - foot <= STEP_HEIGHT
-                        && let Some(climb) = try_step_up(body, leftover, colliders)
+                        && let Some(climb) = try_step_up(body, leftover, colliders, walkable_normal_y)
                     {
                         stepped = true;
                         body = climb.body;
                         remaining = climb.leftover;
-                        if climb.landing.normal.y >= WALKABLE_COS {
+                        if climb.landing.normal.y >= walkable_cos {
                             grounded = true;
                         }
                         if under_footprint(climb.landing.point, body.center) {
@@ -144,7 +148,7 @@ pub fn slide_player(
                         continue;
                     }
                     wall_contact = true;
-                    if head_on(leftover, hit.normal) {
+                    if head_on(leftover, hit.normal, tuning.wall_stop_deg) {
                         // The wall stop: inside the incidence window the tangential redirect
                         // dies - only the vertical part survives, projected onto the true plane
                         // so a tilted wall is still never pushed into.
@@ -168,7 +172,7 @@ pub fn slide_player(
     // step's geometry is untouched. Vertical is exempt, as in the stop.
     if wall_contact {
         let speed = Vec3::new(velocity.x, 0.0, velocity.z).length();
-        let scrub = WALL_FRICTION * SIM_DT;
+        let scrub = tuning.wall_friction * SIM_DT;
         let scale = if speed <= scrub { 0.0 } else { (speed - scrub) / speed };
         velocity.x *= scale;
         velocity.z *= scale;
@@ -202,7 +206,7 @@ struct StepUp {
 /// lip (the walk re-accelerates after the wall stop and climbs a step or two later, with the
 /// geometry left untouched in the meantime). The vertical part of `leftover` (one step of gravity
 /// during a grounded walk) is consumed by the climb.
-fn try_step_up(body: Cylinder, leftover: Vec3, colliders: &[Collider]) -> Option<StepUp> {
+fn try_step_up(body: Cylinder, leftover: Vec3, colliders: &[Collider], walkable_normal_y: f32) -> Option<StepUp> {
     let horizontal = Vec3::new(leftover.x, 0.0, leftover.z);
     if horizontal.length_squared() <= MIN_MOVE_SQ {
         return None;
@@ -222,7 +226,7 @@ fn try_step_up(body: Cylinder, leftover: Vec3, colliders: &[Collider]) -> Option
     };
 
     let landing = sweep_cylinder_colliders(&advanced, Vec3::NEG_Y * lift, colliders, SKIN)?;
-    if landing.normal.y < WALKABLE_NORMAL_Y {
+    if landing.normal.y < walkable_normal_y {
         return None;
     }
     Some(StepUp { body: advanced.translated(Vec3::NEG_Y * (lift * landing.toi)), leftover, landing })
@@ -234,18 +238,18 @@ fn project_on_plane(v: Vec3, normal: Vec3) -> Vec3 {
     v - normal * v.dot(normal)
 }
 
-/// Is this wall contact head-on: does the horizontal part of `motion` point within `WALL_STOP_DEG`
+/// Is this wall contact head-on: does the horizontal part of `motion` point within `wall_stop_deg`
 /// of straight into the wall (the wall's inward horizontal direction, `-normal` flattened)? The
 /// comparison `-h.dot(w) >= |h| * |w| * cos(window)` is the angle test without normalizing; the
 /// strict `> 0.0` guard makes the degenerate cases false: no horizontal motion means no incidence
 /// to measure (a pure vertical graze keeps the engine resolve), and no horizontal normal means a
 /// flat ceiling or floor, which this policy never touches. Inclusive at the window's edge,
 /// matching "within".
-fn head_on(motion: Vec3, normal: Vec3) -> bool {
+fn head_on(motion: Vec3, normal: Vec3, wall_stop_deg: f32) -> bool {
     let h = Vec3::new(motion.x, 0.0, motion.z);
     let w = Vec3::new(normal.x, 0.0, normal.z);
     let into_wall = -h.dot(w);
-    into_wall > 0.0 && into_wall >= h.length() * w.length() * WALL_STOP_DEG.to_radians().cos()
+    into_wall > 0.0 && into_wall >= h.length() * w.length() * wall_stop_deg.to_radians().cos()
 }
 
 #[cfg(test)]

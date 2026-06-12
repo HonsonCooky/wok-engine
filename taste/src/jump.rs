@@ -24,7 +24,8 @@
 //! wall time, so the replay contract is untouched: scripted inputs through the latch reproduce
 //! bitwise.
 
-use crate::constants::{JUMP_BUFFER_S, SIM_DT};
+use crate::constants::SIM_DT;
+use crate::tuning::Tuning;
 
 /// A pending jump press: its age in simulation seconds, or nothing pending.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -46,17 +47,17 @@ impl JumpLatch {
     /// Ask, once per fixed step, whether this step should jump. `can_jump` is whether the player
     /// at step entry has a jump to give - `Player::can_jump`: grounded, inside the coyote window,
     /// or with an air jump remaining (the state the step's own jump check reads, so the latch and
-    /// the step agree). A pending press
-    /// fires and is consumed on the first step that can jump; a step that cannot ages it by
-    /// `SIM_DT` and drops it once it is older than `JUMP_BUFFER_S`.
-    pub fn consume(&mut self, can_jump: bool) -> bool {
+    /// the step agree). A pending press fires and is consumed on the first step that can jump; a
+    /// step that cannot ages it by `SIM_DT` and drops it once it is older than the tuning's jump
+    /// buffer.
+    pub fn consume(&mut self, can_jump: bool, tuning: &Tuning) -> bool {
         let Some(age) = self.age else { return false };
         if can_jump {
             self.age = None;
             return true;
         }
         let aged = age + SIM_DT;
-        self.age = if aged <= JUMP_BUFFER_S { Some(aged) } else { None };
+        self.age = if aged <= tuning.jump_buffer_s { Some(aged) } else { None };
         false
     }
 }
@@ -69,39 +70,42 @@ mod tests {
     /// past it (150%: 9 at the defaults). Deliberately clear of the exact boundary, where float
     /// accumulation of SIM_DT decides the outcome and the test would pin luck, not behavior.
     fn steps_inside_buffer() -> u32 {
-        (JUMP_BUFFER_S * 0.8 / SIM_DT) as u32
+        (Tuning::default().jump_buffer_s * 0.8 / SIM_DT) as u32
     }
 
     fn steps_past_buffer() -> u32 {
-        (JUMP_BUFFER_S * 1.5 / SIM_DT).ceil() as u32
+        (Tuning::default().jump_buffer_s * 1.5 / SIM_DT).ceil() as u32
     }
 
     #[test]
     fn no_press_means_no_jump() {
+        let t = Tuning::default();
         let mut latch = JumpLatch::new();
-        assert!(!latch.consume(true));
-        assert!(!latch.consume(false));
+        assert!(!latch.consume(true, &t));
+        assert!(!latch.consume(false, &t));
     }
 
     #[test]
     fn a_press_on_a_zero_step_frame_fires_on_the_next_step() {
         // The frame that raised the edge ran zero fixed steps (nothing consumed); the next frame's
         // first step must still see the press.
+        let t = Tuning::default();
         let mut latch = JumpLatch::new();
         latch.press();
-        assert!(latch.consume(true), "the latched press must fire on the first step that runs");
+        assert!(latch.consume(true, &t), "the latched press must fire on the first step that runs");
     }
 
     #[test]
     fn a_press_within_the_buffer_before_landing_fires_at_landing() {
         // Pressed while airborne with the air jump already spent (can_jump false), inside the
         // buffer window before the landing step: every waiting step ages it, the landing fires.
+        let t = Tuning::default();
         let mut latch = JumpLatch::new();
         latch.press();
         for i in 0..steps_inside_buffer() {
-            assert!(!latch.consume(false), "spent-air step {i} must not jump");
+            assert!(!latch.consume(false, &t), "spent-air step {i} must not jump");
         }
-        assert!(latch.consume(true), "the buffered press must fire on the landing step");
+        assert!(latch.consume(true, &t), "the buffered press must fire on the landing step");
     }
 
     #[test]
@@ -110,13 +114,14 @@ mod tests {
         // next step is airborne with the air jump in hand (can_jump true), so the press fires the
         // air jump through the very same latch the ground jump uses - a zero-step frame cannot
         // eat the double jump. Driven through the real step so the wiring matches the app's.
-        use crate::constants::{AIR_JUMP_SCALE, ASCENT_GRAVITY, JUMP_VELOCITY};
+        use crate::constants::SIM_DT;
         use crate::sim::{self, Player, StepInput};
         use crate::world::{ChunkTerrain, World};
         use glam::Vec3;
         use wok_physics::Motion;
         use wok_scene::{CHUNK_GRID_LEN, Heightmap, SurfaceTag};
 
+        let t = Tuning::default();
         let raw = Heightmap::meters_to_raw(2.0);
         let heightmap =
             Heightmap::new(vec![raw; CHUNK_GRID_LEN], vec![SurfaceTag::new("g")], vec![0; CHUNK_GRID_LEN]).unwrap();
@@ -130,54 +135,56 @@ mod tests {
         let p = Player {
             motion: Motion { position: Vec3::new(64.0, 20.0, 64.0), velocity: Vec3::new(0.0, 0.2, 0.0) },
             grounded: false,
-            air_jumps: crate::constants::AIR_JUMPS,
+            air_jumps: t.air_jumps,
             coyote: 0.0,
         };
 
         let mut latch = JumpLatch::new();
         latch.press(); // the frame that raised this edge ran zero fixed steps
-        let fired = latch.consume(p.can_jump());
+        let fired = latch.consume(p.can_jump(), &t);
         assert!(fired, "an airborne step with an air jump in hand consumes the press");
-        let next = sim::step(p, StepInput { move_dir: Vec3::ZERO, jump: fired }, &world);
+        let next = sim::step(p, StepInput { move_dir: Vec3::ZERO, jump: fired }, &world, &t);
         assert!(
-            (next.motion.velocity.y - (JUMP_VELOCITY * AIR_JUMP_SCALE - ASCENT_GRAVITY * crate::constants::SIM_DT))
-                .abs()
+            (next.motion.velocity.y - (t.jump_velocity() * t.air_jump_scale - t.ascent_gravity() * SIM_DT)).abs()
                 < 1e-5,
             "the latched press must fire the air jump: vy = {}",
             next.motion.velocity.y
         );
-        assert!(!latch.consume(next.can_jump()), "the press is spent: one press, one jump");
+        assert!(!latch.consume(next.can_jump(), &t), "the press is spent: one press, one jump");
     }
 
     #[test]
     fn a_press_older_than_the_buffer_does_not_fire() {
+        let t = Tuning::default();
         let mut latch = JumpLatch::new();
         latch.press();
         for _ in 0..steps_past_buffer() {
-            assert!(!latch.consume(false));
+            assert!(!latch.consume(false, &t));
         }
-        assert!(!latch.consume(true), "a stale press must not fire on a later landing");
+        assert!(!latch.consume(true, &t), "a stale press must not fire on a later landing");
     }
 
     #[test]
     fn one_press_never_produces_two_jumps() {
         // The catch-up-burst guarantee: however many grounded steps one frame runs, the press
         // fires on the first and is spent.
+        let t = Tuning::default();
         let mut latch = JumpLatch::new();
         latch.press();
-        assert!(latch.consume(true));
+        assert!(latch.consume(true, &t));
         for _ in 0..8 {
-            assert!(!latch.consume(true), "a consumed press must stay consumed");
+            assert!(!latch.consume(true, &t), "a consumed press must stay consumed");
         }
     }
 
     #[test]
     fn a_second_press_jumps_again() {
         // Consuming clears the press, not the latch: the next edge works as the first did.
+        let t = Tuning::default();
         let mut latch = JumpLatch::new();
         latch.press();
-        assert!(latch.consume(true));
+        assert!(latch.consume(true, &t));
         latch.press();
-        assert!(latch.consume(true));
+        assert!(latch.consume(true, &t));
     }
 }

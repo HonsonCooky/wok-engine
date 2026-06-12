@@ -32,11 +32,8 @@ use wok_physics::{Cylinder, Motion, boom_direction, integrate, rest_cylinder_on_
 
 use crate::air;
 use crate::slide::slide_player;
-use crate::constants::{
-    AIR_JUMP_SCALE, AIR_JUMPS, ASCENT_GRAVITY, COYOTE_S, FALL_GRAVITY, GROUND_ACCEL, GROUND_FRICTION,
-    JUMP_VELOCITY, MOVE_SPEED, PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT, SNAP_DOWN_DISTANCE,
-    SPAWN_HEIGHT, WALKABLE_COS,
-};
+use crate::constants::{PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT, SPAWN_HEIGHT};
+use crate::tuning::Tuning;
 use crate::world::{CHUNK_SIZE_M, World};
 
 /// The player: a cylinder-bodied actor the game owns between steps. `motion.position` is the
@@ -76,10 +73,10 @@ pub struct StepInput {
 
 /// The gravity in force for a body whose vertical velocity is `vy`, as the acceleration
 /// `integrate` takes. Rising bodies decelerate under the jump's derived ascent gravity; everything
-/// else (descent, standing) falls under the `FALL_GRAVITY_MULT`-scaled descent gravity. The split
-/// is what makes the arc asymmetric: the rise keeps the tuned apex and time, the fall commits.
-pub fn gravity(vy: f32) -> Vec3 {
-    Vec3::new(0.0, if vy > 0.0 { -ASCENT_GRAVITY } else { -FALL_GRAVITY }, 0.0)
+/// else (descent, standing) falls under the fall-multiplier-scaled descent gravity. The split is
+/// what makes the arc asymmetric: the rise keeps the tuned apex and time, the fall commits.
+pub fn gravity(vy: f32, tuning: &Tuning) -> Vec3 {
+    Vec3::new(0.0, if vy > 0.0 { -tuning.ascent_gravity() } else { -tuning.fall_gravity() }, 0.0)
 }
 
 /// Resolve the intent's movement axes against the camera yaw into a world-space horizontal move
@@ -109,7 +106,7 @@ pub fn lerp_position(prev: &Player, curr: &Player, alpha: f32) -> Vec3 {
 
 /// The player at rest in the air above the middle of the first terrain chunk (or above the world
 /// origin when no chunk has terrain), `SPAWN_HEIGHT` above the surface: the opening fall.
-pub fn spawn(world: &World) -> Player {
+pub fn spawn(world: &World, tuning: &Tuning) -> Player {
     let half = CHUNK_SIZE_M * 0.5;
     let position = world.terrains.first().map_or(Vec3::new(0.0, SPAWN_HEIGHT, 0.0), |t| {
         let ground = t.heightmap.height_at(half, half);
@@ -118,7 +115,7 @@ pub fn spawn(world: &World) -> Player {
     Player {
         motion: Motion { position, velocity: Vec3::ZERO },
         grounded: false,
-        air_jumps: AIR_JUMPS,
+        air_jumps: tuning.air_jumps,
         coyote: 0.0,
     }
 }
@@ -135,7 +132,7 @@ fn approach(current: Vec3, target: Vec3, max_delta: f32) -> Vec3 {
 
 /// Advance the player by one fixed step. Pure: identical player, input, and world give an identical
 /// next player, bit for bit.
-pub fn step(player: Player, input: StepInput, world: &World) -> Player {
+pub fn step(player: Player, input: StepInput, world: &World, tuning: &Tuning) -> Player {
     // Locomotion splits by grounding. Grounded, the horizontal velocity approaches intent *
     // MOVE_SPEED at a constant rate (GROUND_ACCEL with input, GROUND_FRICTION toward rest
     // without), so starts and stops take a beat and read as weight. Airborne is pure momentum
@@ -148,11 +145,11 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     let mut m = player.motion;
     let horizontal = Vec3::new(m.velocity.x, 0.0, m.velocity.z);
     let horizontal = if player.grounded {
-        let target = Vec3::new(input.move_dir.x, 0.0, input.move_dir.z) * MOVE_SPEED;
-        let rate = if input.move_dir == Vec3::ZERO { GROUND_FRICTION } else { GROUND_ACCEL };
+        let target = Vec3::new(input.move_dir.x, 0.0, input.move_dir.z) * tuning.move_speed;
+        let rate = if input.move_dir == Vec3::ZERO { tuning.ground_friction } else { tuning.ground_accel };
         approach(horizontal, target, rate * SIM_DT)
     } else {
-        air::steer(horizontal, input.move_dir, SIM_DT)
+        air::steer(horizontal, input.move_dir, SIM_DT, tuning)
     };
     m.velocity.x = horizontal.x;
     m.velocity.z = horizontal.z;
@@ -174,11 +171,11 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     let mut jumped = false;
     if input.jump {
         if player.grounded || coyote > 0.0 {
-            m.velocity.y = JUMP_VELOCITY;
+            m.velocity.y = tuning.jump_velocity();
             jumped = true;
         } else if air_jumps > 0 {
             air_jumps -= 1;
-            m.velocity.y = JUMP_VELOCITY * AIR_JUMP_SCALE;
+            m.velocity.y = tuning.jump_velocity() * tuning.air_jump_scale;
             if input.move_dir == Vec3::ZERO {
                 m.velocity.x = 0.0;
                 m.velocity.z = 0.0;
@@ -194,17 +191,24 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     // walkable geometry never bleeds sideways, lips within STEP_HEIGHT are climbed (only from a
     // grounded, non-jumping entry - the gate passed here), walls stop or slide per the wall
     // policies.
-    let next = integrate(m, gravity(m.velocity.y), SIM_DT);
+    let next = integrate(m, gravity(m.velocity.y, tuning), SIM_DT);
     let body = Cylinder::upright(m.position, PLAYER_HEIGHT, PLAYER_RADIUS);
-    let slid =
-        slide_player(body, next.position - m.position, next.velocity, &world.statics, player.grounded && !jumped);
+    let slid = slide_player(
+        body,
+        next.position - m.position,
+        next.velocity,
+        &world.statics,
+        player.grounded && !jumped,
+        tuning,
+    );
 
     // Rest the slid body on the terrain of the chunk beneath it, in that chunk's local frame
     // (lift-only; the slide handled walls). Off every chunk there is no ground to rest on.
     let slid_body = Cylinder::upright(slid.position, PLAYER_HEIGHT, PLAYER_RADIUS);
     let (rested_position, rested_grounded) = match world.terrain_under(slid.position.x, slid.position.z) {
         Some(t) => {
-            let rest = rest_cylinder_on_heightmap(slid_body.translated(-t.origin), &t.heightmap, WALKABLE_COS);
+            let rest =
+                rest_cylinder_on_heightmap(slid_body.translated(-t.origin), &t.heightmap, tuning.walkable_cos());
             (rest.position + t.origin, rest.grounded)
         }
         None => (slid.position, false),
@@ -234,8 +238,8 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
         && let Some(t) = world.terrain_under(position.x, position.z)
     {
         let probe = Cylinder::upright(position - t.origin, PLAYER_HEIGHT, PLAYER_RADIUS)
-            .translated(Vec3::new(0.0, -SNAP_DOWN_DISTANCE, 0.0));
-        let snap = rest_cylinder_on_heightmap(probe, &t.heightmap, WALKABLE_COS);
+            .translated(Vec3::new(0.0, -tuning.snap_down_distance, 0.0));
+        let snap = rest_cylinder_on_heightmap(probe, &t.heightmap, tuning.walkable_cos());
         if snap.grounded {
             position = snap.position + t.origin;
             velocity.y = 0.0;
@@ -245,8 +249,8 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
 
     // Any grounding restores the air jumps and refreshes the coyote grace; airborne, the grace
     // burns down one step of simulation time. The double jump is per airtime, not per life.
-    let air_jumps = if grounded { AIR_JUMPS } else { air_jumps };
-    let coyote = if grounded { COYOTE_S } else { (coyote - SIM_DT).max(0.0) };
+    let air_jumps = if grounded { tuning.air_jumps } else { air_jumps };
+    let coyote = if grounded { tuning.coyote_s } else { (coyote - SIM_DT).max(0.0) };
     Player { motion: Motion { position, velocity }, grounded, air_jumps, coyote }
 }
 
@@ -296,7 +300,7 @@ mod tests {
         Player {
             motion: Motion { position, velocity: Vec3::ZERO },
             grounded: false,
-            air_jumps: AIR_JUMPS,
+            air_jumps: Tuning::default().air_jumps,
             coyote: 0.0,
         }
     }
@@ -334,11 +338,12 @@ mod tests {
     /// grounded (with the coyote grace a grounded step would carry).
     fn at_rest(world: &World) -> Player {
         let ground = world.terrains[0].heightmap.height_at(64.0, 64.0);
+        let t = Tuning::default();
         Player {
             motion: Motion { position: Vec3::new(64.0, ground + PLAYER_HEIGHT * 0.5, 64.0), velocity: Vec3::ZERO },
             grounded: true,
-            air_jumps: AIR_JUMPS,
-            coyote: crate::constants::COYOTE_S,
+            air_jumps: t.air_jumps,
+            coyote: t.coyote_s,
         }
     }
 
@@ -351,19 +356,22 @@ mod tests {
         // Constant-rate approach from rest: v(t) = GROUND_ACCEL * t, so 95% of top speed arrives
         // at 0.95 * MOVE_SPEED / GROUND_ACCEL seconds; the ceil grants the partial step.
         let world = flat_world(2.0);
+        let t = Tuning::default();
         let run = StepInput { move_dir: Vec3::X, jump: false };
-        let steps = (0.95 * MOVE_SPEED / GROUND_ACCEL / SIM_DT).ceil() as usize;
+        let steps = (0.95 * t.move_speed / t.ground_accel / SIM_DT).ceil() as usize;
         let mut p = at_rest(&world);
         for _ in 0..steps {
-            p = step(p, run, &world);
+            p = step(p, run, &world, &t);
         }
-        assert!(horizontal_speed(&p) >= 0.95 * MOVE_SPEED - EPS, "speed {} after {steps} steps", horizontal_speed(&p));
-        // Top speed is unchanged: the approach arrives at exactly MOVE_SPEED and cruises there.
+        let speed = horizontal_speed(&p);
+        assert!(speed >= 0.95 * t.move_speed - EPS, "speed {speed} after {steps} steps");
+        // Top speed is unchanged: the approach arrives at exactly move_speed and cruises there.
         for _ in 0..120 {
-            p = step(p, run, &world);
-            assert!(horizontal_speed(&p) <= MOVE_SPEED + EPS, "overshot top speed: {}", horizontal_speed(&p));
+            p = step(p, run, &world, &t);
+            assert!(horizontal_speed(&p) <= t.move_speed + EPS, "overshot top speed: {}", horizontal_speed(&p));
         }
-        assert!((horizontal_speed(&p) - MOVE_SPEED).abs() < EPS, "should cruise at top speed: {}", horizontal_speed(&p));
+        let cruise = horizontal_speed(&p);
+        assert!((cruise - t.move_speed).abs() < EPS, "should cruise at top speed: {cruise}");
     }
 
     #[test]
@@ -371,11 +379,12 @@ mod tests {
         // The approach has no asymptote: within MOVE_SPEED / GROUND_FRICTION seconds of no input
         // the horizontal velocity is exactly zero, not a lingering creep.
         let world = flat_world(2.0);
+        let t = Tuning::default();
         let mut p = at_rest(&world);
-        p.motion.velocity = Vec3::new(MOVE_SPEED, 0.0, 0.0);
-        let steps = (MOVE_SPEED / GROUND_FRICTION / SIM_DT).ceil() as usize;
+        p.motion.velocity = Vec3::new(t.move_speed, 0.0, 0.0);
+        let steps = (t.move_speed / t.ground_friction / SIM_DT).ceil() as usize;
         for _ in 0..steps {
-            p = step(p, StepInput::default(), &world);
+            p = step(p, StepInput::default(), &world, &t);
         }
         assert_eq!(p.motion.velocity.x, 0.0);
         assert_eq!(p.motion.velocity.z, 0.0);
@@ -390,16 +399,17 @@ mod tests {
         // crate::air_feel), and an airborne steering step leaves a moving body's speed magnitude
         // untouched.
         let world = flat_world(2.0);
+        let t = Tuning::default();
         let run = StepInput { move_dir: Vec3::X, jump: false };
-        let ground_dv = step(at_rest(&world), run, &world).motion.velocity.x;
-        assert!((ground_dv - GROUND_ACCEL * SIM_DT).abs() < EPS, "one grounded step from rest gains accel * dt");
+        let ground_dv = step(at_rest(&world), run, &world, &t).motion.velocity.x;
+        assert!((ground_dv - t.ground_accel * SIM_DT).abs() < EPS, "one grounded step from rest gains accel * dt");
 
-        let from_rest = step(player_at(Vec3::new(64.0, 30.0, 64.0)), run, &world);
+        let from_rest = step(player_at(Vec3::new(64.0, 30.0, 64.0)), run, &world, &t);
         assert_eq!(horizontal_speed(&from_rest), 0.0, "airborne input must not move a body at rest");
 
         let mut moving = player_at(Vec3::new(64.0, 30.0, 64.0));
         moving.motion.velocity = Vec3::new(3.0, 0.0, 0.0);
-        let steered = step(moving, StepInput { move_dir: Vec3::Z, jump: false }, &world);
+        let steered = step(moving, StepInput { move_dir: Vec3::Z, jump: false }, &world, &t);
         assert!(
             (horizontal_speed(&steered) - 3.0).abs() < EPS,
             "an airborne steering step must not change the speed: {}",

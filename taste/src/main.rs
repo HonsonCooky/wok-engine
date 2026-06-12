@@ -13,6 +13,11 @@
 //! (always live; the cursor is captured and hidden while the game runs), F1 to toggle the hitbox
 //! overlay, Esc to quit. On a gamepad: sticks, south button, and Select/Back to quit.
 //!
+//! Feel tuning is live: the gameplay and camera numbers a play-test verdict moves live in
+//! `taste/tuning.json` (`crate::tuning`), loaded at startup (written from the shipped defaults the
+//! first time it is missing) and hot-reloaded while playing, so the human iterates feel without
+//! rebuilds. A parse error keeps the previous values and says so; it never crashes the session.
+//!
 //! Errors: `Box<dyn Error>` to `main`, which prints and exits - the wok precedent; nothing here
 //! inspects failures programmatically, so no error enum (and no anyhow dependency) has earned its
 //! place. No tracing subscriber for the same reason as the editor: no engine crate emits tracing
@@ -43,6 +48,7 @@ mod sim;
 mod slide;
 #[cfg(test)]
 mod slide_feel;
+mod tuning;
 mod world;
 
 use std::error::Error;
@@ -61,9 +67,14 @@ fn main() {
     }
 }
 
-/// Everything before the window opens: parse the CLI, load the editor-authored content, and build
-/// the app. A missing scene is the one failure with advice attached: taste never generates content,
-/// so the editor has to have run first.
+/// The tracked feel-tuning file, relative to the working directory: the same cwd convention the
+/// content directory follows, so a `cargo run -p taste` from the workspace root finds it. Tracked
+/// in git as the authored feel record.
+const TUNING_PATH: &str = "taste/tuning.json";
+
+/// Everything before the window opens: parse the CLI, load the editor-authored content, load (or
+/// first-run write) the feel tuning, and build the app. A missing scene is the one failure with
+/// advice attached: taste never generates content, so the editor has to have run first.
 fn start(args: &[String]) -> Result<app::TasteApp, Box<dyn Error>> {
     let root = cli::parse_args(args)?;
     let paths = content::ContentPaths::new(root);
@@ -83,9 +94,45 @@ fn start(args: &[String]) -> Result<app::TasteApp, Box<dyn Error>> {
         loaded.chunks.len(),
         loaded.prefabs.len()
     );
+
+    let tuning_path = std::path::PathBuf::from(TUNING_PATH);
+    let tuning = load_tuning(&tuning_path);
+
     println!("taste: controls: WASD or left stick to move, space or south button to jump,");
     println!("taste:           mouse or right stick to look (cursor is captured while running),");
     println!("taste:           F1 to toggle the hitbox overlay, Esc or Select/Back to quit");
+    println!("taste: feel tuning: {} (edit and save to live-reload while playing)", tuning_path.display());
 
-    app::TasteApp::new(loaded)
+    app::TasteApp::new(loaded, tuning, tuning_path)
+}
+
+/// Load the feel tuning, never failing the launch over it. Present and valid: use it (any broken
+/// relationships print as warnings, but play continues). Present and unparseable: warn and fall
+/// back to the shipped defaults, leaving the file untouched so the human can fix it. Absent: write
+/// the defaults out as the first-run record and use them. Validation warnings print on load so a
+/// detuned file announces itself before play, exactly as it will on reload.
+fn load_tuning(path: &std::path::Path) -> tuning::Tuning {
+    let loaded = if path.exists() {
+        match tuning::load(path) {
+            Ok(t) => {
+                println!("taste: loaded feel tuning from {}", path.display());
+                t
+            }
+            Err(err) => {
+                println!("taste: tuning at {} did not parse ({err}); using the shipped defaults", path.display());
+                tuning::Tuning::default()
+            }
+        }
+    } else {
+        let defaults = tuning::Tuning::default();
+        match tuning::save(path, &defaults) {
+            Ok(()) => println!("taste: no tuning file; wrote the shipped defaults to {}", path.display()),
+            Err(err) => println!("taste: could not write defaults to {} ({err}); using them in memory", path.display()),
+        }
+        defaults
+    };
+    for warning in loaded.validate() {
+        println!("taste: tuning warning: {warning}");
+    }
+    loaded
 }

@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::path::PathBuf;
 
 use glam::{Mat4, Quat, Vec3};
 use wok_content::ChunkStore;
@@ -30,7 +31,7 @@ use wok_platform::winit::keyboard::NamedKey;
 use wok_platform::winit::window::CursorGrabMode;
 use wok_platform::{App, FrameCtx, Platform, gfx};
 use wok_render::{Camera, DepthMode, RenderItem, Renderer};
-use wok_scene::{Aabb, ChunkCoord, Primitive, SurfaceTag, VisibleItem};
+use wok_scene::{Aabb, ChunkCoord, Primitive, SurfaceTag, VisibleItem, Watcher};
 
 use crate::clock::FixedClock;
 use crate::constants::{
@@ -44,6 +45,7 @@ use crate::follow::{self, FollowCamera};
 use crate::intent::{Intent, map_input};
 use crate::jump::JumpLatch;
 use crate::sim::{self, Player, StepInput};
+use crate::tuning::{self, Tuning};
 use crate::world::{World, chunk_origin};
 
 const TERRAIN_COLOR: Vec3 = Vec3::new(0.40, 0.60, 0.35);
@@ -56,9 +58,11 @@ const MARKER_LIFT: f32 = 0.01;
 const MARKER_COLOR: Vec3 = Vec3::new(1.0, 0.0, 1.0);
 
 /// Vertical headroom added to the shadow region's top: the player must keep casting at the jump
-/// apex (JUMP_APEX_HEIGHT, the tuning parameter itself) plus half the body's height above the
-/// tracked position, even when standing on the region's highest point. Game knowledge, so it lives
-/// here rather than in the renderer's fit; the relationship is pinned by a test below.
+/// apex (the default `jump_apex_height`) plus half the body's height above the tracked position,
+/// even when standing on the region's highest point. Game knowledge, so it lives here rather than
+/// in the renderer's fit; the relationship against the shipped jump is pinned by a test below. The
+/// region is fit once at startup and not against the live tuning, so a tuning.json that raises the
+/// apex far past the default could pop the shadow at the apex - a live-tuning edge, not a regression.
 const SHADOW_HEADROOM_M: f32 = 3.0;
 
 /// Draw order of the primitive mesh cache; `primitive_index` must match.
@@ -107,6 +111,17 @@ pub struct TasteApp {
     /// computed once because taste loads everything up front and never reloads.
     shadow_region: Aabb,
     world: World,
+    /// The live feel tuning (`crate::tuning`): the gameplay and camera numbers the sim, the jump
+    /// latch, the camera, and the look mapping all read each frame. Swapped wholesale when the
+    /// watched `tuning.json` changes; replay and tests are unaffected because they never see this
+    /// instance (they construct `Tuning::default()`).
+    tuning: Tuning,
+    /// The tracked tuning file the watcher reports on and a reload re-reads. Held so the reload
+    /// path knows exactly which file to parse.
+    tuning_path: PathBuf,
+    /// Watches the tuning file's directory for the hot reload. `None` when watching could not start
+    /// (the file's directory is missing or inaccessible): play continues, just without live reload.
+    watcher: Option<Watcher>,
     player: Player,
     /// The sim state one fixed step behind `player`: the other end of the draw interpolation.
     player_prev: Player,
@@ -123,9 +138,10 @@ pub struct TasteApp {
 }
 
 impl TasteApp {
-    /// Build the app from loaded content: transform every chunk through the store (synchronous; the
-    /// demo loads everything), reduce the world, and spawn the player and camera over it.
-    pub fn new(loaded: LoadedContent) -> Result<TasteApp, Box<dyn Error>> {
+    /// Build the app from loaded content and the feel tuning: transform every chunk through the
+    /// store (synchronous; the demo loads everything), reduce the world, spawn the player and
+    /// camera over it under the tuning, and start watching the tuning file for hot reload.
+    pub fn new(loaded: LoadedContent, tuning: Tuning, tuning_path: PathBuf) -> Result<TasteApp, Box<dyn Error>> {
         let mut store = ChunkStore::new();
         for (chunk, heightmap) in loaded.chunks {
             store.load(chunk, heightmap, &loaded.prefabs)?;
@@ -133,14 +149,18 @@ impl TasteApp {
         let mut shadow_region = World::scene_bounds(&store);
         shadow_region.max.y += SHADOW_HEADROOM_M;
         let world = World::from_store(&store);
-        let player = sim::spawn(&world);
-        let camera = FollowCamera::spawn(camera_target(player.motion.position));
+        let player = sim::spawn(&world, &tuning);
+        let camera = FollowCamera::spawn(camera_target(player.motion.position), &tuning);
+        let watcher = start_tuning_watch(&tuning_path);
         Ok(TasteApp {
             scene_name: loaded.scene.name,
             light: loaded.light,
             store,
             shadow_region,
             world,
+            tuning,
+            tuning_path,
+            watcher,
             player,
             player_prev: player,
             jump: JumpLatch::new(),
@@ -151,6 +171,29 @@ impl TasteApp {
             overlay: OverlayMode::default(),
             gpu: None,
         })
+    }
+
+    /// Poll the tuning watcher and apply any change between frames. A successful reparse validates
+    /// (warnings print, play continues) and swaps the tuning in with a stdout line; a parse failure
+    /// keeps the previous values and says so. Nothing here can crash the session - the whole point
+    /// of validation-not-panic. No-op when watching never started.
+    fn reload_tuning_if_changed(&mut self) {
+        let Some(watcher) = self.watcher.as_mut() else { return };
+        // Path::ends_with matches whole final components, so this fires on the tuning file alone
+        // even though the watch is on its directory (which also catches sibling edits in dev).
+        if !watcher.poll().iter().any(|p| p.ends_with("tuning.json")) {
+            return;
+        }
+        match tuning::load(&self.tuning_path) {
+            Ok(reloaded) => {
+                for warning in reloaded.validate() {
+                    println!("taste: tuning warning: {warning}");
+                }
+                self.tuning = reloaded;
+                println!("taste: tuning reloaded");
+            }
+            Err(err) => println!("taste: tuning reload failed ({err}); keeping the previous values"),
+        }
     }
 
     /// Run this frame's fixed steps. The camera yaw is resolved into a move direction once per
@@ -166,9 +209,9 @@ impl TasteApp {
         }
         let move_dir = sim::move_direction(self.camera.yaw, intent.move_forward, intent.move_right);
         for _ in 0..steps {
-            let input = StepInput { move_dir, jump: self.jump.consume(self.player.can_jump()) };
+            let input = StepInput { move_dir, jump: self.jump.consume(self.player.can_jump(), &self.tuning) };
             self.player_prev = self.player;
-            self.player = sim::step(self.player, input, &self.world);
+            self.player = sim::step(self.player, input, &self.world, &self.tuning);
         }
     }
 
@@ -182,7 +225,7 @@ impl TasteApp {
         // Fog distance sets render distance (HLD); the far plane sits past full occlusion.
         let far = (self.light.fog.end * 1.2).max(50.0);
         let camera = Camera {
-            view_proj: self.camera.view_proj(aspect, far),
+            view_proj: self.camera.view_proj(aspect, far, &self.tuning),
             eye: self.camera.position,
         };
 
@@ -277,7 +320,7 @@ impl TasteApp {
         }
         if SHOW_RETICLE {
             let mut reticle = Vec::new();
-            debug::reticle_lines(self.camera.look_target(), &mut reticle);
+            debug::reticle_lines(self.camera.look_target(&self.tuning), &mut reticle);
             renderer.render_lines(
                 &ctx.platform.device,
                 &ctx.platform.queue,
@@ -332,6 +375,10 @@ impl App for TasteApp {
     }
 
     fn frame(&mut self, ctx: &mut FrameCtx) {
+        // Hot reload is applied between frames, before anything reads the tuning this frame, so a
+        // save lands cleanly on the next frame's whole simulation rather than mid-step.
+        self.reload_tuning_if_changed();
+
         if ctx.width > 0 && ctx.height > 0 && (ctx.width, ctx.height) != self.size {
             if let Some(gpu) = self.gpu.as_mut() {
                 gpu.renderer.resize(&ctx.platform.device, ctx.width, ctx.height);
@@ -345,7 +392,7 @@ impl App for TasteApp {
             self.overlay = self.overlay.next();
         }
 
-        let intent = map_input(&ctx.input, ctx.dt);
+        let intent = map_input(&ctx.input, ctx.dt, &self.tuning);
         // Quit is the platform's clean shutdown (cleanup runs, the loop exits); nothing this
         // frame would show is worth simulating or drawing on the way out.
         if intent.quit {
@@ -357,11 +404,31 @@ impl App for TasteApp {
 
         // Draw and camera both read the interpolated position: one timeline.
         let view_pos = sim::lerp_position(&self.player_prev, &self.player, self.clock.alpha());
-        self.camera = follow::update(&self.camera, camera_target(view_pos), intent.look_delta, &self.world, ctx.dt);
+        self.camera =
+            follow::update(&self.camera, camera_target(view_pos), intent.look_delta, &self.world, ctx.dt, &self.tuning);
         self.render(ctx, view_pos);
     }
 
     fn cleanup(&mut self, _platform: &Platform) {}
+}
+
+/// Start watching the tuning file's directory for hot reload, returning `None` (with a stdout
+/// note) when the watch cannot start. Watching the DIRECTORY rather than the file survives the
+/// write-temp-then-rename many editors use to save (which would otherwise orphan a file-only
+/// watch); `TasteApp::reload_tuning_if_changed` filters the directory's events down to the tuning
+/// file by name. Hot reload is a dev convenience, so a failed watch never fails the launch.
+fn start_tuning_watch(tuning_path: &std::path::Path) -> Option<Watcher> {
+    let dir = tuning_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    match Watcher::new(dir) {
+        Ok(watcher) => Some(watcher),
+        Err(err) => {
+            println!("taste: tuning hot-reload unavailable ({err}); edits to the file need a restart");
+            None
+        }
+    }
 }
 
 /// The point the camera orbits and frames: a little above the body centre.
@@ -386,19 +453,21 @@ fn player_transform(position: Vec3) -> Mat4 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{JUMP_APEX_HEIGHT, PLAYER_HEIGHT};
+    use crate::constants::PLAYER_HEIGHT;
     use wok_physics::Cylinder;
 
     #[test]
-    // Asserting on constants is the point: the test pins a relationship between tuning values so
-    // a retune that breaks it fails loudly (the same stance as the constants module's tests).
+    // Asserting on a constant is the point: the test pins the headroom against the shipped jump so
+    // a default-apex change that breaks it fails loudly (the same stance as the constants tests).
     #[allow(clippy::assertions_on_constants)]
     fn the_shadow_headroom_clears_the_jump_apex() {
-        // The headroom must cover the apex plus the capsule's upper half from the region's highest
-        // point, or the shadow pops off mid-jump; pinned so a jump retune cannot out-jump the fit.
+        // The headroom must cover the shipped apex plus the capsule's upper half from the region's
+        // highest point, or the shadow pops off mid-jump; pinned against the default tuning so a
+        // change to the shipped jump cannot out-jump the fit.
+        let apex = Tuning::default().jump_apex_height;
         assert!(
-            SHADOW_HEADROOM_M >= JUMP_APEX_HEIGHT + PLAYER_HEIGHT * 0.5,
-            "headroom {SHADOW_HEADROOM_M} cannot cover the apex {JUMP_APEX_HEIGHT} plus the capsule's upper half"
+            SHADOW_HEADROOM_M >= apex + PLAYER_HEIGHT * 0.5,
+            "headroom {SHADOW_HEADROOM_M} cannot cover the apex {apex} plus the capsule's upper half"
         );
     }
 

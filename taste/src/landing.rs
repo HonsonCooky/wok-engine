@@ -20,9 +20,17 @@ use glam::Vec3;
 use wok_physics::{Collider, Motion};
 use wok_scene::{Aabb, CHUNK_GRID_LEN, Heightmap, SurfaceTag};
 
-use crate::constants::{AIR_JUMPS, JUMP_APEX_HEIGHT, PLAYER_HEIGHT, PLAYER_RADIUS, STEP_HEIGHT};
-use crate::sim::{self, Player, StepInput};
+use crate::constants::{PLAYER_HEIGHT, PLAYER_RADIUS, STEP_HEIGHT};
+use crate::sim::{Player, StepInput};
+use crate::tuning::Tuning;
 use crate::world::{ChunkTerrain, World};
+
+/// One fixed step under the shipped defaults. These pins are behavioral, not tuning sweeps, so
+/// every step runs `Tuning::default()` - the same shipped feel replay locks - keeping the test
+/// bodies free of a tuning argument they never vary.
+fn step(player: Player, input: StepInput, world: &World) -> Player {
+    crate::sim::step(player, input, world, &Tuning::default())
+}
 
 fn flat_world(height_m: f32) -> World {
     let raw = Heightmap::meters_to_raw(height_m);
@@ -42,7 +50,7 @@ fn airborne_at(position: Vec3) -> Player {
     Player {
         motion: Motion { position, velocity: Vec3::ZERO },
         grounded: false,
-        air_jumps: AIR_JUMPS,
+        air_jumps: Tuning::default().air_jumps,
         coyote: 0.0,
     }
 }
@@ -54,7 +62,7 @@ fn base_y(p: &Player) -> f32 {
 /// Drive idle steps until grounded (panicking past `limit`), then return the player.
 fn settle(mut p: Player, world: &World, limit: usize) -> Player {
     for _ in 0..limit {
-        p = sim::step(p, StepInput::default(), world);
+        p = step(p, StepInput::default(), world);
         if p.grounded {
             return p;
         }
@@ -91,7 +99,7 @@ fn tilted_faces_inside_the_walkable_limit_are_standable_with_zero_drift() {
         let stood = p.motion.position;
         let mut q = p;
         for i in 0..120 {
-            q = sim::step(q, StepInput::default(), &world);
+            q = step(q, StepInput::default(), &world);
             assert!(q.grounded, "{degrees} deg, step {i}: lost the stand");
         }
         let drift = (q.motion.position - stood).length();
@@ -110,7 +118,7 @@ fn a_61_degree_face_sheds_to_the_terrain() {
 
     let mut p = airborne_at(face_center + Vec3::new(0.0, 2.0, 0.0));
     for i in 0..600 {
-        p = sim::step(p, StepInput::default(), &world);
+        p = step(p, StepInput::default(), &world);
         if p.grounded {
             assert!(
                 (base_y(&p) - 2.0).abs() < 0.05,
@@ -138,7 +146,7 @@ fn standing_with_the_axis_past_the_ledge_but_the_rim_supported_is_grounded() {
     let stood = p.motion.position;
     let mut q = p;
     for i in 0..120 {
-        q = sim::step(q, StepInput::default(), &world);
+        q = step(q, StepInput::default(), &world);
         assert!(q.grounded, "step {i}: the overhang stand gave out");
     }
     assert!((q.motion.position - stood).length() < 1e-4, "the overhang stand must not creep");
@@ -155,7 +163,7 @@ fn a_corner_landing_stands_instead_of_rolling_off() {
     let stood = p.motion.position;
     let mut q = p;
     for i in 0..120 {
-        q = sim::step(q, StepInput::default(), &world);
+        q = step(q, StepInput::default(), &world);
         assert!(q.grounded, "step {i}: the corner stand gave out");
     }
     assert!((q.motion.position - stood).length() < 1e-4, "the corner landing must not roll off");
@@ -170,7 +178,7 @@ fn a_fall_past_the_rims_reach_descends_to_the_terrain() {
     let mut p = airborne_at(Vec3::new(65.5, 5.5, 64.0));
     let mut prev_y = p.motion.position.y;
     for i in 0..240 {
-        p = sim::step(p, StepInput::default(), &world);
+        p = step(p, StepInput::default(), &world);
         assert!(p.motion.position.y <= prev_y + 1e-5, "step {i}: rose during the descent");
         prev_y = p.motion.position.y;
         if p.grounded {
@@ -193,7 +201,7 @@ fn lip_world(lip: f32) -> World {
 fn walk_east(mut p: Player, world: &World, steps: usize) -> Player {
     let run = StepInput { move_dir: Vec3::X, jump: false };
     for _ in 0..steps {
-        p = sim::step(p, run, world);
+        p = step(p, run, world);
     }
     p
 }
@@ -209,7 +217,7 @@ fn a_02m_lip_is_climbed_mid_walk() {
     let mut q = p;
     let run = StepInput { move_dir: Vec3::X, jump: false };
     for i in 0..40 {
-        q = sim::step(q, run, &world);
+        q = step(q, run, &world);
         assert!(q.grounded, "step {i}: the climb must never read airborne");
     }
     assert!((base_y(&q) - 2.2).abs() < 0.02, "should be walking on the lip top, base {}", base_y(&q));
@@ -239,21 +247,22 @@ fn the_jump_is_unaffected_by_the_step_up() {
     // 0.5m face flies the full authored arc - apex height intact - rather than being converted
     // into a step or clipped by a phantom lift.
     let world = lip_world(0.5);
+    let apex_height = Tuning::default().jump_apex_height;
     let p = settle(airborne_at(Vec3::new(65.0, 3.0, 64.0)), &world, 240);
     let start_y = p.motion.position.y;
-    let mut q = sim::step(p, StepInput { move_dir: Vec3::X, jump: true }, &world);
+    let mut q = step(p, StepInput { move_dir: Vec3::X, jump: true }, &world);
     assert!(!q.grounded, "the jump step must leave the ground");
     let mut apex = q.motion.position.y;
     for _ in 0..240 {
-        q = sim::step(q, StepInput { move_dir: Vec3::X, jump: false }, &world);
+        q = step(q, StepInput { move_dir: Vec3::X, jump: false }, &world);
         apex = apex.max(q.motion.position.y);
         if q.grounded {
             break;
         }
     }
     assert!(
-        (apex - start_y - JUMP_APEX_HEIGHT).abs() < 0.05,
-        "the arc must fly the authored apex: climbed {} of {JUMP_APEX_HEIGHT}",
+        (apex - start_y - apex_height).abs() < 0.05,
+        "the arc must fly the authored apex: climbed {} of {apex_height}",
         apex - start_y
     );
     assert!(q.grounded, "and land again");
@@ -319,21 +328,21 @@ fn a_jump_off_each_crate_settles_on_a_legal_stand_from_every_angle() {
                 let label = format!("size {size} angle {k} hold {hold_after}");
                 let mut p = airborne_at(Vec3::new(64.0, top + PLAYER_HEIGHT * 0.5 + 0.05, 64.0));
                 for _ in 0..60 {
-                    p = sim::step(p, StepInput::default(), &world);
+                    p = step(p, StepInput::default(), &world);
                 }
                 assert!(p.grounded && base_y(&p) > top - 0.05, "{label}: fixture should stand on the top");
 
                 // A short run-up, then the jump with the direction still held.
                 for _ in 0..6 {
-                    p = sim::step(p, StepInput { move_dir: dir, jump: false }, &world);
+                    p = step(p, StepInput { move_dir: dir, jump: false }, &world);
                 }
-                p = sim::step(p, StepInput { move_dir: dir, jump: true }, &world);
+                p = step(p, StepInput { move_dir: dir, jump: true }, &world);
                 assert!(!p.grounded, "{label}: the jump step must leave the ground");
 
                 let mut settled = false;
                 for i in 0..300 {
                     let move_dir = if i < hold_after { dir } else { Vec3::ZERO };
-                    p = sim::step(p, StepInput { move_dir, jump: false }, &world);
+                    p = step(p, StepInput { move_dir, jump: false }, &world);
                     if p.grounded {
                         assert!(
                             on_terrain(&p) || on_top(&p),
