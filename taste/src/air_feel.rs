@@ -139,14 +139,14 @@ fn the_double_jump_fires_airborne_exactly_once_and_resets_on_landing() {
 }
 
 #[test]
-fn the_air_jump_sets_the_vertical_and_leaves_the_horizontal_bitwise_untouched() {
-    // The redirect is gone: the air jump's impulse is vertical only. Whatever the stick, the jump
-    // step's horizontal velocity is bitwise the matching no-jump step's - the press changes
+fn a_held_direction_air_jump_leaves_the_horizontal_bitwise_untouched() {
+    // The redirect is gone: with a direction held, the air jump's impulse is vertical only. The
+    // jump step's horizontal velocity is bitwise the matching no-jump step's - the press changes
     // nothing but the vertical - so direction changes are the steering's job alone (AIR_TURN_RATE
     // / AIR_ACCEL) and the air jump cannot read as a violent re-aim.
     let world = flat_world(2.0);
     let p = airborne_at_speed(Vec3::new(5.0, 0.0, 0.0));
-    for stick in [Vec3::ZERO, Vec3::Z, Vec3::NEG_X] {
+    for stick in [Vec3::Z, Vec3::NEG_X] {
         let jumped = sim::step(p, StepInput { move_dir: stick, jump: true }, &world);
         let steered = sim::step(p, StepInput { move_dir: stick, jump: false }, &world);
         assert_eq!(
@@ -169,4 +169,34 @@ fn the_air_jump_sets_the_vertical_and_leaves_the_horizontal_bitwise_untouched() 
             jumped.motion.velocity.y
         );
     }
+}
+
+#[test]
+fn a_neutral_air_jump_zeroes_the_horizontal_and_resets_straight_up() {
+    // The amendment: with NO direction held, the air jump is a reset jump - the horizontal
+    // velocity is pinned to exactly zero on the jump step (not decayed; air has no friction), so
+    // the body rises straight from where the press happened. Held-direction preservation and the
+    // neutral reset are the same policy's two halves, pinned separately.
+    let world = flat_world(2.0);
+    let p = airborne_at_speed(Vec3::new(5.0, 0.0, -3.0));
+    let jumped = sim::step(p, StepInput { move_dir: Vec3::ZERO, jump: true }, &world);
+    assert_eq!(jumped.motion.velocity.x.to_bits(), 0.0_f32.to_bits(), "x must be exactly zero");
+    assert_eq!(jumped.motion.velocity.z.to_bits(), 0.0_f32.to_bits(), "z must be exactly zero");
+    assert!(
+        (jumped.motion.velocity.y - (JUMP_VELOCITY * AIR_JUMP_SCALE - ASCENT_GRAVITY * SIM_DT)).abs() < EPS,
+        "the reset jump still launches at the scaled vertical: {}",
+        jumped.motion.velocity.y
+    );
+    assert_eq!(jumped.air_jumps, AIR_JUMPS - 1, "the reset jump spends the air jump like any other");
+
+    // The reset is the air jump's alone: a neutral GROUND jump keeps its run (momentum off a
+    // ledge is the promise the coyote grace protects).
+    let mut running = at_rest(&world);
+    running.motion.velocity = Vec3::new(5.0, 0.0, 0.0);
+    let ground_jumped = sim::step(running, StepInput { move_dir: Vec3::ZERO, jump: true }, &world);
+    assert!(
+        horizontal_speed(&ground_jumped) > 0.0,
+        "a neutral ground jump must not reset the run: {:?}",
+        ground_jumped.motion.velocity
+    );
 }

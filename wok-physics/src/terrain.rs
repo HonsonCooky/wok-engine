@@ -128,7 +128,8 @@ pub fn rest_on_heightmap(capsule: Capsule, terrain: &Heightmap, walkable_cos: f3
 
 /// How far below the sampled ground the base may sit and still count as resting (1mm), absorbing
 /// the quantization and float noise between a settled body and the surface it sits on.
-const GROUND_EPS: f32 = 1e-3;
+/// `pub(crate)` so the cylinder rest ([`crate::terrain_cyl`]) shares the resting convention.
+pub(crate) const GROUND_EPS: f32 = 1e-3;
 
 #[cfg(test)]
 #[allow(clippy::float_cmp)]

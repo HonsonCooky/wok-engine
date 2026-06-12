@@ -23,10 +23,9 @@ pub const MAX_STEPS_PER_FRAME: u32 = 8;
 
 /// cos(60 degrees): the steepest slope that still counts as walkable ground, passed to both the
 /// slide and the terrain rest so the two grounded signals agree. Raised from 45 degrees on the
-/// play verdict: steep hillsides should ground, rest, and walk normally. In practice the
-/// 60-degree stand applies to terrain only - tilted COLLIDER faces past ~15 degrees still shed
-/// the player (the support probe's vertical tolerance; see `crate::landing`), a parked limitation
-/// whose fix rides the future player-collider brief.
+/// play verdict: steep hillsides should ground, rest, and walk normally. With the flat-bottomed
+/// cylinder the limit applies uniformly: tilted collider faces stand to the same 60 degrees as
+/// terrain (the capsule-era ~15-degree shed is retired with the support tolerance it came from).
 pub const WALKABLE_COS: f32 = 0.5;
 
 /// Contacts at least this upright (by normal.y) grade as ground for the slide's flat-resolve
@@ -58,18 +57,25 @@ pub const WALL_FRICTION: f32 = 25.0;
 
 // ---- player ----
 
-/// Player capsule total height (tip to tip) and radius, in metres. The segment length follows from
-/// these via `Capsule::upright`: half-segment = height / 2 - radius. A squat, wide bean rather than
-/// a tall pill: play-testing read the character better low and round under a third-person camera.
-/// 1.5 over 0.9 wide is the bean silhouette - the earlier 1.1 was nearly a sphere, which read fine
-/// while the placeholder was an ellipsoid but loses the silhouette now the capsule renders true.
+/// Player body total height and radius, in metres - shared by the collider and the visual. The
+/// COLLIDER is a flat-bottomed vertical cylinder of exactly these dimensions
+/// (`Cylinder::upright`): the flat bottom is what stands on tilted faces, overhangs ledges, and
+/// does not roll off edges. The VISUAL stays the bean (the capsule mesh at the same height and
+/// radius; the mismatch is documented at the draw site in `crate::app`). 1.5 over 0.9 wide is the
+/// bean silhouette the play-tests settled on.
 pub const PLAYER_HEIGHT: f32 = 1.5;
 pub const PLAYER_RADIUS: f32 = 0.45;
 
-/// The capsule wall (cylinder segment) length the height and radius imply - what `Capsule::upright`
-/// derives internally - restated as a constant so the drawn `capsule_mesh` and the debug cage size
-/// from exactly the numbers the collider uses.
+/// The drawn capsule's wall (cylinder segment) length the height and radius imply - what the bean
+/// mesh (`capsule_mesh`) sizes its straight section from. Visual only since the collider became
+/// the cylinder: the collider's straight wall is the full PLAYER_HEIGHT.
 pub const PLAYER_SEGMENT: f32 = PLAYER_HEIGHT - 2.0 * PLAYER_RADIUS;
+
+/// Step-up height, in metres: a grounded walk blocked by a wall-grade contact no taller than this
+/// above the foot climbs it (lift-move-drop in `crate::slide`) instead of stopping. The flat
+/// bottom needs the policy where the capsule's rounded bottom glided up small lips for free; 0.3m
+/// is shin height - kerbs and stair treads climb, crates (0.5m and up) are walls.
+pub const STEP_HEIGHT: f32 = 0.3;
 
 /// Horizontal locomotion speed in m/s, a brisk run. Raised from 6.0 on the feel-pass verdict:
 /// crossing the demo's spaces at 6 read as too slow.
@@ -339,10 +345,21 @@ mod tests {
     }
 
     #[test]
-    fn the_player_capsule_is_taller_than_its_own_sphere() {
-        // Below 2 * radius the upright capsule degrades to a sphere and the segment is gone.
+    fn the_player_body_is_taller_than_it_is_wide_and_the_bean_keeps_its_wall() {
+        // The drawn capsule needs height > 2 * radius or its straight section vanishes (the
+        // mesh's silhouette); the cylinder collider shares the numbers, so this also keeps the
+        // body a standing shape rather than a coin.
         assert!(PLAYER_HEIGHT > 2.0 * PLAYER_RADIUS);
         assert!(PLAYER_RADIUS > 0.0);
+    }
+
+    #[test]
+    fn the_step_height_is_a_shin_not_a_climb() {
+        // Zero would retire the policy; at or above half the body the "step" would swallow the
+        // crates the demo treats as obstacles, and a step should never substitute for a jump.
+        assert!(STEP_HEIGHT > 0.0);
+        assert!(STEP_HEIGHT < PLAYER_HEIGHT * 0.5, "a step is climbed by the feet, not the body");
+        assert!(STEP_HEIGHT < JUMP_APEX_HEIGHT, "anything jump-worthy must still need the jump");
     }
 
     #[test]

@@ -47,6 +47,15 @@ pub(crate) fn closest_point_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
     a + ab * t
 }
 
+/// The point of the solid oriented box closest to `p`: `p` mapped into the box frame (the
+/// conjugate is the unit quaternion's exact inverse), clamped per axis, and mapped back. Inside
+/// the solid this returns `p` itself (distance zero) - the rigid map preserves containment, so
+/// the round trip is exact geometry, not a bound.
+pub(crate) fn closest_point_on_obb(center: Vec3, half_extents: Vec3, rotation: glam::Quat, p: Vec3) -> Vec3 {
+    let local = rotation.conjugate() * (p - center);
+    rotation * local.clamp(-half_extents, half_extents) + center
+}
+
 /// The point of the solid vertical cylinder (`center`, `radius`, `half_height`) closest to `p`:
 /// `p` clamped axially into the height span and radially onto the disc. Inside the solid this
 /// returns `p` itself (distance zero). Exact everywhere, the rim included: the nearest point of a
@@ -93,20 +102,35 @@ pub(crate) fn closest_points_segment_cylinder(
 /// back onto the segment, repeat until both points settle or the cap lands. `project` must be the
 /// exact projection onto a convex shape.
 fn alternate(a: Vec3, b: Vec3, project: impl Fn(Vec3) -> Vec3) -> (Vec3, Vec3) {
-    let mut on_segment = (a + b) * 0.5;
-    let mut on_shape = project(on_segment);
+    alternate_pair((a + b) * 0.5, |p| closest_point_on_segment(a, b, p), project)
+}
+
+/// The alternating projection in its general convex-vs-convex form: starting from `seed` (a point
+/// of the first shape; its centre works), project onto the second shape, back onto the first,
+/// repeat until both points settle or the cap lands. Both `onto_a` and `onto_b` must be exact
+/// projections onto convex shapes; the fixed point is then a closest pair (overlapping shapes
+/// converge to a shared point, distance zero). The segment loop above is this with the segment as
+/// the first shape; the cylinder sweeps ([`crate::sweep_cyl`]) instantiate it with two solids.
+/// Returns `(on_a, on_b)`.
+pub(crate) fn alternate_pair(
+    seed: Vec3,
+    onto_a: impl Fn(Vec3) -> Vec3,
+    onto_b: impl Fn(Vec3) -> Vec3,
+) -> (Vec3, Vec3) {
+    let mut on_a = seed;
+    let mut on_b = onto_b(on_a);
     for _ in 0..MAX_ITERS {
-        let next_segment = closest_point_on_segment(a, b, on_shape);
-        let next_shape = project(next_segment);
-        let settled = (next_segment - on_segment).length_squared() < CONVERGED_SQ
-            && (next_shape - on_shape).length_squared() < CONVERGED_SQ;
-        on_segment = next_segment;
-        on_shape = next_shape;
+        let next_a = onto_a(on_b);
+        let next_b = onto_b(next_a);
+        let settled = (next_a - on_a).length_squared() < CONVERGED_SQ
+            && (next_b - on_b).length_squared() < CONVERGED_SQ;
+        on_a = next_a;
+        on_b = next_b;
         if settled {
             break;
         }
     }
-    (on_segment, on_shape)
+    (on_a, on_b)
 }
 
 #[cfg(test)]
@@ -260,6 +284,26 @@ mod tests {
         let reproject_cyl = closest_point_on_cylinder(Vec3::ZERO, 1.0, 2.0, ps);
         assert!((reproject_seg - ps).length() < 1e-3, "segment point not stationary");
         assert!((reproject_cyl - pc).length() < 1e-3, "cylinder point not stationary");
+    }
+
+    // ---- closest_point_on_obb ----
+
+    #[test]
+    fn obb_projection_is_the_box_clamp_carried_through_the_frame() {
+        use glam::Quat;
+        use std::f32::consts::FRAC_PI_4;
+        let (center, he, rot) = (Vec3::new(2.0, 1.0, 3.0), Vec3::ONE, Quat::from_rotation_y(FRAC_PI_4));
+        // A point straight out along the rotated +x axis projects onto that face, one half-extent
+        // from the centre along the same axis.
+        let n = rot * Vec3::X;
+        let p = closest_point_on_obb(center, he, rot, center + n * 5.0);
+        assert!((p - (center + n)).length() < 1e-5, "got {p:?}");
+        // A point inside is returned unchanged.
+        let inside = center + n * 0.5;
+        assert!((closest_point_on_obb(center, he, rot, inside) - inside).length() < 1e-6);
+        // The world box's cut corner is outside the rotated solid: the projection moves it.
+        let corner = center + Vec3::new(1.3, 0.0, 1.3);
+        assert!((closest_point_on_obb(center, he, rot, corner) - corner).length() > 0.1);
     }
 
     #[test]

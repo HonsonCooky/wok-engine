@@ -12,8 +12,8 @@
 //!
 //! Drawing is the editor's render path: the same renderer, the same primitive mesh cache, the same
 //! chunk-origin composition of terrain and placements, plus one item the editor does not have - the
-//! player, a true capsule mesh generated at the collider's exact dimensions (`wok_mesh::capsule_mesh`
-//! paired with `Capsule::upright`) in a color nothing else uses. Prefabs crossing the eye-to-anchor
+//! player, the bean capsule mesh sharing the cylinder collider's height and radius (the deliberate
+//! mismatch, documented on `player_transform`) in a color nothing else uses. Prefabs crossing the eye-to-anchor
 //! segment draw partially faded (`crate::fade`, taste-only: neither the editor nor the viewer has a
 //! player to occlude). F1 cycles the hitbox overlay (`crate::debug`) through its modes - off,
 //! depth-tested faces, x-ray drawn shapes, x-ray everything - drawn through the renderer's debug
@@ -56,7 +56,7 @@ const MARKER_LIFT: f32 = 0.01;
 const MARKER_COLOR: Vec3 = Vec3::new(1.0, 0.0, 1.0);
 
 /// Vertical headroom added to the shadow region's top: the player must keep casting at the jump
-/// apex (JUMP_APEX_HEIGHT, the tuning parameter itself) plus half the capsule's height above the
+/// apex (JUMP_APEX_HEIGHT, the tuning parameter itself) plus half the body's height above the
 /// tracked position, even when standing on the region's highest point. Game knowledge, so it lives
 /// here rather than in the renderer's fit; the relationship is pinned by a test below.
 const SHADOW_HEADROOM_M: f32 = 3.0;
@@ -89,8 +89,9 @@ fn surface_color(surface: Option<&SurfaceTag>) -> Vec3 {
 }
 
 /// GPU residency, created in `init` once a device exists: the renderer, one uploaded mesh per unit
-/// primitive (shared by every placement), the player's capsule mesh (generated at the collider's
-/// dimensions, so the draw transform never scales it), and one terrain mesh per loaded chunk.
+/// primitive (shared by every placement), the player's bean mesh (sharing the cylinder collider's
+/// height and radius, so the draw transform never scales it), and one terrain mesh per loaded
+/// chunk.
 struct Gpu {
     renderer: Renderer,
     primitives: Vec<MeshGpu>,
@@ -363,15 +364,21 @@ impl App for TasteApp {
     fn cleanup(&mut self, _platform: &Platform) {}
 }
 
-/// The point the camera orbits and frames: a little above the capsule centre.
+/// The point the camera orbits and frames: a little above the body centre.
 fn camera_target(player_pos: Vec3) -> Vec3 {
     player_pos + Vec3::new(0.0, crate::constants::CAMERA_TARGET_LIFT, 0.0)
 }
 
-/// The player's draw transform: a pure translation to the capsule centre. The mesh is generated at
-/// the collider's exact dimensions (`capsule_mesh(PLAYER_RADIUS, PLAYER_SEGMENT)`, origin-centred
-/// like `Capsule::upright` about its centre), so no scale belongs here - scaling would be the one
-/// way the drawn body and the collider could disagree again.
+/// The player's draw transform: a pure translation to the body centre.
+///
+/// The deliberate visual/collider mismatch lives here: the COLLIDER is the flat-bottomed vertical
+/// cylinder (the gameplay shape - it stands on tilted faces, overhangs ledges, climbs steps),
+/// while the DRAWN body stays the bean (`capsule_mesh(PLAYER_RADIUS, PLAYER_SEGMENT)`). The two
+/// share centre, height, and radius exactly, so they disagree only at the corners: the bean's
+/// caps curve in where the cylinder's rim is square. The F1 overlay draws the cylinder cage
+/// (`crate::debug`), which is the collider truth; the bean is presentation. No scale belongs in
+/// this transform - scaling would be the one way the drawn body could drift off the shared
+/// dimensions.
 fn player_transform(position: Vec3) -> Mat4 {
     Mat4::from_translation(position)
 }
@@ -380,7 +387,7 @@ fn player_transform(position: Vec3) -> Mat4 {
 mod tests {
     use super::*;
     use crate::constants::{JUMP_APEX_HEIGHT, PLAYER_HEIGHT};
-    use wok_physics::Capsule;
+    use wok_physics::Cylinder;
 
     #[test]
     // Asserting on constants is the point: the test pins a relationship between tuning values so
@@ -396,26 +403,27 @@ mod tests {
     }
 
     #[test]
-    fn the_drawn_capsule_is_the_collider() {
-        // The visual half of the at-rest contract, now exact in shape and not just in bounds: the
-        // mesh is generated at the collider's dimensions and the transform only translates, so the
-        // drawn extremes must be the collider's base, tip, and radius. The bound is float roundoff
-        // between two derivations of the same numbers, not a tolerance for visual slack.
+    fn the_drawn_bean_spans_the_cylinder_collider() {
+        // The visual/collider contract under the deliberate mismatch: the bean mesh and the
+        // cylinder collider share centre, height, and radius - the drawn extremes must be the
+        // collider's base, top, and radius, so the silhouette never lies about the body's size
+        // even though the corners differ by design (rounded caps vs the square rim). The bound is
+        // float roundoff between two derivations of the same numbers, not visual slack.
         let position = Vec3::new(3.0, 7.25, -2.0);
-        let capsule = Capsule::upright(position, PLAYER_HEIGHT, PLAYER_RADIUS);
+        let body = Cylinder::upright(position, PLAYER_HEIGHT, PLAYER_RADIUS);
         let bounds = wok_mesh::capsule_mesh(PLAYER_RADIUS, PLAYER_SEGMENT).bounds();
         let to_world = player_transform(position);
 
         let bottom = to_world.transform_point3(Vec3::new(0.0, bounds.min.y, 0.0));
         assert!(
-            (bottom.y - capsule.base().y).abs() < 1e-6,
-            "mesh bottom {} vs capsule base {}",
+            (bottom.y - body.base().y).abs() < 1e-6,
+            "mesh bottom {} vs collider base {}",
             bottom.y,
-            capsule.base().y
+            body.base().y
         );
         let top = to_world.transform_point3(Vec3::new(0.0, bounds.max.y, 0.0));
-        assert!((top.y - (capsule.base().y + PLAYER_HEIGHT)).abs() < 1e-6);
-        // And the width matches the capsule's: the wall spans the radius each way.
+        assert!((top.y - (body.base().y + PLAYER_HEIGHT)).abs() < 1e-6);
+        // And the width matches the collider's: the wall spans the radius each way.
         let side = to_world.transform_point3(Vec3::new(bounds.max.x, 0.0, 0.0));
         assert!((side.x - (position.x + PLAYER_RADIUS)).abs() < 1e-6);
     }

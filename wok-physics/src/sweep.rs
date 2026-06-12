@@ -60,8 +60,9 @@ pub(crate) const GAP_EPS: f32 = 1e-5;
 pub(crate) const MOTION_EPS_SQ: f32 = 1e-12;
 
 /// Cap on advancement steps. Convergence is fast for the contacts a player meets; the cap only
-/// bounds a degenerate grazing approach, which is reported as no hit.
-const MAX_STEPS: usize = 32;
+/// bounds a degenerate grazing approach, which is reported as no hit. `pub(crate)` so the
+/// cylinder advancement ([`crate::sweep_cyl`]) runs under the identical bound.
+pub(crate) const MAX_STEPS: usize = 32;
 
 /// The result of a capsule sweep that found contact.
 ///

@@ -3,9 +3,12 @@
 //! Pure geometry building, no GPU: one call per frame turns the simulation's world into the
 //! `LineSegment` list the renderer's debug line pass draws. The cages show what the fixed-step
 //! loop actually collides with - world-space static colliders in their own true shapes (box cage,
-//! sphere rings, cylinder rings-and-verticals) and the player capsule at its exact collider
+//! sphere rings, cylinder rings-and-verticals) and the player's CYLINDER collider at its exact
 //! dimensions - so a play-tester can see collision-vs-visual disagreements directly instead of
-//! inferring them from bumps. The skeleton must match the truth: a sphere drawn as its box would
+//! inferring them from bumps. The player cage is where the deliberate visual mismatch shows: the
+//! drawn body is the bean (capsule mesh), the collider is the flat-bottomed cylinder, and this
+//! cage is the collider truth - rings at the flat caps, verticals between, the same stroke the
+//! static cylinders get. The skeleton must match the truth: a sphere drawn as its box would
 //! reintroduce exactly the lie the round colliders removed.
 //!
 //! The modes answer different questions. Faces draws the drawn-shape cages depth-tested, so only
@@ -23,7 +26,7 @@ use wok_physics::Collider;
 use wok_render::{DepthMode, LineSegment};
 use wok_scene::Aabb;
 
-use crate::constants::{PLAYER_RADIUS, PLAYER_SEGMENT};
+use crate::constants::{PLAYER_HEIGHT, PLAYER_RADIUS};
 use crate::world::World;
 
 /// The hitbox overlay's modes, cycled by F1 in declaration order. Starts off: the overlay is a
@@ -69,9 +72,9 @@ const HITBOX_COLOR: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 /// geometry inside reads as "invisible by design" rather than as a missing mesh.
 const INVISIBLE_COLOR: Vec3 = Vec3::new(0.0, 1.0, 1.0);
 
-/// The player capsule cage: pure yellow at full saturation, readable over the bean's signal
+/// The player collider cage: pure yellow at full saturation, readable over the bean's signal
 /// orange even when the x-ray draw puts the cage on top of the body.
-const CAPSULE_COLOR: Vec3 = Vec3::new(1.0, 1.0, 0.0);
+const PLAYER_CAGE_COLOR: Vec3 = Vec3::new(1.0, 1.0, 0.0);
 
 /// The look-ahead reticle: a neutral grey, present without shouting (it is framing feedback, not a
 /// gameplay crosshair).
@@ -84,13 +87,14 @@ const RETICLE_HALF: f32 = 0.05;
 /// overlay stays obviously diagnostic.
 const RING_SEGMENTS: usize = 16;
 
-/// Verticals on the capsule cage, evenly spaced around the wall.
+/// Verticals on the player cage, evenly spaced around the wall.
 const CAGE_VERTICALS: usize = 4;
 
 /// The frame's hitbox overlay for `mode`: the mode's collider set as cages in their own shapes,
-/// plus the player capsule at `player_pos` (the interpolated draw position, so the cage tracks
-/// the drawn bean, not the raw sim step). Off returns nothing. Missing `statics_visible` entries
-/// read as drawn, so hand-built worlds that only fill `statics` still overlay every collider.
+/// plus the player's cylinder collider at `player_pos` (the interpolated draw position, so the
+/// cage tracks the drawn bean, not the raw sim step). Off returns nothing. Missing
+/// `statics_visible` entries read as drawn, so hand-built worlds that only fill `statics` still
+/// overlay every collider.
 pub fn overlay_lines(mode: OverlayMode, world: &World, player_pos: Vec3) -> Vec<LineSegment> {
     let mut lines = Vec::new();
     if mode == OverlayMode::Off {
@@ -109,7 +113,7 @@ pub fn overlay_lines(mode: OverlayMode, world: &World, player_pos: Vec3) -> Vec<
             collider_lines(collider, INVISIBLE_COLOR, &mut lines);
         }
     }
-    capsule_lines(player_pos, &mut lines);
+    player_cage_lines(player_pos, &mut lines);
     lines
 }
 
@@ -198,12 +202,12 @@ fn sphere_lines(center: Vec3, radius: f32, color: Vec3, out: &mut Vec<LineSegmen
     circle_lines(center, Vec3::Z, Vec3::Y, radius, color, out);
 }
 
-/// The player capsule as a cage: a ring at each cap equator (where the hemispheres meet the wall,
-/// `half-segment` above and below the centre) and a few verticals spanning the wall between them.
-/// Enough to read position, radius, and height at a glance; the full silhouette lives in the
-/// rendered capsule mesh itself.
-fn capsule_lines(center: Vec3, out: &mut Vec<LineSegment>) {
-    rings_and_verticals(center, PLAYER_RADIUS, PLAYER_SEGMENT * 0.5, CAPSULE_COLOR, out);
+/// The player's cylinder collider as a cage: a ring at each FLAT cap (half the full height above
+/// and below the centre - the collider's true extents, taller than the bean's cap equators) and a
+/// few verticals spanning the wall - the same rings-and-verticals stroke every static cylinder
+/// gets, because the player collides as exactly that shape now.
+fn player_cage_lines(center: Vec3, out: &mut Vec<LineSegment>) {
+    rings_and_verticals(center, PLAYER_RADIUS, PLAYER_HEIGHT * 0.5, PLAYER_CAGE_COLOR, out);
 }
 
 /// The shared rings-and-verticals stroke: a horizontal ring `half_span` above and below `center`,
@@ -227,8 +231,8 @@ fn rings_and_verticals(center: Vec3, radius: f32, half_span: f32, color: Vec3, o
 mod tests {
     use super::*;
 
-    /// Segments in one box cage and in the player capsule cage, restated from the strokes above
-    /// so the set-selection tests can count cages instead of pattern-matching geometry.
+    /// Segments in one box cage and in the player cage, restated from the strokes above so the
+    /// set-selection tests can count cages instead of pattern-matching geometry.
     const BOX_CAGE: usize = 12;
     const PLAYER_CAGE: usize = 2 * RING_SEGMENTS + CAGE_VERTICALS;
 
@@ -291,7 +295,7 @@ mod tests {
         assert_eq!(lines.len(), 3 * BOX_CAGE + PLAYER_CAGE);
         assert_eq!(count_color(&lines, HITBOX_COLOR), BOX_CAGE);
         assert_eq!(count_color(&lines, INVISIBLE_COLOR), 2 * BOX_CAGE);
-        assert_eq!(count_color(&lines, CAPSULE_COLOR), PLAYER_CAGE);
+        assert_eq!(count_color(&lines, PLAYER_CAGE_COLOR), PLAYER_CAGE);
     }
 
     #[test]

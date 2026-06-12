@@ -131,8 +131,9 @@ pub(crate) fn sweep_capsule_cylinder_inflated(
 /// Outward normal for a point on or inside the cylinder (the advancement loop's degenerate
 /// segment-inside case): the least-penetration direction, radial first then the caps, a fixed tie
 /// order mirroring the box's face-normal fallback. A point on the axis has no radial direction and
-/// falls through to a cap.
-fn cylinder_deep_normal(center: Vec3, radius: f32, half_height: f32, p: Vec3) -> Vec3 {
+/// falls through to a cap. `pub(crate)` so the moving-cylinder sweep ([`crate::sweep_cyl`]) shares
+/// the fallback against its static-cylinder pair.
+pub(crate) fn cylinder_deep_normal(center: Vec3, radius: f32, half_height: f32, p: Vec3) -> Vec3 {
     let radial = Vec3::new(p.x - center.x, 0.0, p.z - center.z);
     let radial_len = radial.length();
     let mut best_pen = f32::INFINITY;

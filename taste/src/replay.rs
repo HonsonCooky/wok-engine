@@ -109,14 +109,15 @@ fn fixture_world() -> World {
 
 /// The script: fall from the air and land, walk +x head-on into the wall and stop pinned against
 /// it (the wall-stop incidence policy: head-on is inside WALL_STOP_DEG, so the contact reads as a
-/// stop, which for an exactly head-on approach is also bitwise the engine's resolve), jump once at
-/// the wall (every jump flies the full authored arc now), then slide along it at a glancing angle.
-/// The slide direction leans 2:1 along the wall - about 63 degrees from head-on, clearly outside
-/// the (narrowed, 30-degree) stop window with margin to spare, so the angle never sits near the
-/// edge where float roundoff would decide stop-versus-slide and the test would pin luck. The
-/// slide also scrubs now: wall friction holds the tangential speed at its ground-accel-versus-
-/// scrub equilibrium, ~5.74 m/s against the 6.71 m/s tangential intent, and the 60-step phase
-/// advances ~5.8m along the wall. Every locomotion arc the demo shows, in one sequence.
+/// stop), jump once at the wall (every jump flies the full authored arc), then slide along it at
+/// a glancing angle. The slide direction leans 2:1 along the wall - about 63 degrees from
+/// head-on, clearly outside the (narrowed, 30-degree) stop window with margin to spare, so the
+/// angle never sits near the edge where float roundoff would decide stop-versus-slide and the
+/// test would pin luck. Re-measured under the cylinder collider: the wall pin is x = 13.549
+/// (face less radius less skin - the radii match the capsule's, so the pin did not move), the
+/// wall-friction equilibrium holds the tangential speed at ~5.74 m/s against the 6.71 m/s
+/// tangential intent, and the 60-step phase advances ~5.83m along the wall; the jump gains
+/// ~0.87m in its first five steps. Every locomotion arc the demo shows, in one sequence.
 fn scripted_inputs() -> Vec<StepInput> {
     let forward = Vec3::new(1.0, 0.0, 0.0);
     let glancing = Vec3::new(1.0, 0.0, 2.0).normalize();
@@ -216,12 +217,12 @@ fn at_rest_on_flat_ground_the_base_sits_exactly_on_the_surface() {
 }
 
 #[test]
-fn at_rest_on_the_slope_the_base_sits_on_the_surface_under_the_centre() {
-    // The profile-aware footprint rest: each sample's lift candidate is discounted by how far the
-    // capsule's spherical bottom has curved away from it, so on a planar ramp the centre candidate
-    // wins and the base sits exactly on the surface under the centre - the old radius * slope
-    // float is gone. The trade, documented on wok-physics's rest_on_heightmap, is a small sink of
-    // the up-slope side of the bottom, bounded by r * (sqrt(1 + g^2) - 1); pinned here so the
+fn at_rest_on_the_slope_the_rim_bears_with_the_documented_gap_under_the_axis() {
+    // The flat-bottom rest convention on a planar ramp of gradient g: the disc bears on its
+    // up-slope rim contact (the footprint-MAX sample at +r along the slope), so the base rests
+    // r * g above the surface under the axis - a rigid disc bridging from the contact over the
+    // falling ground. The capsule's profile-discounted rest sat with zero gap under the centre;
+    // measured here, the new gap is r * g = 0.0439m on this 0.0977 m/m ramp. Pinned so the
     // at-rest convention on slopes cannot quietly drift either way.
     let world = fixture_world();
     let terrain = &world.terrains[0].heightmap;
@@ -233,16 +234,20 @@ fn at_rest_on_the_slope_the_base_sits_on_the_surface_under_the_centre() {
     let base = base_height(p);
     let ground = terrain.height_at(p.x, p.z);
     let slope = SLOPE_DELTA as f32 * (HEIGHT_MAX_M - HEIGHT_MIN_M) / u16::MAX as f32;
-    let sink_bound = PLAYER_RADIUS * ((1.0 + slope * slope).sqrt() - 1.0);
+    let gap = PLAYER_RADIUS * slope;
 
     assert!(rested.grounded, "the ramp is well inside the walkable limit");
     assert!(
-        (base - ground).abs() <= 1e-4,
-        "base {base} should sit on the surface {ground} under the centre (gap {})",
+        (base - ground - gap).abs() <= 1e-3,
+        "base {base} should rest r * g = {gap} above the surface {ground} under the axis (gap {})",
         base - ground
     );
-    // The sink the new convention trades for the zero gap stays sub-centimetre on this ramp.
-    assert!(sink_bound < 0.01, "fixture drift: the ramp's sink bound {sink_bound} grew past 1cm");
+    // And the bearing point itself is on the surface: the up-slope rim sample carries the body.
+    let rim_ground = terrain.height_at(p.x + PLAYER_RADIUS, p.z);
+    assert!(
+        (base - rim_ground).abs() <= 1e-3,
+        "the up-slope rim should sit on the surface: base {base} vs rim ground {rim_ground}"
+    );
 }
 
 // ---- downhill snap-down ----

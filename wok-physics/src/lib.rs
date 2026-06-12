@@ -66,6 +66,22 @@
 //! - [`sweep_obb`] - the box sweep run in the box's local frame (a rotated capsule is still a
 //!   capsule, so the map is exact), contact rotated back.
 //!
+//! Part 5 (this revision) adds the moving flat-bottomed shape, the player-collider brief: the
+//! capsule's rounded bottom made tilted faces unstandable and rolled bodies off edges, and a flat
+//! bottom bears on anything under its disc:
+//!
+//! - [`cylinder`] - the moving vertical [`Cylinder`] (centre, radius, half-height; flat caps).
+//! - [`sweep_cyl`] / [`sweep_cyl_round`] / [`sweep_cyl_obb`] - the swept cylinder against every
+//!   [`Collider`] shape, by the same conservative advancement run on solid-to-solid closest pairs
+//!   (alternating projection over the exact [`geom`] projections), with the earliest-impact
+//!   dispatch ([`sweep_cylinder_colliders`]) mirroring the capsule's and taking the slide skin
+//!   directly. Flat faces, walls, and caps are exact to the shared `GAP_EPS`; rim and edge
+//!   contacts may be conservatively rounded within the projection loop's residual (documented in
+//!   [`sweep_cyl`]).
+//! - [`terrain_cyl`] - flat-bottom terrain rest ([`rest_cylinder_on_heightmap`]): footprint-MAX
+//!   over disc samples with no curvature discount (a disc rests on the highest point under it),
+//!   lift-only like every rest here.
+//!
 //! Determinism (canon contract): identical inputs and `dt` give identical outputs; resolution over
 //! several colliders and the iterative sweep/slide both run sequentially in a defined order, with no
 //! parallel reduction and fixed iteration caps; the collision math is position-independent (it reads
@@ -87,14 +103,19 @@ pub mod capsule;
 pub mod classify;
 pub mod collider;
 pub mod collision;
+pub mod cylinder;
 mod geom;
 pub mod motion;
 pub mod slide;
 pub mod smoothing;
 pub mod sweep;
+pub mod sweep_cyl;
+pub mod sweep_cyl_obb;
+pub mod sweep_cyl_round;
 pub mod sweep_obb;
 pub mod sweep_round;
 pub mod terrain;
+pub mod terrain_cyl;
 
 pub use bounds::{aabb_center, aabb_half_extents, world_aabb};
 pub use camera::{boom_direction, boom_point, spring_arm, terrain_floor};
@@ -102,10 +123,15 @@ pub use capsule::Capsule;
 pub use classify::{basis_is_axis_aligned, classify_collider};
 pub use collider::Collider;
 pub use collision::{Contact, aabb_contact, aabb_overlap, resolve_statics};
+pub use cylinder::Cylinder;
 pub use motion::{Motion, integrate};
 pub use slide::{SlideResult, collide_and_slide};
 pub use smoothing::smooth;
 pub use sweep::{SweptHit, sweep_capsule_aabb, sweep_capsule_aabbs, sweep_capsule_collider, sweep_capsule_colliders};
+pub use sweep_cyl::{sweep_cylinder_aabb, sweep_cylinder_collider, sweep_cylinder_colliders};
+pub use sweep_cyl_obb::sweep_cylinder_obb;
+pub use sweep_cyl_round::{sweep_cylinder_sphere, sweep_cylinder_vert_cylinder};
 pub use sweep_obb::sweep_capsule_obb;
 pub use sweep_round::{sweep_capsule_cylinder, sweep_capsule_sphere};
 pub use terrain::{TerrainRest, rest_on_heightmap, resolve_heightmap};
+pub use terrain_cyl::rest_cylinder_on_heightmap;

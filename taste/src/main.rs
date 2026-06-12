@@ -33,6 +33,7 @@ mod fade;
 mod follow;
 mod intent;
 mod jump;
+#[cfg(test)]
 mod landing;
 #[cfg(test)]
 mod precision;
@@ -40,6 +41,8 @@ mod precision;
 mod replay;
 mod sim;
 mod slide;
+#[cfg(test)]
+mod slide_feel;
 mod world;
 
 use std::error::Error;

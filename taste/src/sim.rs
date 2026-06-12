@@ -9,23 +9,26 @@
 //!                                                  game's policy)
 //!     -> integrate one fixed step under gravity   (wok-physics: integrate; ascent gravity while
 //!                                                  rising, the heavier fall gravity otherwise)
-//!     -> collide-and-slide against the statics    (crate::slide over wok-physics's sweep:
-//!                                                  supported ground contacts resolve flat)
-//!     -> rest the slid capsule on the terrain     (wok-physics: rest_on_heightmap, chunk-local)
+//!     -> collide-and-slide against the statics    (crate::slide over the cylinder sweeps:
+//!                                                  supported contacts resolve flat, lips step up)
+//!     -> rest the slid body on the terrain        (wok-physics: rest_cylinder_on_heightmap,
+//!                                                  chunk-local)
 //!
-//! Two extensions over the harness. World space: statics were lifted to world space when the
-//! [`World`] was built, and the terrain rest maps the capsule into the local frame of the chunk it
-//! is over and back (a pure translation each way). Downhill snap-down: a grounded, non-jumping
-//! step whose support fell away by at most `SNAP_DOWN_DISTANCE` is glued back to the surface
-//! instead of flickering airborne (game policy over the engine's lift-only rest). Landing policy
-//! is also the harness's: when the slide grounded the body on box geometry, or the terrain lifted
-//! it back onto the surface, the downward fall is spent.
+//! The player's collider is the flat-bottomed vertical cylinder (the player-collider brief); the
+//! drawn bean stays a capsule, documented at the draw site (`crate::app`). Two extensions over
+//! the harness. World space: statics were lifted to world space when the [`World`] was built, and
+//! the terrain rest maps the body into the local frame of the chunk it is over and back (a pure
+//! translation each way). Downhill snap-down: a grounded, non-jumping step whose support fell
+//! away by at most `SNAP_DOWN_DISTANCE` is glued back to the surface instead of flickering
+//! airborne (game policy over the engine's lift-only rest). Landing on statics is the slide's
+//! `supported` signal (a walkable contact under the disc footprint) plus downward motion; terrain
+//! landings are the rest's own signal.
 //!
 //! Everything here is deterministic: pure functions of the inputs and `SIM_DT`, no clocks, no RNG,
 //! which is what the replay test (`crate::replay`) pins bitwise.
 
 use glam::Vec3;
-use wok_physics::{Capsule, Motion, boom_direction, integrate, rest_on_heightmap};
+use wok_physics::{Cylinder, Motion, boom_direction, integrate, rest_cylinder_on_heightmap};
 
 use crate::air;
 use crate::slide::slide_player;
@@ -34,11 +37,10 @@ use crate::constants::{
     JUMP_VELOCITY, MOVE_SPEED, PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT, SNAP_DOWN_DISTANCE,
     SPAWN_HEIGHT, WALKABLE_COS,
 };
-use crate::landing::supported_below;
 use crate::world::{CHUNK_SIZE_M, World};
 
-/// The player: a capsule-shaped body the game owns between steps. `motion.position` is the capsule
-/// centre (wok-physics's reference point for every resolve).
+/// The player: a cylinder-bodied actor the game owns between steps. `motion.position` is the
+/// cylinder centre (wok-physics's reference point for every resolve).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Player {
     pub motion: Motion,
@@ -158,12 +160,14 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     // off at full strength without touching the air jump; the window is the walked-off-a-ledge
     // grace, and the press spends it outright so it can never stack a second free jump. Past the
     // window, airborne presses spend an air jump when one remains: vertical velocity is SET (not
-    // added) to the scaled launch speed, and the horizontal velocity is left exactly as it
-    // stands - direction changes are the air steering's job alone (AIR_TURN_RATE / AIR_ACCEL), so
-    // the air jump can never read as a violent re-aim now that the steering is gentle. The latch
-    // upstream guarantees one press is one jump; this block only decides what a delivered press
-    // does. Every jump flies the full authored arc: hold duration never enters the simulation
-    // (the play verdict against variable height).
+    // added) to the scaled launch speed, and the horizontal velocity splits on intent. With a
+    // direction held it is left exactly as it stands - direction changes are the air steering's
+    // job alone (AIR_TURN_RATE / AIR_ACCEL), so the air jump can never read as a violent re-aim.
+    // With NO direction held the horizontal is zeroed: a neutral air jump is a straight-up reset
+    // jump, the deliberate "stop here" the ballistic no-input air otherwise never offers. The
+    // latch upstream guarantees one press is one jump; this block only decides what a delivered
+    // press does. Every jump flies the full authored arc: hold duration never enters the
+    // simulation (the play verdict against variable height).
     let mut air_jumps = player.air_jumps;
     let mut coyote = player.coyote;
     let mut jumped = false;
@@ -174,6 +178,10 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
         } else if air_jumps > 0 {
             air_jumps -= 1;
             m.velocity.y = JUMP_VELOCITY * AIR_JUMP_SCALE;
+            if input.move_dir == Vec3::ZERO {
+                m.velocity.x = 0.0;
+                m.velocity.z = 0.0;
+            }
             jumped = true;
         }
         coyote = 0.0;
@@ -181,34 +189,32 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
 
     // One fixed step under gravity - ascent gravity while rising, the heavier fall gravity
     // otherwise - then slide the resulting move along any static geometry it meets. The slide is
-    // the game's policy wrapper (`crate::slide`): supported ground contacts resolve flat so
-    // standing on walkable geometry never bleeds sideways, walls and airborne contacts resolve
-    // exactly as the engine does.
+    // the game's policy wrapper (`crate::slide`): supported contacts resolve flat so standing on
+    // walkable geometry never bleeds sideways, lips within STEP_HEIGHT are climbed (only from a
+    // grounded, non-jumping entry - the gate passed here), walls stop or slide per the wall
+    // policies.
     let next = integrate(m, gravity(m.velocity.y), SIM_DT);
-    let capsule = Capsule::upright(m.position, PLAYER_HEIGHT, PLAYER_RADIUS);
-    let slid = slide_player(capsule, next.position - m.position, next.velocity, &world.statics);
+    let body = Cylinder::upright(m.position, PLAYER_HEIGHT, PLAYER_RADIUS);
+    let slid =
+        slide_player(body, next.position - m.position, next.velocity, &world.statics, player.grounded && !jumped);
 
-    // Rest the slid capsule on the terrain of the chunk beneath it, in that chunk's local frame
+    // Rest the slid body on the terrain of the chunk beneath it, in that chunk's local frame
     // (lift-only; the slide handled walls). Off every chunk there is no ground to rest on.
-    let slid_capsule = Capsule::upright(slid.position, PLAYER_HEIGHT, PLAYER_RADIUS);
+    let slid_body = Cylinder::upright(slid.position, PLAYER_HEIGHT, PLAYER_RADIUS);
     let (rested_position, rested_grounded) = match world.terrain_under(slid.position.x, slid.position.z) {
         Some(t) => {
-            let rest = rest_on_heightmap(slid_capsule.translated(-t.origin), &t.heightmap, WALKABLE_COS);
+            let rest = rest_cylinder_on_heightmap(slid_body.translated(-t.origin), &t.heightmap, WALKABLE_COS);
             (rest.position + t.origin, rest.grounded)
         }
         None => (slid.position, false),
     };
 
-    // Landing policy: a static-geometry landing must be genuine support, not a corner graze. The
-    // slide grounds on any walkable-normal contact, and a capsule's rounded bottom grazing a
-    // crate's top corner from beside the crate produces a near-vertical normal; reading that as
-    // landed zeroed the fall each step and held the player hovering at box-top height for seconds
-    // (the walk-off halt). Landing therefore requires all three: a walkable contact this step
-    // (`slid.grounded`), the body moving downward into it (a rising jump is never landing), and a
-    // bearing surface actually under the capsule's axis (`crate::landing::supported_below`).
-    // Terrain landings are the rest's own signal, unchanged.
-    let supported =
-        slid.grounded && next.velocity.y <= 0.0 && supported_below(slid.position, &world.statics);
+    // Landing policy: a static-geometry landing must be genuine support, not a graze past an
+    // edge. The slide answers that geometrically now (`PlayerSlide::supported`: a walkable
+    // contact whose point lies under the disc footprint - the flat bottom is standing on
+    // something real), so landing requires that signal plus the body moving downward into it (a
+    // rising jump is never landing). Terrain landings are the rest's own signal, unchanged.
+    let supported = slid.supported && next.velocity.y <= 0.0;
     let mut grounded = supported || rested_grounded;
     let mut velocity = slid.velocity;
     let mut position = rested_position;
@@ -226,9 +232,9 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     if player.grounded && !jumped && !grounded
         && let Some(t) = world.terrain_under(position.x, position.z)
     {
-        let probe = Capsule::upright(position - t.origin, PLAYER_HEIGHT, PLAYER_RADIUS)
+        let probe = Cylinder::upright(position - t.origin, PLAYER_HEIGHT, PLAYER_RADIUS)
             .translated(Vec3::new(0.0, -SNAP_DOWN_DISTANCE, 0.0));
-        let snap = rest_on_heightmap(probe, &t.heightmap, WALKABLE_COS);
+        let snap = rest_cylinder_on_heightmap(probe, &t.heightmap, WALKABLE_COS);
         if snap.grounded {
             position = snap.position + t.origin;
             velocity.y = 0.0;
