@@ -27,11 +27,15 @@
 //!
 //! The intended per-step composition is the game's to sequence, not this crate's: integrate under
 //! gravity, then collide-and-slide against static AABBs, then rest on terrain. wok-physics provides
-//! the pieces; it never holds the body between calls.
+//! the pieces; it never holds the body between calls. [`collide_and_slide`] and [`rest_on_heightmap`]
+//! remain supported engine API, but their last application consumer moved to the cylinder path (part
+//! 5): the player's current composition sweeps the flat-bottomed [`Cylinder`] under its own policy
+//! loop and rests it with [`rest_cylinder_on_heightmap`]. The capsule path stays pinned by
+//! `tests/locomotion_replay.rs`.
 //!
-//! Part 2b (this revision) adds the follow-camera math, the last wok-physics piece for the Phase 4
-//! camera. All pure again: no camera entity, no state, no loop - the game owns the camera and calls
-//! these each step.
+//! Part 2b added the follow-camera math, the last wok-physics piece for the Phase 4 camera. All
+//! pure again: no camera entity, no state, no loop - the game owns the camera and calls these each
+//! step.
 //!
 //! - [`camera`] - the orbit transform ([`boom_direction`], [`boom_point`]), the spring-arm boom
 //!   clamp against static [`Aabb`]s ([`spring_arm`], reusing 2a's sweep with a zero-length segment),
@@ -42,8 +46,8 @@
 //! The camera composition (orbit, spring-arm, terrain floor, then smoothing toward the result) is
 //! again the game's to sequence and hold state for, the same split as the character controller.
 //!
-//! Part 3 (this revision) widens the static side from boxes to a small collider vocabulary, so the
-//! felt surface of a round prefab matches the drawn one:
+//! Part 3 widened the static side from boxes to a small collider vocabulary, so the felt surface
+//! of a round prefab matches the drawn one:
 //!
 //! - [`collider`] - the [`Collider`] enum (`Aabb`, `Sphere`, `VertCylinder`) and
 //!   [`classify_collider`], the shared reduction from a transformed primitive to the collider it
@@ -55,8 +59,8 @@
 //!   [`spring_arm`] now take `&[Collider]`; AABB-only callers wrap with `Collider::from`, and box
 //!   behavior is unchanged.
 //!
-//! Part 4 (this revision) adds the oriented box, retiring the phantom shelf a rotated solid cube
-//! used to carry (its conservative world AABB reached past the drawn faces):
+//! Part 4 added the oriented box, retiring the phantom shelf a rotated solid cube used to carry
+//! (its conservative world AABB reached past the drawn faces):
 //!
 //! - [`collider`] / [`classify`] - [`Collider::Obb`] (centre, per-axis half-extents, a unit-quat
 //!   rotation), classified from a `Cube` under any rigid rotation plus per-axis scale; axis-aligned
@@ -66,9 +70,10 @@
 //! - [`sweep_obb`] - the box sweep run in the box's local frame (a rotated capsule is still a
 //!   capsule, so the map is exact), contact rotated back.
 //!
-//! Part 5 (this revision) adds the moving flat-bottomed shape, the player-collider brief: the
-//! capsule's rounded bottom made tilted faces unstandable and rolled bodies off edges, and a flat
-//! bottom bears on anything under its disc:
+//! Part 5 added the moving flat-bottomed shape, the player-collider brief: the capsule's rounded
+//! bottom made tilted faces unstandable and rolled bodies off edges, and a flat bottom bears on
+//! anything under its disc. It is the player's current collision path (the game's policy slide in
+//! taste runs over these sweeps):
 //!
 //! - [`cylinder`] - the moving vertical [`Cylinder`] (centre, radius, half-height; flat caps).
 //! - [`sweep_cyl`] / [`sweep_cyl_round`] / [`sweep_cyl_obb`] - the swept cylinder against every

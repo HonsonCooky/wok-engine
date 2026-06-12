@@ -12,6 +12,12 @@
 //! draws what the authored data says. Dirty tracking is per chunk plus a scene flag (the
 //! instance-id counter advances on place); `crate::sync` owns save and external-change
 //! application.
+//!
+//! Undo/redo is deferred, with a criterion rather than a date: the first real authoring session
+//! that loses work to its absence builds it. Every edit here commits immediately with no way back
+//! short of re-authoring, and the predicted first trips are Delete (the placement is gone outright)
+//! and drag-to-move (a slipped drag overwrites the transform it started from). When one of those
+//! actually costs a session work, the command-history layer goes in over these operations.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

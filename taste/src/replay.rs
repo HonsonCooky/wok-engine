@@ -171,9 +171,8 @@ fn settle(world: &World, start: Player, steps: usize) -> Player {
     state
 }
 
-/// The y of the capsule's lowest point for a centre at `center`: for an upright capsule the base
-/// sits half the total height below the centre (half-segment plus radius), however the height
-/// splits between them.
+/// The y of the body's lowest point for a centre at `center`: the cylinder's flat base sits half
+/// the total height below the centre.
 fn base_height(center: Vec3) -> f32 {
     center.y - PLAYER_HEIGHT * 0.5
 }

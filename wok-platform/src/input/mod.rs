@@ -125,18 +125,7 @@ impl InputCollector {
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
-                let key = event.logical_key.clone();
-                match event.state {
-                    ElementState::Pressed => {
-                        if self.keys_held.insert(key.clone()) {
-                            self.keys_pressed.insert(key);
-                        }
-                    }
-                    ElementState::Released => {
-                        self.keys_held.remove(&key);
-                        self.keys_released.insert(key);
-                    }
-                }
+                self.key_input(event.logical_key.clone(), event.state);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = (position.x, position.y);
@@ -161,6 +150,24 @@ impl InputCollector {
                 self.scroll_delta.1 += dy;
             }
             _ => {}
+        }
+    }
+
+    /// One keyboard transition, split from the winit event so the edge/held logic is unit-testable
+    /// (winit's `KeyEvent` carries a private platform field and cannot be built in a test). A press
+    /// edges `keys_pressed` only when the key was not already held - which is what swallows OS
+    /// auto-repeat - while a release always drops the held entry and edges `keys_released`.
+    fn key_input(&mut self, key: Key, state: ElementState) {
+        match state {
+            ElementState::Pressed => {
+                if self.keys_held.insert(key.clone()) {
+                    self.keys_pressed.insert(key);
+                }
+            }
+            ElementState::Released => {
+                self.keys_held.remove(&key);
+                self.keys_released.insert(key);
+            }
         }
     }
 
@@ -278,5 +285,135 @@ impl InputCollector {
         self.mouse_motion = (0.0, 0.0);
 
         state
+    }
+}
+
+// The collector's per-frame edge/held transitions are the pure logic of this crate, tested here.
+// Keyboard goes through `key_input` directly (winit's `KeyEvent` cannot be built outside winit);
+// mouse, scroll, and raw motion drive the real event handlers with winit's plain-data events. The
+// gamepad sets follow the same pressed/held shape, but gilrs's `GamepadId` is mintable only by a
+// live gilrs session, so those transitions are exercised through the applications instead.
+#[cfg(test)]
+#[allow(clippy::float_cmp)]
+mod tests {
+    use super::*;
+    use winit::dpi::PhysicalPosition;
+    use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
+
+    fn key(ch: &str) -> Key {
+        Key::Character(ch.into())
+    }
+
+    #[test]
+    fn a_press_edges_pressed_once_then_the_key_is_only_held() {
+        let mut c = InputCollector::new();
+        c.key_input(key("w"), ElementState::Pressed);
+
+        let frame = c.snapshot();
+        assert!(frame.keys_pressed.contains(&key("w")), "the press frame edges pressed");
+        assert!(frame.keys_held.contains(&key("w")), "and the key is held the same frame");
+
+        let next = c.snapshot();
+        assert!(!next.keys_pressed.contains(&key("w")), "the edge lasts exactly one frame");
+        assert!(next.keys_held.contains(&key("w")), "held persists until release");
+    }
+
+    #[test]
+    fn os_auto_repeat_never_re_edges_a_held_key() {
+        let mut c = InputCollector::new();
+        c.key_input(key("w"), ElementState::Pressed);
+        let _ = c.snapshot();
+
+        // Holding a key makes the OS deliver further Pressed events; they must not edge again.
+        c.key_input(key("w"), ElementState::Pressed);
+        let frame = c.snapshot();
+        assert!(frame.keys_pressed.is_empty(), "a repeat is not a new press");
+        assert!(frame.keys_held.contains(&key("w")));
+    }
+
+    #[test]
+    fn a_release_edges_released_for_one_frame_and_clears_held() {
+        let mut c = InputCollector::new();
+        c.key_input(Key::Named(NamedKey::Space), ElementState::Pressed);
+        let _ = c.snapshot();
+
+        c.key_input(Key::Named(NamedKey::Space), ElementState::Released);
+        let frame = c.snapshot();
+        assert!(frame.key_released(NamedKey::Space), "the release frame edges released");
+        assert!(!frame.key_held(NamedKey::Space), "held clears on release");
+
+        let next = c.snapshot();
+        assert!(!next.key_released(NamedKey::Space), "the released edge lasts exactly one frame");
+    }
+
+    #[test]
+    fn a_mouse_click_edges_pressed_and_released_one_frame_each() {
+        let mut c = InputCollector::new();
+        let press = WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        };
+        c.handle_window_event(&press);
+
+        let frame = c.snapshot();
+        assert!(frame.mouse_pressed(MouseButton::Left));
+        assert!(frame.mouse_held(MouseButton::Left));
+        let held = c.snapshot();
+        assert!(!held.mouse_pressed(MouseButton::Left), "the pressed edge lasts one frame");
+        assert!(held.mouse_held(MouseButton::Left));
+
+        let release = WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state: ElementState::Released,
+            button: MouseButton::Left,
+        };
+        c.handle_window_event(&release);
+        let frame = c.snapshot();
+        assert!(frame.mouse_buttons_released.contains(&MouseButton::Left));
+        assert!(!frame.mouse_held(MouseButton::Left), "held clears on release");
+        assert!(c.snapshot().mouse_buttons_released.is_empty(), "the released edge lasts one frame");
+    }
+
+    #[test]
+    fn scroll_accumulates_within_a_frame_and_clears_at_snapshot() {
+        let mut c = InputCollector::new();
+        let wheel = |x: f32, y: f32| WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(x, y),
+            phase: TouchPhase::Moved,
+        };
+        c.handle_window_event(&wheel(0.0, 1.0));
+        c.handle_window_event(&wheel(0.5, 2.0));
+
+        assert_eq!(c.snapshot().scroll_delta, (0.5, 3.0), "ticks within a frame accumulate");
+        assert_eq!(c.snapshot().scroll_delta, (0.0, 0.0), "and the accumulator clears per frame");
+    }
+
+    #[test]
+    fn raw_mouse_motion_accumulates_and_clears_at_snapshot() {
+        let mut c = InputCollector::new();
+        c.handle_device_event(&DeviceEvent::MouseMotion { delta: (3.0, -1.0) });
+        c.handle_device_event(&DeviceEvent::MouseMotion { delta: (2.0, 4.0) });
+
+        assert_eq!(c.snapshot().mouse_motion, (5.0, 3.0), "raw motion accumulates within the frame");
+        assert_eq!(c.snapshot().mouse_motion, (0.0, 0.0), "and clears per frame");
+    }
+
+    #[test]
+    fn cursor_delta_is_the_per_frame_position_difference() {
+        let mut c = InputCollector::new();
+        let moved = |x: f64, y: f64| WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(x, y),
+        };
+        c.handle_window_event(&moved(10.0, 20.0));
+        assert_eq!(c.snapshot().mouse_delta, (10.0, 20.0));
+
+        c.handle_window_event(&moved(15.0, 18.0));
+        let frame = c.snapshot();
+        assert_eq!(frame.mouse_pos, (15.0, 18.0));
+        assert_eq!(frame.mouse_delta, (5.0, -2.0), "the delta is against the previous frame's position");
+        assert_eq!(c.snapshot().mouse_delta, (0.0, 0.0), "a still cursor reads zero delta");
     }
 }

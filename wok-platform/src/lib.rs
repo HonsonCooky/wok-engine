@@ -1,5 +1,12 @@
 //! Platform substrate (layer 1) of the wok-engine: window, GPU, audio, input, frame loop, and
 //! OS theme. Provides the cross-platform foundation that the wok-* crates and the game build on.
+//!
+//! Testing boundary: the window/GPU/audio shell (`platform`, `gfx`, `audio`) is exempt from unit
+//! testing by nature - its behavior IS the OS, driver, and device interaction, which only a real
+//! window and a live adapter exercise, and the applications smoke it on every run. Unit tests
+//! cover the pure logic the crate does have: the input collector's per-frame edge/held set
+//! transitions (`input`). The gamepad sets share that transition shape but their ids can only be
+//! minted by a live gilrs session, so they are exercised through the applications as well.
 
 pub mod audio;
 pub mod gfx;

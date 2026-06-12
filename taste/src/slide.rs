@@ -46,21 +46,15 @@
 //! step-up through the real step).
 
 use glam::Vec3;
+// The loop constants (SKIN, MIN_MOVE_SQ, MAX_ITERS) are the engine slide's own, imported from
+// wok_physics::slide rather than restated: this loop runs the engine sweep's shape with taste's
+// resolve policies, and importing the canonical values is what keeps the two loops from drifting.
+use wok_physics::slide::{MAX_ITERS, MIN_MOVE_SQ, SKIN};
 use wok_physics::{Collider, Cylinder, SweptHit, sweep_cylinder_colliders};
 
 use crate::constants::{
     PLAYER_RADIUS, SIM_DT, STEP_HEIGHT, WALKABLE_COS, WALKABLE_NORMAL_Y, WALL_FRICTION, WALL_STOP_DEG,
 };
-
-/// Small separation kept between the body and surfaces while sliding: the engine slide's value,
-/// passed straight to the cylinder sweep's skin parameter.
-const SKIN: f32 = 1e-3;
-
-/// Below this squared length the leftover motion is negligible and the slide stops (engine value).
-const MIN_MOVE_SQ: f32 = 1e-10;
-
-/// Cap on slide iterations (engine value): floor plus two walls fits, leftover past it is dropped.
-const MAX_ITERS: usize = 4;
 
 /// Horizontal slack on the footprint test, beyond `PLAYER_RADIUS`: the sweep reports contact
 /// points on the static surface, a skin outside the body, so a rim-bearing contact can sit a
@@ -252,4 +246,21 @@ fn head_on(motion: Vec3, normal: Vec3) -> bool {
     let w = Vec3::new(normal.x, 0.0, normal.z);
     let into_wall = -h.dot(w);
     into_wall > 0.0 && into_wall >= h.length() * w.length() * WALL_STOP_DEG.to_radians().cos()
+}
+
+#[cfg(test)]
+#[allow(clippy::float_cmp)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_slide_loop_tuning_is_the_engines() {
+        // The constant tie: the names this loop compiles against must be the engine slide module's
+        // own values. Trivially true while the imports above stand; the test exists so a later
+        // local re-declaration (shadowing the import with a literal) fails here instead of
+        // silently forking the two loops.
+        assert_eq!(SKIN, wok_physics::slide::SKIN);
+        assert_eq!(MIN_MOVE_SQ, wok_physics::slide::MIN_MOVE_SQ);
+        assert_eq!(MAX_ITERS, wok_physics::slide::MAX_ITERS);
+    }
 }

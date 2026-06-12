@@ -330,8 +330,8 @@ mod tests {
         World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }], ..World::default() }
     }
 
-    /// A player standing at rest mid-chunk: capsule base exactly on the surface, grounded (with
-    /// the coyote grace a grounded step would carry).
+    /// A player standing at rest mid-chunk: the cylinder's flat base exactly on the surface,
+    /// grounded (with the coyote grace a grounded step would carry).
     fn at_rest(world: &World) -> Player {
         let ground = world.terrains[0].heightmap.height_at(64.0, 64.0);
         Player {

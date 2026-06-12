@@ -43,19 +43,23 @@ use crate::capsule::Capsule;
 use crate::collider::Collider;
 use crate::sweep::sweep_capsule_colliders_inflated;
 
-/// Small separation kept between the capsule and surfaces while sliding. Stopping a hair short of
-/// contact keeps the next sweep's gap cleanly positive, so a capsule flush against a wall reads as
+// The three loop constants are public as the canonical slide tuning: a game that runs its own
+// policy slide over the crate's sweeps (taste's cylinder slide does) imports these instead of
+// restating the literals, so the two loops can never drift apart.
+
+/// Small separation kept between the body and surfaces while sliding. Stopping a hair short of
+/// contact keeps the next sweep's gap cleanly positive, so a body flush against a wall reads as
 /// "parallel, no impact" and slides freely instead of stalling on a zero-distance contact.
-const SKIN: f32 = 1e-3;
+pub const SKIN: f32 = 1e-3;
 
 /// Below this squared length the leftover motion is negligible and the slide stops.
-const MIN_MOVE_SQ: f32 = 1e-10;
+pub const MIN_MOVE_SQ: f32 = 1e-10;
 
 /// Cap on slide iterations. Each iteration resolves one contact plane, so this bounds how many
 /// distinct surfaces a single move folds in: floor plus a wall plus a second wall (a corner) fits,
 /// with a step to spare. Leftover motion past the cap is dropped rather than risk creeping into
 /// geometry.
-const MAX_ITERS: usize = 4;
+pub const MAX_ITERS: usize = 4;
 
 /// The outcome of a slide: where the capsule centre ended up, the velocity projected onto every
 /// contact plane it met, and whether any contact was walkable ground.

@@ -28,19 +28,31 @@
 //!
 //! ## Composition (game-owned)
 //!
-//! The intended per-step shape, which the game sequences and holds the state for:
+//! The pieces are policy-free: an orbit transform, a boom clamp, a vertical clamp, and a smoothing
+//! helper ([`crate::smooth`]). The game decides the order, what to smooth, and what may write back.
+//! The composition taste ships (its `follow` module owns the state):
 //!
 //! ```text
-//! let dir     = boom_direction(yaw, pitch);                        // orbit angles -> boom direction
-//! let want    = spring_arm(target, dir, distance, probe, statics); // clamp the boom against walls
-//! arm         = smooth(arm, want, arm_half_life, dt);              // ease the length (game holds it)
-//! let desired = boom_point(target, dir, arm);                      // the clamped camera position
-//! let floored = terrain_floor(desired, terrain, margin);           // keep it above the ground
-//! camera_pos  = smooth(camera_pos, floored, pos_half_life, dt);    // ease the follow (game holds it)
+//! yaw, pitch += look;                                            // orbit input lands whole; angles never smoothed
+//! anchor   = smooth(anchor, target, track_half_life, dt);        // the one lag: the boom's hanging point
+//! let dir  = boom_direction(yaw, pitch);
+//! arm      = smooth(arm, boom, recover_half_life, dt);           // slow recovery toward the desired boom
+//! if statics.contains(boom_point(anchor, dir, boom)) {           // only when the desired eye sits inside
+//!     arm  = arm.min(spring_arm(anchor, dir, boom, probe, statics)); // a collider: clamp instantly inward
+//! }
+//! let eye  = boom_point(anchor, dir, arm);
+//! position = terrain_floor(eye, terrain, margin);                // vertical clamp above the ground
+//! if position.y > eye.y { /* recompute pitch and arm from position - anchor */ }
 //! ```
 //!
-//! wok-physics provides the pieces; the game decides the order, what to smooth, and the rates. See
-//! [`crate::smooth`] for the smoothing helper.
+//! Three choices shape it. The smoothing eases the anchor - the point the boom hangs from - rather
+//! than the eye, so look input has zero lag and the only follow lag is the anchor's. The spring arm
+//! engages only when the desired eye itself sits inside a collider (a prefab merely crossing the
+//! boom is handled by an occlusion fade instead): the clamp lands instantly via the `min`, and
+//! clearance recovers on the slow smooth - clamp-and-recover, walls never write the orbit. The
+//! terrain floor is the one deliberate exception to that rule: while it clamps, pitch and arm are
+//! recomputed from the clamped eye so the orbit believes the position that is displayed (the ground
+//! is a fact to stand on; a wall is an obstruction to recover from).
 //!
 //! Determinism (canon contract): every function is pure trig/arithmetic of its inputs with no state
 //! and no wall-clock, and the spring arm's sweep is 2a's deterministic one (fixed iteration cap,

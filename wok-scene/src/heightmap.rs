@@ -148,6 +148,11 @@ impl Heightmap {
     /// Surface tag of the cell containing chunk-local `(x, z)` (nearest sample, no blend - tags
     /// are discrete). `None` only for a heightmap whose data does not resolve; one built through
     /// `new` or loaded through the loader always resolves, because both validate the indices.
+    ///
+    /// Per-surface friction and feel driven by these tags is this query's designed use: a game
+    /// samples the tag under the body and varies its ground handling per surface (ice slides, mud
+    /// drags). Parked until content actually wants differing surfaces; the game-side hook is
+    /// taste's ground-friction application (the grounded approach rates in its locomotion step).
     pub fn surface_at(&self, x: f32, z: f32) -> Option<&SurfaceTag> {
         let index = self.surface_indices[idx(nearest_cell(x), nearest_cell(z))] as usize;
         self.surface_table.get(index)
