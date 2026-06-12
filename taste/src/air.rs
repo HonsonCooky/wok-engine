@@ -1,6 +1,6 @@
 //! Airborne steering: redirection, not acceleration-through-zero.
 //!
-//! The old air model scaled the grounded approach by AIR_CONTROL: airborne input accelerated the
+//! The old air model scaled the grounded approach by an air-control factor: airborne input accelerated the
 //! horizontal velocity toward the intended velocity along a straight line. Reversing direction
 //! mid-jump therefore braked through a dead stop - the velocity passed through zero - which is the
 //! opposite of the BFBB / Ratchet & Clank air authority the demo wants, where a jump's heading can
@@ -8,10 +8,11 @@
 //!
 //! The fix splits direction from speed. With input, [`steer`] rotates the horizontal velocity's
 //! DIRECTION toward the stick at `AIR_TURN_RATE` radians per second (about the vertical axis,
-//! taking the shorter way around), while the speed MAGNITUDE approaches the intended speed at the
-//! existing AIR_CONTROL-scaled acceleration. A redirect never passes through a stop, but gaining
-//! or losing speed in air stays gradual. With no input the velocity is returned untouched:
-//! ballistic, the third-mechanism fix that stands from the feel arc.
+//! taking the shorter way around), while the speed MAGNITUDE approaches the intended speed at
+//! `AIR_ACCEL` - its own airborne rate, decoupled from the grounded acceleration so a ground
+//! crispness retune can never silently change the air feel. A redirect never passes through a
+//! stop, but gaining or losing speed in air stays gradual. With no input the velocity is returned
+//! untouched: ballistic, the third-mechanism fix that stands from the feel arc.
 //!
 //! From rest there is no direction to rotate, so steering degrades to the old straight approach
 //! along the stick - which is also exactly what the previous model did from rest, keeping the
@@ -22,7 +23,7 @@
 
 use glam::Vec3;
 
-use crate::constants::{AIR_CONTROL, AIR_TURN_RATE, GROUND_ACCEL, MOVE_SPEED};
+use crate::constants::{AIR_ACCEL, AIR_TURN_RATE, MOVE_SPEED};
 
 /// Below this squared speed the velocity has no usable heading; steering starts from rest along
 /// the stick instead of rotating noise.
@@ -36,7 +37,7 @@ pub fn steer(horizontal: Vec3, move_dir: Vec3, dt: f32) -> Vec3 {
         return horizontal;
     }
     let target = Vec3::new(move_dir.x, 0.0, move_dir.z) * MOVE_SPEED;
-    let accel = GROUND_ACCEL * AIR_CONTROL * dt;
+    let accel = AIR_ACCEL * dt;
     let speed = horizontal.length();
     if speed * speed <= NO_HEADING_SQ {
         // From rest: accelerate straight along the stick (the rotation has nothing to turn).
@@ -121,18 +122,18 @@ mod tests {
     }
 
     #[test]
-    fn speed_still_approaches_intent_at_the_air_control_rate() {
-        // Entry slower than intent, heading already on the stick: one step gains exactly the
-        // AIR_CONTROL-scaled acceleration - the magnitude half of the model is the old air accel.
+    fn speed_still_approaches_intent_at_the_air_accel_rate() {
+        // Entry slower than intent, heading already on the stick: one step gains exactly
+        // AIR_ACCEL * dt - the magnitude half of the model runs at the decoupled airborne rate.
         let v = steer(Vec3::new(2.0, 0.0, 0.0), Vec3::X, SIM_DT);
-        assert!((speed(v) - (2.0 + GROUND_ACCEL * AIR_CONTROL * SIM_DT)).abs() < 1e-5, "speed {}", speed(v));
+        assert!((speed(v) - (2.0 + AIR_ACCEL * SIM_DT)).abs() < 1e-5, "speed {}", speed(v));
         assert!(v.z.abs() < 1e-6, "heading must not drift when it already matches");
     }
 
     #[test]
     fn from_rest_steering_accelerates_straight_along_the_stick() {
         let v = steer(Vec3::ZERO, Vec3::X, SIM_DT);
-        assert!((v.x - GROUND_ACCEL * AIR_CONTROL * SIM_DT).abs() < 1e-6, "got {v:?}");
+        assert!((v.x - AIR_ACCEL * SIM_DT).abs() < 1e-6, "got {v:?}");
         assert_eq!(v.z, 0.0);
     }
 

@@ -38,6 +38,12 @@ use crate::constants::PLAYER_HEIGHT;
 /// slide's resting skin (a millimetre) with margin; on spheres it doubles as the bearing window
 /// (see the module docs), where 0.02 puts the edge of support about 20 degrees off a
 /// boulder-sized apex.
+///
+/// Known limitation, parked: on tilted collider faces the capsule's spherical bottom curves away
+/// from the surface under the axis, and past roughly 15 degrees of tilt (at this radius) that gap
+/// outruns this tolerance, so the probe reads unsupported and the player sheds - even though
+/// WALKABLE_COS now admits 60-degree TERRAIN. The 60-degree stand therefore applies to terrain,
+/// not to rotated crates yet; the fix rides the future player-collider brief.
 const SUPPORT_TOLERANCE_M: f32 = 0.02;
 
 /// Is there a static bearing surface directly under the capsule axis at `position` (the capsule

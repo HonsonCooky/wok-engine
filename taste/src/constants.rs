@@ -21,24 +21,40 @@ pub const SIM_DT: f32 = 1.0 / 60.0;
 /// spiral of death. Past the clamp the leftover time is dropped and the game slows down instead.
 pub const MAX_STEPS_PER_FRAME: u32 = 8;
 
-/// cos(45 degrees): the steepest slope that still counts as walkable ground, passed to both the
-/// slide and the terrain rest so the two grounded signals agree.
-pub const WALKABLE_COS: f32 = std::f32::consts::FRAC_1_SQRT_2;
+/// cos(60 degrees): the steepest slope that still counts as walkable ground, passed to both the
+/// slide and the terrain rest so the two grounded signals agree. Raised from 45 degrees on the
+/// play verdict: steep hillsides should ground, rest, and walk normally. In practice the
+/// 60-degree stand applies to terrain only - tilted COLLIDER faces past ~15 degrees still shed
+/// the player (the support probe's vertical tolerance; see `crate::landing`), a parked limitation
+/// whose fix rides the future player-collider brief.
+pub const WALKABLE_COS: f32 = 0.5;
 
 /// Contacts at least this upright (by normal.y) grade as ground for the slide's flat-resolve
 /// policy (`crate::slide`): when the player is genuinely supported at the contact, such a contact
 /// resolves as flat ground, so gravity dies in the contact instead of leaking sideways - the
 /// edge-drift fix. Set a hair under WALKABLE_COS so every contact the grounded signal accepts
 /// also qualifies; wall-grade contacts and all unsupported resolution keep their true normals.
-pub const WALKABLE_NORMAL_Y: f32 = 0.7;
+/// Moves with WALKABLE_COS (the relationship test pins the pairing), so the walkable retune to
+/// 60 degrees carried it from 0.7 down with the threshold.
+pub const WALKABLE_NORMAL_Y: f32 = 0.49;
 
 /// The wall stop's incidence window, in degrees from head-on. A wall-grade contact whose
 /// horizontal motion points within this angle of straight into the wall kills its tangential
 /// redirect: the player stops at the wall instead of skating along it (the play verdict: running
 /// at a wall should read as a stop, not a deflection). Beyond the window, glancing contacts slide
-/// exactly as the engine resolves them; vertical motion (gravity along a wall) never enters the
-/// test. Policy in `crate::slide`.
-pub const WALL_STOP_DEG: f32 = 45.0;
+/// as the engine resolves them (less the wall friction below); vertical motion (gravity along a
+/// wall) never enters the test. Narrowed from 45 on the follow-up verdict: the stop cone was too
+/// wide, and a quarter-angle approach should slide. Policy in `crate::slide`.
+pub const WALL_STOP_DEG: f32 = 30.0;
+
+/// Tangential deceleration while in wall contact, in m/s^2: the horizontal speed of a wall-grade
+/// sliding contact decays at this rate, applied only on steps that actually touch a wall, so a
+/// wall slide scrubs speed instead of feeling like glass. Vertical motion is exempt (gravity
+/// still slides a body down a wall, as in the stop), and ground or airborne non-contact motion
+/// never sees it. A full-speed slide scrubs out in MOVE_SPEED / WALL_FRICTION seconds (0.3s);
+/// one step's scrub (~0.42 m/s) is a sliver, so a brief graze barely dents the run. Policy in
+/// `crate::slide`.
+pub const WALL_FRICTION: f32 = 25.0;
 
 // ---- player ----
 
@@ -71,12 +87,15 @@ pub const GROUND_ACCEL: f32 = 90.0;
 /// which is what made precision landings overshoot).
 pub const GROUND_FRICTION: f32 = 150.0;
 
-/// Airborne multiplier on the speed-change acceleration. Under the redirection model
-/// (`crate::air`) this scales how fast airborne speed magnitude approaches the intended speed;
-/// direction is AIR_TURN_RATE's job. Friction never applies airborne - with no input the velocity
-/// is ballistic (policy in `crate::sim::step`: air friction pinned bodies onto crate corners, the
-/// last mid-air halt).
-pub const AIR_CONTROL: f32 = 0.55;
+/// Airborne speed-gain acceleration, in m/s^2: under the redirection model (`crate::air`) this is
+/// how fast the airborne speed magnitude approaches the intended speed; direction is
+/// AIR_TURN_RATE's job. Its own rate, not a multiplier on GROUND_ACCEL: the old chained
+/// AIR_CONTROL * GROUND_ACCEL silently rose to 49.5 when ground crispness rose, and minute air
+/// corrections became impossible - a 100ms tap drifted ~2.5m by landing; at 12 it is ~0.5m, so a
+/// retune of ground feel can never drag the air rate with it again. Friction never applies
+/// airborne - with no input the velocity is ballistic (policy in `crate::sim::step`: air friction
+/// pinned bodies onto crate corners, the last mid-air halt).
+pub const AIR_ACCEL: f32 = 12.0;
 
 /// How fast airborne input rotates the horizontal velocity's direction toward the stick, in
 /// radians per second. Redirection rather than acceleration-through-zero is the BFBB / Ratchet &
@@ -345,9 +364,11 @@ mod tests {
     fn the_flat_resolve_threshold_spans_ground_but_not_walls() {
         // Every contact the slide grades as ground (normal.y >= WALKABLE_COS) must also qualify
         // for the supported flat resolve, or a grounding contact could still bleed drift; and it
-        // must sit well above any wall-grade normal, or walls would stop pushing back.
+        // must stay a hair under the threshold, not a regime apart, or near-vertical walls would
+        // start flat-resolving and stop pushing back. The pairing is the contract: a walkable
+        // retune moves both together (45 -> 60 degrees carried 0.7 -> 0.49).
         assert!(WALKABLE_NORMAL_Y <= WALKABLE_COS);
-        assert!(WALKABLE_NORMAL_Y > 0.5);
+        assert!(WALKABLE_NORMAL_Y > WALKABLE_COS - 0.05, "the flat-resolve grade must move with the walkable limit");
     }
 
     #[test]
@@ -374,8 +395,34 @@ mod tests {
         // releasing input never reads slippery.
         assert!(MOVE_SPEED / GROUND_ACCEL < 0.2, "too slow to top speed: reads as ice");
         assert!(GROUND_FRICTION >= GROUND_ACCEL);
-        // Airborne control is real but weaker than grounded: momentum survives a jump.
-        assert!(AIR_CONTROL > 0.0 && AIR_CONTROL < 1.0);
+        // Airborne speed gain is real but well under the grounded rate: momentum survives a jump,
+        // and the decoupled constant can never be dragged up by a ground-crispness retune (the
+        // chained AIR_CONTROL * GROUND_ACCEL had silently reached 49.5).
+        assert!(AIR_ACCEL > 0.0);
+        assert!(AIR_ACCEL < GROUND_ACCEL * 0.25, "air speed gain crept toward the grounded rate");
+    }
+
+    #[test]
+    fn a_100ms_air_tap_drifts_under_a_metre() {
+        // The decoupling's felt promise, algebraically: a 100ms tap mid-jump gains AIR_ACCEL * t
+        // of speed and drifts roughly that speed times the remaining hang time. At the chained
+        // 49.5 rate this came out ~2.5m (minute corrections impossible); the decoupled rate must
+        // keep it sub-metre while staying a real correction, not a dead stick.
+        let tap = 0.1;
+        let hang = JUMP_TIME_TO_APEX + (2.0 * JUMP_APEX_HEIGHT / FALL_GRAVITY).sqrt();
+        let drift = AIR_ACCEL * tap * (hang - 0.5 * tap);
+        assert!(drift < 1.0, "a 100ms tap drifts {drift}m: minute air corrections are gone again");
+        assert!(drift > 0.2, "a 100ms tap drifts only {drift}m: the air control is nearly dead");
+    }
+
+    #[test]
+    fn the_wall_scrub_is_a_sliver_per_step_but_real_over_a_slide() {
+        // The friction's two felt claims: a brief graze barely dents the run (one contact step
+        // scrubs well under a tenth of top speed), while a held slide scrubs out fast (a
+        // full-speed slide dies within a second of contact).
+        assert!(WALL_FRICTION > 0.0);
+        assert!(WALL_FRICTION * SIM_DT < 0.1 * MOVE_SPEED, "one step's scrub should be a sliver of the run");
+        assert!(MOVE_SPEED / WALL_FRICTION < 1.0, "a held wall slide should scrub out within a second");
     }
 
     #[test]
@@ -422,11 +469,11 @@ mod tests {
     #[test]
     fn the_snap_distance_covers_a_full_speed_step_down_the_steepest_walkable_slope() {
         // One step of full-speed walking descends at most MOVE_SPEED * SIM_DT * tan(max slope);
-        // with WALKABLE_COS = cos(45 deg) that gradient is 1, so the bound is set by the top speed
-        // alone (7.5 m/s puts it at 0.125m) - the crispness retune of accel and friction moves how
-        // fast that speed is reached, not the worst per-step descent, so the bound stands. The
-        // glue must cover it, or a fast downhill walk outruns the snap and flickers airborne - the
-        // exact bug the glue removes.
+        // with WALKABLE_COS = cos(60 deg) that gradient is tan(60) = sqrt(3), so the worst
+        // per-step descent is 7.5 / 60 * 1.732, about 0.22m - up from 0.125m at the old 45-degree
+        // limit, still inside the 0.3m glue, and that headroom is exactly what this assertion
+        // pins. The glue must cover it, or a fast downhill walk outruns the snap and flickers
+        // airborne - the exact bug the glue removes.
         let max_walkable_gradient = (1.0 - WALKABLE_COS * WALKABLE_COS).sqrt() / WALKABLE_COS;
         assert!(SNAP_DOWN_DISTANCE >= MOVE_SPEED * SIM_DT * max_walkable_gradient);
         // And it must stay a glue, not a teleport: well under the player's own height.

@@ -74,6 +74,33 @@ fn an_airborne_reversal_redirects_without_passing_through_a_stop() {
 }
 
 #[test]
+fn a_100ms_tap_mid_jump_drifts_about_half_a_metre_not_metres() {
+    // The AIR_ACCEL decoupling's felt promise, through the real step: jump straight up, tap the
+    // stick for 100ms (six fixed steps), release, ride the arc down. The drift at landing must
+    // stay sub-metre - at the chained AIR_CONTROL * GROUND_ACCEL rate (silently 49.5 m/s^2 after
+    // the ground crispness retune) the same tap drifted ~2.5m, which is what made minute air
+    // corrections impossible - while still being a real correction, not a dead stick.
+    let world = flat_world(2.0);
+    let start = at_rest(&world);
+    let start_x = start.motion.position.x;
+    let mut p = sim::step(start, StepInput { move_dir: Vec3::ZERO, jump: true }, &world);
+    let tap_steps = (0.1 / SIM_DT).round() as usize;
+    for _ in 0..tap_steps {
+        p = sim::step(p, StepInput { move_dir: Vec3::X, jump: false }, &world);
+    }
+    for _ in 0..600 {
+        if p.grounded {
+            break;
+        }
+        p = sim::step(p, StepInput::default(), &world);
+    }
+    assert!(p.grounded, "the jump must land within ten seconds");
+    let drift = (p.motion.position.x - start_x).abs();
+    assert!(drift < 1.0, "a 100ms tap drifted {drift}m by landing: minute air corrections are gone again");
+    assert!(drift > 0.2, "a 100ms tap drifted only {drift}m: the air control is nearly dead");
+}
+
+#[test]
 fn the_double_jump_fires_airborne_exactly_once_and_resets_on_landing() {
     let world = flat_world(2.0);
     let jump = StepInput { move_dir: Vec3::ZERO, jump: true };

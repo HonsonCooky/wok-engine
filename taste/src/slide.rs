@@ -35,8 +35,17 @@
 //! player stops at the wall instead of skating along it (the play verdict: running at a wall
 //! should read as running INTO it). Vertical motion is exempt - it is projected onto the true
 //! plane as always, so gravity still slides a body down a wall - and contacts outside the window
-//! (glancing approaches) slide exactly as the engine resolves them, bit for bit. A flat ceiling
-//! has no horizontal normal to measure incidence against, so it always takes the engine path.
+//! (glancing approaches) take the engine's geometry unchanged. A flat ceiling has no horizontal
+//! normal to measure incidence against, so it always takes the engine path.
+//!
+//! Wall contact also scrubs, the third policy: on any step that touches a wall-grade surface (a
+//! contact whose normal is mostly horizontal, `|normal.y| < WALKABLE_NORMAL_Y`, so ceilings and
+//! floors never qualify), the horizontal speed decays by one step of `WALL_FRICTION` after the
+//! resolve - a glancing slide along a wall loses speed instead of feeling like glass. The scrub
+//! touches the exit velocity only (the step's positions are still the engine's, bit for bit), is
+//! applied once per step however many wall contacts the iteration meets, and exempts vertical
+//! motion like the stop does, so a fall along a wall stays a fall. Steps with no wall contact
+//! never see it: grounded and airborne free motion are untouched.
 //!
 //! Deterministic: a fixed iteration cap, the engine sweep's slice-order contract, the support
 //! probe's fixed arithmetic; no RNG, no state.
@@ -44,7 +53,7 @@
 use glam::Vec3;
 use wok_physics::{Capsule, Collider, SlideResult, sweep_capsule_colliders};
 
-use crate::constants::{WALKABLE_COS, WALKABLE_NORMAL_Y, WALL_STOP_DEG};
+use crate::constants::{SIM_DT, WALKABLE_COS, WALKABLE_NORMAL_Y, WALL_FRICTION, WALL_STOP_DEG};
 use crate::landing::supported_below;
 
 /// Small separation kept between the capsule and surfaces while sliding: the engine slide's value,
@@ -66,6 +75,7 @@ pub fn slide_player(capsule: Capsule, displacement: Vec3, velocity: Vec3, collid
     let mut remaining = displacement;
     let mut velocity = velocity;
     let mut grounded = false;
+    let mut wall_contact = false;
 
     for _ in 0..MAX_ITERS {
         if remaining.length_squared() <= MIN_MOVE_SQ {
@@ -85,6 +95,9 @@ pub fn slide_player(capsule: Capsule, displacement: Vec3, velocity: Vec3, collid
                 cap = cap.translated(advance);
                 if hit.normal.y >= WALKABLE_COS {
                     grounded = true;
+                }
+                if hit.normal.y.abs() < WALKABLE_NORMAL_Y {
+                    wall_contact = true;
                 }
                 let leftover = remaining - advance;
                 if hit.normal.y >= WALKABLE_NORMAL_Y && supported_below(cap.center(), colliders) {
@@ -106,6 +119,17 @@ pub fn slide_player(capsule: Capsule, displacement: Vec3, velocity: Vec3, collid
                 }
             }
         }
+    }
+
+    // The wall scrub: one step of WALL_FRICTION off the horizontal speed, only on steps that
+    // touched a wall, applied to the exit velocity after the resolve so the step's geometry stays
+    // the engine's. Vertical is exempt, as in the stop.
+    if wall_contact {
+        let speed = Vec3::new(velocity.x, 0.0, velocity.z).length();
+        let scrub = WALL_FRICTION * SIM_DT;
+        let scale = if speed <= scrub { 0.0 } else { (speed - scrub) / speed };
+        velocity.x *= scale;
+        velocity.z *= scale;
     }
 
     SlideResult { position: cap.center(), velocity, grounded }
@@ -202,13 +226,14 @@ mod tests {
     }
 
     #[test]
-    fn a_30_degree_approach_stops_where_the_engine_would_skate() {
-        // Inside the window but off-axis: the engine's projection would keep most of the
-        // tangential motion (the skate the verdict rejected); the policy kills it. The engine
-        // fixture pin alongside proves the test sits where the two genuinely diverge.
+    fn a_20_degree_approach_stops_where_the_engine_would_skate() {
+        // Inside the (narrowed, 30-degree) window but off-axis: the engine's projection would
+        // keep most of the tangential motion (the skate the verdict rejected); the policy kills
+        // it. The engine fixture pin alongside proves the test sits where the two genuinely
+        // diverge.
         let statics = wall();
         let cap = at_the_wall();
-        let (d, v) = approach(30.0);
+        let (d, v) = approach(20.0);
 
         let engines = collide_and_slide(cap, d, v, &statics, Vec3::Y, WALKABLE_COS);
         assert!(engines.velocity.z > 1.0, "fixture: the engine must show the skate this stops");
@@ -222,16 +247,64 @@ mod tests {
     }
 
     #[test]
-    fn a_60_degree_approach_slides_bitwise_as_the_engine() {
-        // Outside the window, glancing contacts are not the policy's business: position, velocity,
-        // and grounded flag must be the engine's answer bit for bit.
+    fn a_45_degree_approach_slides_as_the_engine_less_one_steps_scrub() {
+        // The narrowing's verdict made flesh: under the old 45-degree window this exact approach
+        // stopped dead; outside the 30-degree window it slides. Geometry is the engine's bit for
+        // bit (position and grounded), and the exit velocity is the engine's tangential speed
+        // less exactly one step of WALL_FRICTION - the analytic scrub of a glancing wall slide.
         let statics = wall();
         let cap = at_the_wall();
-        let (d, v) = approach(60.0);
-        let ours = slide_player(cap, d, v, &statics);
+        let (d, v) = approach(45.0);
         let engines = collide_and_slide(cap, d, v, &statics, Vec3::Y, WALKABLE_COS);
-        assert_eq!(ours, engines, "a glancing wall contact must be the engine's, unchanged");
-        assert!(ours.velocity.z > 1.0, "fixture: the glancing approach really does keep sliding");
+        assert!(engines.velocity.z > 1.0, "fixture: the engine slide keeps real tangential speed");
+
+        let ours = slide_player(cap, d, v, &statics);
+        assert_eq!(ours.position, engines.position, "the scrub must not move the step's geometry");
+        assert_eq!(ours.grounded, engines.grounded);
+        assert!(ours.velocity.x.abs() < 1e-6, "the wall still kills the into-wall component");
+        let expected_z = engines.velocity.z - WALL_FRICTION * SIM_DT;
+        assert!(
+            (ours.velocity.z - expected_z).abs() < 1e-5,
+            "exit {} should be the engine's {} less one step's scrub",
+            ours.velocity.z,
+            engines.velocity.z
+        );
+    }
+
+    #[test]
+    fn a_brief_graze_barely_scrubs_and_free_motion_scrubs_nothing() {
+        // One contacting step costs one step of WALL_FRICTION - a sliver of the entry speed, so
+        // a graze barely dents the run - and the moment contact ends the scrub ends with it: a
+        // following step clear of the wall returns the velocity untouched.
+        let statics = wall();
+        let cap = at_the_wall();
+        let (d, v) = approach(45.0);
+        let grazed = slide_player(cap, d, v, &statics);
+        let entry_t = v.z;
+        let scrub = WALL_FRICTION * SIM_DT;
+        assert!((entry_t - grazed.velocity.z - scrub).abs() < 1e-5, "one contact step scrubs one step's friction");
+        assert!(scrub < 0.1 * entry_t, "the graze's dent must be a sliver of the entry speed");
+
+        let away = slide_player(
+            Capsule::upright(grazed.position, PLAYER_HEIGHT, PLAYER_RADIUS),
+            Vec3::new(-0.05, 0.0, 0.1),
+            grazed.velocity,
+            &statics,
+        );
+        assert_eq!(away.velocity, grazed.velocity, "no contact, no scrub");
+    }
+
+    #[test]
+    fn a_ceiling_bump_does_not_scrub_the_run() {
+        // The scrub is for walls. A flat ceiling's normal is straight down - no horizontal part -
+        // so rising into it while running kills the rise (the engine's projection) and must leave
+        // the run alone: head bumps are not wall slides.
+        let ceiling = [Collider::from(Aabb::new(Vec3::new(60.0, 4.0, 60.0), Vec3::new(68.0, 5.0, 68.0)))];
+        let cap = upright(Vec3::new(64.0, 4.0 - PLAYER_HEIGHT * 0.5 - 0.005, 64.0));
+        let v = Vec3::new(crate::constants::MOVE_SPEED, 3.0, 0.0);
+        let r = slide_player(cap, v * SIM_DT, v, &ceiling);
+        assert_eq!(r.velocity.x, v.x, "the run must survive the head bump unscrubbed");
+        assert_eq!(r.velocity.y, 0.0, "the rise dies in the ceiling");
     }
 
     #[test]

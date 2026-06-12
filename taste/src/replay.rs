@@ -112,9 +112,11 @@ fn fixture_world() -> World {
 /// stop, which for an exactly head-on approach is also bitwise the engine's resolve), jump once at
 /// the wall (every jump flies the full authored arc now), then slide along it at a glancing angle.
 /// The slide direction leans 2:1 along the wall - about 63 degrees from head-on, clearly outside
-/// the 45-degree stop window - because the old 1:1 diagonal sits exactly ON the window's edge,
-/// where float roundoff would decide stop-versus-slide and the test would pin luck. Every
-/// locomotion arc the demo shows, in one sequence.
+/// the (narrowed, 30-degree) stop window with margin to spare, so the angle never sits near the
+/// edge where float roundoff would decide stop-versus-slide and the test would pin luck. The
+/// slide also scrubs now: wall friction holds the tangential speed at its ground-accel-versus-
+/// scrub equilibrium, ~5.74 m/s against the 6.71 m/s tangential intent, and the 60-step phase
+/// advances ~5.8m along the wall. Every locomotion arc the demo shows, in one sequence.
 fn scripted_inputs() -> Vec<StepInput> {
     let forward = Vec3::new(1.0, 0.0, 0.0);
     let glancing = Vec3::new(1.0, 0.0, 2.0).normalize();
@@ -395,8 +397,8 @@ fn the_scripted_run_actually_exercises_the_arcs() {
         traj[245].motion.position.y
     );
 
-    // The glancing phase (outside the stop window) slides along the wall: z advances, x stays
-    // pinned.
+    // The glancing phase (outside the stop window) slides along the wall: z advances (~5.8m over
+    // the 60 steps at the wall-friction equilibrium of ~5.74 m/s), x stays pinned.
     let before = &traj[299];
     let last = traj.last().unwrap();
     assert!(last.motion.position.z > before.motion.position.z + 2.0, "should have slid along the wall in z");

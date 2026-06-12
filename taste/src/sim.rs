@@ -138,8 +138,8 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     // MOVE_SPEED at a constant rate (GROUND_ACCEL with input, GROUND_FRICTION toward rest
     // without), so starts and stops take a beat and read as weight. Airborne, steering is
     // redirection (`crate::air`): input rotates the velocity's direction toward the stick at
-    // AIR_TURN_RATE while the speed approaches the intended speed at the AIR_CONTROL-scaled
-    // accel, so a mid-air do-over turns the moving body around instead of braking through a dead
+    // AIR_TURN_RATE while the speed approaches the intended speed at the decoupled AIR_ACCEL
+    // rate, so a mid-air do-over turns the moving body around instead of braking through a dead
     // stop; no input stays ballistic - the momentum a jump promises, and what lets a body caught
     // on a crate's corner accumulate slide-off speed and roll free.
     let mut m = player.motion;
@@ -382,17 +382,18 @@ mod tests {
     }
 
     #[test]
-    fn air_acceleration_from_rest_is_the_ground_rate_scaled_by_air_control() {
-        // The redirection model's from-rest degenerate is the old straight air accel: one
-        // airborne step from rest gains AIR_CONTROL times the grounded gain, along the stick.
-        use crate::constants::AIR_CONTROL;
+    fn air_acceleration_from_rest_is_the_decoupled_air_rate() {
+        // The redirection model's from-rest degenerate is straight acceleration along the stick,
+        // at AIR_ACCEL - its own rate, no longer chained to GROUND_ACCEL, so the grounded and
+        // airborne gains are pinned independently here.
+        use crate::constants::AIR_ACCEL;
         let world = flat_world(2.0);
         let run = StepInput { move_dir: Vec3::X, jump: false };
         let ground_dv = step(at_rest(&world), run, &world).motion.velocity.x;
         let airborne = player_at(Vec3::new(64.0, 30.0, 64.0));
         let air_dv = step(airborne, run, &world).motion.velocity.x;
         assert!((ground_dv - GROUND_ACCEL * SIM_DT).abs() < EPS, "one grounded step from rest gains accel * dt");
-        assert!((air_dv - ground_dv * AIR_CONTROL).abs() < EPS, "air {air_dv} vs ground {ground_dv}");
+        assert!((air_dv - AIR_ACCEL * SIM_DT).abs() < EPS, "one airborne step from rest gains AIR_ACCEL * dt: {air_dv}");
     }
 
 }
