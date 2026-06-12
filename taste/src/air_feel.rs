@@ -53,10 +53,11 @@ fn horizontal_speed(p: &Player) -> f32 {
 }
 
 #[test]
-fn an_airborne_reversal_redirects_without_passing_through_a_stop() {
-    // The brief's pin, through the full step (gravity and all): holding the stick against a
-    // full-speed jump turns the heading around while the horizontal speed stays above 80% of
-    // entry at every step of the turn.
+fn an_airborne_reversal_redirects_with_the_speed_untouched() {
+    // The redirect pin, through the full step (gravity and all): holding the stick against a
+    // full-speed jump turns the heading around while the horizontal speed stays the entry speed
+    // at every step of the turn (to rotation roundoff) - pure momentum, against both the old
+    // brake-through-zero model and the retired AIR_ACCEL magnitude approach.
     let world = flat_world(2.0);
     let entry = MOVE_SPEED;
     let mut p = airborne_at_speed(Vec3::new(entry, 0.0, 0.0));
@@ -65,8 +66,8 @@ fn an_airborne_reversal_redirects_without_passing_through_a_stop() {
     for i in 0..steps {
         p = sim::step(p, back, &world);
         assert!(
-            horizontal_speed(&p) >= 0.8 * entry,
-            "step {i}: mid-turn speed {} collapsed below 80% of entry",
+            (horizontal_speed(&p) - entry).abs() < 1e-3,
+            "step {i}: mid-turn speed {} drifted from entry {entry}",
             horizontal_speed(&p)
         );
     }
@@ -74,30 +75,32 @@ fn an_airborne_reversal_redirects_without_passing_through_a_stop() {
 }
 
 #[test]
-fn a_100ms_tap_mid_jump_drifts_about_half_a_metre_not_metres() {
-    // The AIR_ACCEL decoupling's felt promise, through the real step: jump straight up, tap the
-    // stick for 100ms (six fixed steps), release, ride the arc down. The drift at landing must
-    // stay sub-metre - at the chained AIR_CONTROL * GROUND_ACCEL rate (silently 49.5 m/s^2 after
-    // the ground crispness retune) the same tap drifted ~2.5m, which is what made minute air
-    // corrections impossible - while still being a real correction, not a dead stick.
+fn a_standing_jump_is_unsteerable_under_a_held_stick() {
+    // Pure momentum's accepted consequence, through the real step: a standing (zero-speed) jump
+    // has no heading for the stick to rotate and there is no other airborne mechanism left, so
+    // holding a direction for the whole arc moves the landing not at all. Deliberately accepted
+    // for now. The contingency, to be added only if play demands steerable standing jumps, is a
+    // small get-moving floor (~2.5 m/s along the stick when the airborne speed is zero) - not a
+    // return of airborne acceleration.
     let world = flat_world(2.0);
     let start = at_rest(&world);
     let start_x = start.motion.position.x;
     let mut p = sim::step(start, StepInput { move_dir: Vec3::ZERO, jump: true }, &world);
-    let tap_steps = (0.1 / SIM_DT).round() as usize;
-    for _ in 0..tap_steps {
-        p = sim::step(p, StepInput { move_dir: Vec3::X, jump: false }, &world);
-    }
     for _ in 0..600 {
         if p.grounded {
             break;
         }
-        p = sim::step(p, StepInput::default(), &world);
+        p = sim::step(p, StepInput { move_dir: Vec3::X, jump: false }, &world);
     }
     assert!(p.grounded, "the jump must land within ten seconds");
-    let drift = (p.motion.position.x - start_x).abs();
-    assert!(drift < 1.0, "a 100ms tap drifted {drift}m by landing: minute air corrections are gone again");
-    assert!(drift > 0.2, "a 100ms tap drifted only {drift}m: the air control is nearly dead");
+    assert_eq!(
+        p.motion.position.x.to_bits(),
+        start_x.to_bits(),
+        "a standing jump drifted under a held stick: {} -> {}",
+        start_x,
+        p.motion.position.x
+    );
+    assert_eq!(horizontal_speed(&p).to_bits(), 0.0_f32.to_bits(), "a standing jump gained speed under a held stick");
 }
 
 #[test]
@@ -142,8 +145,8 @@ fn the_double_jump_fires_airborne_exactly_once_and_resets_on_landing() {
 fn a_held_direction_air_jump_leaves_the_horizontal_bitwise_untouched() {
     // The redirect is gone: with a direction held, the air jump's impulse is vertical only. The
     // jump step's horizontal velocity is bitwise the matching no-jump step's - the press changes
-    // nothing but the vertical - so direction changes are the steering's job alone (AIR_TURN_RATE
-    // / AIR_ACCEL) and the air jump cannot read as a violent re-aim.
+    // nothing but the vertical - so direction changes are the steering's job alone
+    // (AIR_TURN_RATE) and the air jump cannot read as a violent re-aim.
     let world = flat_world(2.0);
     let p = airborne_at_speed(Vec3::new(5.0, 0.0, 0.0));
     for stick in [Vec3::Z, Vec3::NEG_X] {

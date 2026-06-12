@@ -138,12 +138,13 @@ fn approach(current: Vec3, target: Vec3, max_delta: f32) -> Vec3 {
 pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     // Locomotion splits by grounding. Grounded, the horizontal velocity approaches intent *
     // MOVE_SPEED at a constant rate (GROUND_ACCEL with input, GROUND_FRICTION toward rest
-    // without), so starts and stops take a beat and read as weight. Airborne, steering is
-    // redirection (`crate::air`): input rotates the velocity's direction toward the stick at
-    // AIR_TURN_RATE while the speed approaches the intended speed at the decoupled AIR_ACCEL
-    // rate, so a mid-air do-over turns the moving body around instead of braking through a dead
-    // stop; no input stays ballistic - the momentum a jump promises, and what lets a body caught
-    // on a crate's corner accumulate slide-off speed and roll free.
+    // without), so starts and stops take a beat and read as weight. Airborne is pure momentum
+    // (`crate::air`): input only rotates the velocity's heading toward the stick at
+    // AIR_TURN_RATE - the horizontal speed is set at launch and never changes in the air - so a
+    // mid-air do-over turns the moving body around instead of braking through a dead stop, and a
+    // jump's reach is committed at takeoff; no input stays ballistic - the momentum a jump
+    // promises, and what lets a body caught on a crate's corner accumulate slide-off speed and
+    // roll free.
     let mut m = player.motion;
     let horizontal = Vec3::new(m.velocity.x, 0.0, m.velocity.z);
     let horizontal = if player.grounded {
@@ -162,7 +163,7 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     // window, airborne presses spend an air jump when one remains: vertical velocity is SET (not
     // added) to the scaled launch speed, and the horizontal velocity splits on intent. With a
     // direction held it is left exactly as it stands - direction changes are the air steering's
-    // job alone (AIR_TURN_RATE / AIR_ACCEL), so the air jump can never read as a violent re-aim.
+    // job alone (AIR_TURN_RATE), so the air jump can never read as a violent re-aim.
     // With NO direction held the horizontal is zeroed: a neutral air jump is a straight-up reset
     // jump, the deliberate "stop here" the ballistic no-input air otherwise never offers. The
     // latch upstream guarantees one press is one jump; this block only decides what a delivered
@@ -382,18 +383,28 @@ mod tests {
     }
 
     #[test]
-    fn air_acceleration_from_rest_is_the_decoupled_air_rate() {
-        // The redirection model's from-rest degenerate is straight acceleration along the stick,
-        // at AIR_ACCEL - its own rate, no longer chained to GROUND_ACCEL, so the grounded and
-        // airborne gains are pinned independently here.
-        use crate::constants::AIR_ACCEL;
+    fn airborne_input_turns_the_heading_but_never_the_speed() {
+        // Pure momentum through the real step, against the grounded rate it is decoupled from: a
+        // grounded step from rest gains GROUND_ACCEL * dt, an airborne step from rest gains
+        // nothing (the unsteerable standing jump, pinned with its contingency in
+        // crate::air_feel), and an airborne steering step leaves a moving body's speed magnitude
+        // untouched.
         let world = flat_world(2.0);
         let run = StepInput { move_dir: Vec3::X, jump: false };
         let ground_dv = step(at_rest(&world), run, &world).motion.velocity.x;
-        let airborne = player_at(Vec3::new(64.0, 30.0, 64.0));
-        let air_dv = step(airborne, run, &world).motion.velocity.x;
         assert!((ground_dv - GROUND_ACCEL * SIM_DT).abs() < EPS, "one grounded step from rest gains accel * dt");
-        assert!((air_dv - AIR_ACCEL * SIM_DT).abs() < EPS, "one airborne step from rest gains AIR_ACCEL * dt: {air_dv}");
+
+        let from_rest = step(player_at(Vec3::new(64.0, 30.0, 64.0)), run, &world);
+        assert_eq!(horizontal_speed(&from_rest), 0.0, "airborne input must not move a body at rest");
+
+        let mut moving = player_at(Vec3::new(64.0, 30.0, 64.0));
+        moving.motion.velocity = Vec3::new(3.0, 0.0, 0.0);
+        let steered = step(moving, StepInput { move_dir: Vec3::Z, jump: false }, &world);
+        assert!(
+            (horizontal_speed(&steered) - 3.0).abs() < EPS,
+            "an airborne steering step must not change the speed: {}",
+            horizontal_speed(&steered)
+        );
     }
 
 }

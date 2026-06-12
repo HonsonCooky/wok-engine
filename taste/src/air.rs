@@ -1,65 +1,52 @@
-//! Airborne steering: redirection, not acceleration-through-zero.
+//! Airborne steering: pure momentum, the stick turns the heading and nothing else.
 //!
-//! The old air model scaled the grounded approach by an air-control factor: airborne input accelerated the
-//! horizontal velocity toward the intended velocity along a straight line. Reversing direction
-//! mid-jump therefore braked through a dead stop - the velocity passed through zero - which is the
-//! opposite of the BFBB / Ratchet & Clank air authority the demo wants, where a jump's heading can
-//! be turned around while the body keeps moving.
+//! The air model has shed two mechanisms on play verdicts. First the grounded-style straight
+//! approach (acceleration through zero): reversing direction mid-jump braked through a dead stop,
+//! the opposite of the BFBB / Ratchet & Clank air authority where a jump's heading can be turned
+//! around while the body keeps moving. Then the decoupled speed-magnitude approach (AIR_ACCEL)
+//! that replaced its speed half: any airborne speed change lets a held stick stretch or shrink a
+//! jump's reach mid-flight, and the verdict was that a jump's horizontal speed is set at launch,
+//! period. What remains is the direction half alone: with input, [`steer`] rotates the horizontal
+//! velocity's heading toward the stick at `AIR_TURN_RATE` radians per second (about the vertical
+//! axis, taking the shorter way around); the speed magnitude is never touched in the air. With no
+//! input the velocity is returned untouched: ballistic, the third-mechanism fix that stands from
+//! the feel arc.
 //!
-//! The fix splits direction from speed. With input, [`steer`] rotates the horizontal velocity's
-//! DIRECTION toward the stick at `AIR_TURN_RATE` radians per second (about the vertical axis,
-//! taking the shorter way around), while the speed MAGNITUDE approaches the intended speed at
-//! `AIR_ACCEL` - its own airborne rate, decoupled from the grounded acceleration so a ground
-//! crispness retune can never silently change the air feel. A redirect never passes through a
-//! stop, but gaining or losing speed in air stays gradual. With no input the velocity is returned
-//! untouched: ballistic, the third-mechanism fix that stands from the feel arc.
-//!
-//! From rest there is no direction to rotate, so steering degrades to the old straight approach
-//! along the stick - which is also exactly what the previous model did from rest, keeping the
-//! air-control feel of a vertical jump unchanged.
+//! From rest there is no heading to rotate, so a standing (zero-speed) jump is unsteerable: a
+//! known consequence, deliberately accepted, pinned with its contingency in the tests below.
 //!
 //! Deterministic: fixed arithmetic of the inputs (atan2 and sin/cos are deterministic for a given
 //! build, the canon's bar), no RNG, no state.
 
 use glam::Vec3;
 
-use crate::constants::{AIR_ACCEL, AIR_TURN_RATE, MOVE_SPEED};
+use crate::constants::AIR_TURN_RATE;
 
-/// Below this squared speed the velocity has no usable heading; steering starts from rest along
-/// the stick instead of rotating noise.
+/// Below this squared speed the velocity has no usable heading; with nothing to rotate, steering
+/// leaves it alone (the unsteerable standing jump) instead of rotating noise.
 const NO_HEADING_SQ: f32 = 1e-8;
 
 /// One fixed step of airborne steering: the horizontal velocity (`y` must be zero; the caller
 /// splits it off) under `move_dir` (the world-space intent, length at most one) over `dt` seconds.
-/// No input returns the velocity unchanged - ballistic.
+/// Pure momentum: only the heading changes, never the speed. No input returns the velocity
+/// unchanged - ballistic.
 pub fn steer(horizontal: Vec3, move_dir: Vec3, dt: f32) -> Vec3 {
     if move_dir == Vec3::ZERO {
         return horizontal;
     }
-    let target = Vec3::new(move_dir.x, 0.0, move_dir.z) * MOVE_SPEED;
-    let accel = AIR_ACCEL * dt;
-    let speed = horizontal.length();
-    if speed * speed <= NO_HEADING_SQ {
-        // From rest: accelerate straight along the stick (the rotation has nothing to turn).
-        let gap = target - horizontal;
-        let len = gap.length();
-        return if len <= accel { target } else { horizontal + gap * (accel / len) };
+    let speed_sq = horizontal.length_squared();
+    if speed_sq <= NO_HEADING_SQ {
+        return horizontal;
     }
 
-    // Direction: rotate the current heading toward the stick's by at most AIR_TURN_RATE * dt,
-    // the shorter way around the vertical axis.
+    // Rotate the current heading toward the stick's by at most AIR_TURN_RATE * dt, the shorter
+    // way around the vertical axis; the magnitude rides through untouched.
     let current = horizontal.z.atan2(horizontal.x);
-    let wanted = target.z.atan2(target.x);
+    let wanted = move_dir.z.atan2(move_dir.x);
     let diff = wrap_angle(wanted - current);
     let turn = diff.clamp(-AIR_TURN_RATE * dt, AIR_TURN_RATE * dt);
     let heading = current + turn;
-
-    // Speed: the same constant-rate approach locomotion uses, toward the intended speed.
-    let target_speed = target.length();
-    let gap = target_speed - speed;
-    let new_speed = if gap.abs() <= accel { target_speed } else { speed + accel * gap.signum() };
-
-    Vec3::new(heading.cos(), 0.0, heading.sin()) * new_speed
+    Vec3::new(heading.cos(), 0.0, heading.sin()) * speed_sq.sqrt()
 }
 
 /// Wrap an angle difference into `[-pi, pi]`, so the rotation takes the shorter way. An exact
@@ -74,7 +61,7 @@ fn wrap_angle(a: f32) -> f32 {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
-    use crate::constants::SIM_DT;
+    use crate::constants::{MOVE_SPEED, SIM_DT};
 
     fn speed(v: Vec3) -> f32 {
         v.length()
@@ -87,19 +74,19 @@ mod tests {
     }
 
     #[test]
-    fn a_reversal_rotates_through_the_turn_without_speed_collapse() {
-        // Entry at full speed +x, stick held -x: the old model braked through zero; the redirect
-        // must turn the heading half a circle while the speed never drops below 80% of entry.
-        // (At matched entry and intent speeds the magnitude approach is nearly idle, so the floor
-        // is really pinning that direction change stopped being a brake.)
+    fn a_reversal_rotates_through_the_turn_with_the_speed_untouched() {
+        // Entry at full speed +x, stick held -x: the heading turns half a circle while the speed
+        // stays the entry speed at every step (to rotation roundoff) - pure momentum's whole
+        // claim, against both the old brake-through-zero model and the retired AIR_ACCEL
+        // magnitude approach.
         let entry = MOVE_SPEED;
         let mut v = Vec3::new(entry, 0.0, 0.0);
         let steps = (std::f32::consts::PI / AIR_TURN_RATE / SIM_DT).ceil() as usize;
         for i in 0..steps {
             v = steer(v, Vec3::NEG_X, SIM_DT);
             assert!(
-                speed(v) >= 0.8 * entry,
-                "step {i}: speed collapsed to {} during the turn (the brake-through-zero model)",
+                (speed(v) - entry).abs() < 1e-3,
+                "step {i}: the speed changed mid-turn ({} vs entry {entry})",
                 speed(v)
             );
         }
@@ -122,19 +109,26 @@ mod tests {
     }
 
     #[test]
-    fn speed_still_approaches_intent_at_the_air_accel_rate() {
-        // Entry slower than intent, heading already on the stick: one step gains exactly
-        // AIR_ACCEL * dt - the magnitude half of the model runs at the decoupled airborne rate.
-        let v = steer(Vec3::new(2.0, 0.0, 0.0), Vec3::X, SIM_DT);
-        assert!((speed(v) - (2.0 + AIR_ACCEL * SIM_DT)).abs() < 1e-5, "speed {}", speed(v));
-        assert!(v.z.abs() < 1e-6, "heading must not drift when it already matches");
+    fn airborne_speed_never_changes_under_input() {
+        // Pure momentum's other face: whether entry is slower or faster than the run speed, a
+        // steering step leaves the magnitude alone - there is no airborne approach toward an
+        // intended speed (AIR_ACCEL retired), and an over-speed body keeps its momentum.
+        for entry in [2.0, MOVE_SPEED, 12.0] {
+            let v = steer(Vec3::new(entry, 0.0, 0.0), Vec3::X, SIM_DT);
+            assert!((speed(v) - entry).abs() < 1e-5, "entry {entry}: speed became {}", speed(v));
+            assert!(v.z.abs() < 1e-6, "heading must not drift when it already matches");
+        }
     }
 
     #[test]
-    fn from_rest_steering_accelerates_straight_along_the_stick() {
+    fn a_standing_jump_is_unsteerable() {
+        // The accepted consequence of pure momentum: from rest there is no heading to rotate and
+        // no other airborne mechanism, so a standing (zero-speed) jump cannot be steered at all.
+        // Deliberate for now. The contingency, to be added only if play demands it, is a small
+        // get-moving floor (~2.5 m/s along the stick when the airborne speed is zero) - not a
+        // return of airborne acceleration.
         let v = steer(Vec3::ZERO, Vec3::X, SIM_DT);
-        assert!((v.x - AIR_ACCEL * SIM_DT).abs() < 1e-6, "got {v:?}");
-        assert_eq!(v.z, 0.0);
+        assert_eq!(v, Vec3::ZERO, "a zero-speed body must stay put under the stick: {v:?}");
     }
 
     #[test]

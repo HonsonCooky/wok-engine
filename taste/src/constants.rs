@@ -93,21 +93,16 @@ pub const GROUND_ACCEL: f32 = 90.0;
 /// which is what made precision landings overshoot).
 pub const GROUND_FRICTION: f32 = 150.0;
 
-/// Airborne speed-gain acceleration, in m/s^2: under the redirection model (`crate::air`) this is
-/// how fast the airborne speed magnitude approaches the intended speed; direction is
-/// AIR_TURN_RATE's job. Its own rate, not a multiplier on GROUND_ACCEL: the old chained
-/// AIR_CONTROL * GROUND_ACCEL silently rose to 49.5 when ground crispness rose, and minute air
-/// corrections became impossible - a 100ms tap drifted ~2.5m by landing; at 12 it is ~0.5m, so a
-/// retune of ground feel can never drag the air rate with it again. Friction never applies
-/// airborne - with no input the velocity is ballistic (policy in `crate::sim::step`: air friction
-/// pinned bodies onto crate corners, the last mid-air halt).
-pub const AIR_ACCEL: f32 = 12.0;
-
 /// How fast airborne input rotates the horizontal velocity's direction toward the stick, in
-/// radians per second. Redirection rather than acceleration-through-zero is the BFBB / Ratchet &
-/// Clank air authority: reversing heading mid-jump turns the moving velocity around (a half
-/// circle in ~0.52s, most of a jump's hang time) instead of braking through a dead stop, so a
-/// redirect never collapses the speed.
+/// radians per second - the ONLY airborne control. Air is pure momentum (policy in `crate::air`):
+/// a jump's horizontal speed is set at launch and never changes until landing, so the stick turns
+/// the heading but can never stretch or shrink the jump's reach. Redirection rather than
+/// acceleration-through-zero is the BFBB / Ratchet & Clank air authority: reversing heading
+/// mid-jump turns the moving velocity around (a half circle in ~0.52s, most of a jump's hang
+/// time) instead of braking through a dead stop. The speed-magnitude approach this rate used to
+/// pair with (AIR_ACCEL, 12 m/s^2) retired on the pure-momentum verdict; friction never applies
+/// airborne either - with no input the velocity is ballistic (air friction pinned bodies onto
+/// crate corners, the last mid-air halt).
 pub const AIR_TURN_RATE: f32 = 6.0;
 
 /// Extra jumps available while airborne, restored on any grounding. One is the double jump.
@@ -412,24 +407,6 @@ mod tests {
         // releasing input never reads slippery.
         assert!(MOVE_SPEED / GROUND_ACCEL < 0.2, "too slow to top speed: reads as ice");
         assert!(GROUND_FRICTION >= GROUND_ACCEL);
-        // Airborne speed gain is real but well under the grounded rate: momentum survives a jump,
-        // and the decoupled constant can never be dragged up by a ground-crispness retune (the
-        // chained AIR_CONTROL * GROUND_ACCEL had silently reached 49.5).
-        assert!(AIR_ACCEL > 0.0);
-        assert!(AIR_ACCEL < GROUND_ACCEL * 0.25, "air speed gain crept toward the grounded rate");
-    }
-
-    #[test]
-    fn a_100ms_air_tap_drifts_under_a_metre() {
-        // The decoupling's felt promise, algebraically: a 100ms tap mid-jump gains AIR_ACCEL * t
-        // of speed and drifts roughly that speed times the remaining hang time. At the chained
-        // 49.5 rate this came out ~2.5m (minute corrections impossible); the decoupled rate must
-        // keep it sub-metre while staying a real correction, not a dead stick.
-        let tap = 0.1;
-        let hang = JUMP_TIME_TO_APEX + (2.0 * JUMP_APEX_HEIGHT / FALL_GRAVITY).sqrt();
-        let drift = AIR_ACCEL * tap * (hang - 0.5 * tap);
-        assert!(drift < 1.0, "a 100ms tap drifts {drift}m: minute air corrections are gone again");
-        assert!(drift > 0.2, "a 100ms tap drifts only {drift}m: the air control is nearly dead");
     }
 
     #[test]

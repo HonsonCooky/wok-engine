@@ -117,7 +117,12 @@ fn fixture_world() -> World {
 /// (face less radius less skin - the radii match the capsule's, so the pin did not move), the
 /// wall-friction equilibrium holds the tangential speed at ~5.74 m/s against the 6.71 m/s
 /// tangential intent, and the 60-step phase advances ~5.83m along the wall; the jump gains
-/// ~0.87m in its first five steps. Every locomotion arc the demo shows, in one sequence.
+/// ~0.87m in its first five steps. Re-justified under pure-momentum air: the jump launches from
+/// the wall stop's zero horizontal speed, so the held stick has no heading to rotate and the
+/// body rises and lands straight at the pin (the unsteerable standing jump) instead of the
+/// retired AIR_ACCEL pressing it back into the wall mid-arc - the wall pin, the jump's height
+/// figures, and the grounded glancing numbers all stand. Every locomotion arc the demo shows,
+/// in one sequence.
 fn scripted_inputs() -> Vec<StepInput> {
     let forward = Vec3::new(1.0, 0.0, 0.0);
     let glancing = Vec3::new(1.0, 0.0, 2.0).normalize();
