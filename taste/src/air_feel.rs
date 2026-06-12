@@ -139,22 +139,34 @@ fn the_double_jump_fires_airborne_exactly_once_and_resets_on_landing() {
 }
 
 #[test]
-fn the_air_jump_redirects_to_the_stick_at_current_speed() {
-    // Moving +x, air-jumping with the stick held +z: the R&C do-over swaps the heading to +z
-    // outright while keeping the speed; no stick would keep the +x heading.
+fn the_air_jump_sets_the_vertical_and_leaves_the_horizontal_bitwise_untouched() {
+    // The redirect is gone: the air jump's impulse is vertical only. Whatever the stick, the jump
+    // step's horizontal velocity is bitwise the matching no-jump step's - the press changes
+    // nothing but the vertical - so direction changes are the steering's job alone (AIR_TURN_RATE
+    // / AIR_ACCEL) and the air jump cannot read as a violent re-aim.
     let world = flat_world(2.0);
-    let entry = 5.0;
-    let p = airborne_at_speed(Vec3::new(entry, 0.0, 0.0));
-    let turned = sim::step(p, StepInput { move_dir: Vec3::Z, jump: true }, &world);
-    // One steer step rotates first; the jump then redirects fully, so the heading is exactly
-    // the stick's and the magnitude is the steered speed.
-    assert!(turned.motion.velocity.x.abs() < EPS, "the old heading is gone: {:?}", turned.motion.velocity);
-    assert!(turned.motion.velocity.z > 0.9 * entry, "the speed survives the redirect: {:?}", turned.motion.velocity);
-
-    let kept = sim::step(p, StepInput { move_dir: Vec3::ZERO, jump: true }, &world);
-    assert!(
-        (kept.motion.velocity.x - entry).abs() < EPS && kept.motion.velocity.z.abs() < EPS,
-        "no stick keeps the current heading: {:?}",
-        kept.motion.velocity
-    );
+    let p = airborne_at_speed(Vec3::new(5.0, 0.0, 0.0));
+    for stick in [Vec3::ZERO, Vec3::Z, Vec3::NEG_X] {
+        let jumped = sim::step(p, StepInput { move_dir: stick, jump: true }, &world);
+        let steered = sim::step(p, StepInput { move_dir: stick, jump: false }, &world);
+        assert_eq!(
+            jumped.motion.velocity.x.to_bits(),
+            steered.motion.velocity.x.to_bits(),
+            "stick {stick:?}: the jump must not touch x: {} vs {}",
+            jumped.motion.velocity.x,
+            steered.motion.velocity.x
+        );
+        assert_eq!(
+            jumped.motion.velocity.z.to_bits(),
+            steered.motion.velocity.z.to_bits(),
+            "stick {stick:?}: the jump must not touch z: {} vs {}",
+            jumped.motion.velocity.z,
+            steered.motion.velocity.z
+        );
+        assert!(
+            (jumped.motion.velocity.y - (JUMP_VELOCITY * AIR_JUMP_SCALE - ASCENT_GRAVITY * SIM_DT)).abs() < EPS,
+            "stick {stick:?}: the air jump sets the scaled launch vertical (one step of gravity follows): {}",
+            jumped.motion.velocity.y
+        );
+    }
 }

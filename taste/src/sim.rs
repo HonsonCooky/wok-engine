@@ -157,10 +157,10 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
     // The jump impulse: grounded presses - and airborne presses inside the coyote window - push
     // off at full strength without touching the air jump; the window is the walked-off-a-ledge
     // grace, and the press spends it outright so it can never stack a second free jump. Past the
-    // window, airborne presses spend an air jump when one remains - the R&C do-over: vertical
-    // velocity is SET (not added) to the scaled launch speed, and the horizontal velocity is
-    // redirected outright to the current stick direction at the current speed, so the double jump
-    // is a full commitment to the new heading; with no stick held the heading is kept. The latch
+    // window, airborne presses spend an air jump when one remains: vertical velocity is SET (not
+    // added) to the scaled launch speed, and the horizontal velocity is left exactly as it
+    // stands - direction changes are the air steering's job alone (AIR_TURN_RATE / AIR_ACCEL), so
+    // the air jump can never read as a violent re-aim now that the steering is gentle. The latch
     // upstream guarantees one press is one jump; this block only decides what a delivered press
     // does. Every jump flies the full authored arc: hold duration never enters the simulation
     // (the play verdict against variable height).
@@ -174,12 +174,6 @@ pub fn step(player: Player, input: StepInput, world: &World) -> Player {
         } else if air_jumps > 0 {
             air_jumps -= 1;
             m.velocity.y = JUMP_VELOCITY * AIR_JUMP_SCALE;
-            if input.move_dir != Vec3::ZERO {
-                let speed = Vec3::new(m.velocity.x, 0.0, m.velocity.z).length();
-                let dir = Vec3::new(input.move_dir.x, 0.0, input.move_dir.z).normalize();
-                m.velocity.x = dir.x * speed;
-                m.velocity.z = dir.z * speed;
-            }
             jumped = true;
         }
         coyote = 0.0;
