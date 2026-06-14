@@ -18,6 +18,7 @@ use crate::details;
 use crate::drag::PlacementDrag;
 use crate::input::Marquee;
 use crate::library;
+use crate::mode::Mode;
 use crate::model::{EditorModel, Selection};
 use crate::pages::{Page, PageState};
 pub use crate::status::Stats;
@@ -29,6 +30,10 @@ use crate::tree;
 pub struct UiState {
     /// Which page the left panel shows.
     pub pages: PageState,
+    /// The interaction mode: Object (default, the camera locks to the selection) or FreeFly (the
+    /// camera-centric roam). Toggled in place by the input routing; only the camera and the home-row
+    /// keys are modal, mouse selection works the same in both.
+    pub mode: Mode,
     /// Place mode: the prefab the next viewport click places.
     pub placing: Option<PrefabRef>,
     /// An inline rename in progress, if any.
@@ -114,7 +119,7 @@ pub fn ui(
     stats: &Stats,
     actions: &mut Vec<Action>,
 ) {
-    status::bar(ctx, &mut ui_state.pages, stats);
+    status::bar(ctx, &mut ui_state.pages, ui_state.mode, stats);
     // Marginless flat frame: the tree's rows paint their own hover and selection fills edge to
     // edge, so the panel must not inset them; pages that want padding add their own. The fill is
     // the same panel_fill the status bar uses, so the shell reads as one flat surface, and the

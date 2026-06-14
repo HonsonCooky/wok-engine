@@ -1,85 +1,55 @@
-//! The editor application: GPU state and the per-frame loop.
+//! The editor application: the camera, the window state, and the per-frame loop that ties the
+//! modules together.
 //!
 //! Composition only, per the HLD's application layer: the authored model (`crate::model`) flows
-//! through wok-content's store into runtime arrays, wok-mesh uploads them, wok-render draws
-//! exactly the list it is handed, and the chunk-origin composition happens here because the
-//! render contract makes it caller policy. egui paints last into the same encoder
-//! (`crate::gui`), the UI emits actions the loop applies (`crate::panels`), input routing honors
-//! egui's focus (`crate::input`), and watcher changes apply content-compared (`crate::reload`).
+//! through wok-content's store into runtime arrays, which `crate::render` draws each frame. egui
+//! paints last (`crate::gui`); the UI and the viewport routing (`crate::panels`, `crate::input`)
+//! emit actions the loop applies at one point (`crate::actions`, the model's single writer); watcher
+//! changes apply content-compared (`crate::reload`). The camera is modal (`crate::mode`): free-fly
+//! flies (`crate::camera`), object mode locks to the selection and orbits it (`crate::orbit`).
 //!
 //! The frame order is load-bearing: hot reload first (the model is current before anything reads
-//! it), then the UI (its focus queries decide what input the rest of the frame may use), then
-//! actions, camera, clicks, and finally the render with the UI output painted over it.
+//! it), then the UI (its focus queries decide what input the rest of the frame may use), then the
+//! UI's actions, then the viewport input and its actions, then the camera advance - last, so it
+//! sees this frame's final selection and mode and a click-to-select frames the same frame - and
+//! finally the render with the UI output painted over it.
 
-use std::collections::BTreeMap;
 use std::error::Error;
 
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 use wok_light::LightState;
-use wok_mesh::{MeshGpu, primitive_mesh};
+use wok_platform::input::InputState;
 use wok_platform::winit::event::WindowEvent;
-use wok_platform::{App, FrameCtx, Platform, gfx};
-use wok_render::{Camera, DepthMode, LineSegment, RenderItem, Renderer};
-use wok_scene::{ChunkCoord, Primitive, SurfaceTag, VisibleItem, Watcher};
+use wok_platform::{App, FrameCtx, Platform};
+use wok_scene::Watcher;
 
 use crate::camera::{self, FlyCamera};
 use crate::content::{ContentPaths, LoadedContent};
-use crate::gui::Gui;
 use crate::input;
-use crate::lines;
-use crate::model::{CHUNK_SIZE_M, EditorModel, chunk_origin, scene_bounds};
-use crate::panels::{self, Action, Stats, UiState};
+use crate::mode::Mode;
+use crate::model::{CHUNK_SIZE_M, EditorModel, chunk_at, chunk_origin};
+use crate::orbit::{self, Orbit};
+use crate::panels::{self, Stats, UiState};
 use crate::pick;
 use crate::reload;
-use crate::sync;
-use crate::theme;
-
-const TERRAIN_COLOR: Vec3 = Vec3::new(0.40, 0.60, 0.35);
-
-/// Draw order of the primitive mesh cache; `primitive_index` must match.
-const PRIMITIVES: [Primitive; 5] =
-    [Primitive::Cube, Primitive::Ellipsoid, Primitive::Cylinder, Primitive::Capsule, Primitive::Plane];
-
-fn primitive_index(primitive: Primitive) -> usize {
-    match primitive {
-        Primitive::Cube => 0,
-        Primitive::Ellipsoid => 1,
-        Primitive::Cylinder => 2,
-        Primitive::Capsule => 3,
-        Primitive::Plane => 4,
-    }
-}
-
-/// Flat base color for a placeholder by its surface tag; editor presentation policy, not engine
-/// data (the engine only carries the tag).
-fn surface_color(surface: Option<&SurfaceTag>) -> Vec3 {
-    match surface.map(SurfaceTag::as_str) {
-        Some("grass") => Vec3::new(0.40, 0.60, 0.35),
-        Some("wood") => Vec3::new(0.60, 0.42, 0.24),
-        Some("stone") => Vec3::new(0.55, 0.55, 0.58),
-        Some("metal") => Vec3::new(0.80, 0.45, 0.25),
-        _ => Vec3::new(0.70, 0.70, 0.70),
-    }
-}
-
-/// GPU residency, created in `init` once a device exists: the renderer, the egui integration, one
-/// uploaded mesh per unit primitive (shared by every placement), and one terrain mesh per chunk.
-struct Gpu {
-    renderer: Renderer,
-    gui: Gui,
-    primitives: Vec<MeshGpu>,
-    terrain: BTreeMap<ChunkCoord, MeshGpu>,
-}
+use crate::render::Gpu;
+use crate::selection::SelectionSet;
 
 pub struct EditorApp {
-    paths: ContentPaths,
-    model: EditorModel,
-    light: LightState,
+    pub(crate) paths: ContentPaths,
+    pub(crate) model: EditorModel,
+    pub(crate) light: LightState,
     watcher: Watcher,
-    camera: FlyCamera,
-    ui: UiState,
-    size: (u32, u32),
-    gpu: Option<Gpu>,
+    pub(crate) camera: FlyCamera,
+    /// The desired object-mode orbit (boom angles + arm length). The source of truth for the camera
+    /// in object mode; stale and ignored in free-fly (`crate::orbit`).
+    pub(crate) orbit: Orbit,
+    /// The selection the object-mode camera last framed. When the live selection differs the camera
+    /// re-frames; tracking it makes the auto-frame fire once per selection change, not every frame.
+    framed_selection: SelectionSet,
+    pub(crate) ui: UiState,
+    pub(crate) size: (u32, u32),
+    pub(crate) gpu: Option<Gpu>,
     /// Frame-time window for the stats overlay: seconds and frames accumulated since the last
     /// refresh. The displayed numbers update once a second (the window's average), because
     /// per-frame fps and ms churn faster than they can be read.
@@ -89,7 +59,7 @@ pub struct EditorApp {
     fps: f32,
     frame_ms: f32,
     /// Render-list length of the previous frame, for the stats overlay.
-    draw_items: usize,
+    pub(crate) draw_items: usize,
     title: String,
 }
 
@@ -106,6 +76,8 @@ impl EditorApp {
             light: loaded.light,
             watcher,
             camera,
+            orbit: Orbit::default(),
+            framed_selection: SelectionSet::new(),
             ui: UiState::default(),
             size: (0, 0),
             gpu: None,
@@ -120,163 +92,57 @@ impl EditorApp {
 
     /// Fog distance sets render distance (HLD); the far plane sits past full occlusion. Picking
     /// shares it: what you can see, you can click.
-    fn far_plane(&self) -> f32 {
+    pub(crate) fn far_plane(&self) -> f32 {
         (self.light.fog.end * 1.2).max(50.0)
     }
 
-    fn apply_action(&mut self, action: Action) {
-        // The single writer checkpoints before every mutating action; a run of edits to one
-        // selection coalesces into one undo step (`crate::history`), and inert actions record
-        // nothing. Doing it here covers both the UI and the input-routing apply passes.
-        self.model.checkpoint(&action);
-        match action {
-            Action::Select(Some(sel)) => self.model.selection.replace(sel),
-            Action::Select(None) => self.model.selection.clear(),
-            Action::ToggleSelect(sel) => self.model.selection.toggle(sel),
-            Action::SelectMany { items, add } => self.model.selection.extend(items, add),
-            Action::Edit { sel, transform, state } => {
-                if let Err(err) = self.model.edit_placement(sel, transform, state) {
-                    eprintln!("wok: edit failed: {err}");
-                }
+    /// Advance the camera one frame, modal on the interaction mode. Free-fly flies; object mode
+    /// locks to the selection - it re-frames when the selection changes, then orbits the centroid
+    /// (right-drag turns, scroll zooms), springs the boom clear of the other placements, and clamps
+    /// the camera above the terrain. With nothing selected, object mode holds the last pose. Runs
+    /// after input is applied, so it sees this frame's final selection and mode.
+    fn advance_camera(&mut self, input: &InputState, pointer_free: bool, keys_free: bool, dt: f32) {
+        let nav = input::camera_input(input, pointer_free, keys_free);
+        let pivot = self.model.selection_pivot();
+
+        // Auto-frame on a selection change (object mode only): a fresh orbit from the new bounds.
+        // In free-fly the framed marker is left stale, so entering object mode frames the selection.
+        if self.ui.mode == Mode::Object && self.model.selection != self.framed_selection {
+            if let (Some(bounds), Some(pivot)) = (self.model.selection_bounds(), pivot) {
+                self.orbit = Orbit::framing(&self.camera, bounds, pivot);
             }
-            Action::MoveSelection { delta } => {
-                if let Err(err) = self.model.move_selection(delta) {
-                    eprintln!("wok: move failed: {err}");
-                }
-            }
-            Action::RotateSelection { delta } => {
-                if let Err(err) = self.model.rotate_selection(delta) {
-                    eprintln!("wok: rotate failed: {err}");
-                }
-            }
-            Action::ScaleSelection { factor } => {
-                if let Err(err) = self.model.scale_selection(factor) {
-                    eprintln!("wok: scale failed: {err}");
-                }
-            }
-            Action::SetStateSelection { state } => {
-                if let Err(err) = self.model.set_state_selection(state.as_deref()) {
-                    eprintln!("wok: set state failed: {err}");
-                }
-            }
-            Action::ArmPlace(prefab) => self.ui.placing = Some(prefab),
-            Action::DisarmPlace => self.ui.placing = None,
-            Action::Place { prefab, point } => {
-                if let Err(err) = self.model.place(&prefab, point) {
-                    eprintln!("wok: place failed: {err}");
-                }
-            }
-            Action::Duplicate => match self.model.duplicate_selection() {
-                // The copies are selected by the model; bring the primary's tree row into view.
-                Ok(()) => self.ui.scroll_to_selection = true,
-                Err(err) => eprintln!("wok: duplicate failed: {err}"),
-            },
-            Action::Rename { sel, name } => {
-                self.model.rename(sel, &name);
-            }
-            Action::Delete => {
-                if let Err(err) = self.model.delete_selection() {
-                    eprintln!("wok: delete failed: {err}");
-                }
-            }
-            Action::Frame(sel) => {
-                if let Some(bounds) = self.model.world_bounds(sel) {
-                    self.camera = camera::frame(&self.camera, bounds.min, bounds.max);
-                }
-            }
-            Action::Save => match sync::save(&mut self.model, &self.paths) {
-                Ok(()) => println!("wok: saved"),
-                Err(err) => eprintln!("wok: save failed: {err}"),
-            },
-            Action::Undo => {
-                if let Err(err) = self.model.undo() {
-                    eprintln!("wok: undo failed: {err}");
-                }
-            }
-            Action::Redo => {
-                if let Err(err) = self.model.redo() {
-                    eprintln!("wok: redo failed: {err}");
-                }
-            }
+            self.framed_selection = self.model.selection.clone();
         }
+
+        let statics = if self.ui.mode == Mode::Object && pivot.is_some() {
+            pick::camera_statics(&self.model)
+        } else {
+            Vec::new()
+        };
+        let mut cam = orbit::advance(self.ui.mode, &self.camera, &mut self.orbit, &nav, dt, pivot, &statics);
+
+        // Object mode's terrain floor: lift the camera above the ground under it, then re-aim at the
+        // pivot so it keeps looking at the selection from the lifted spot.
+        if self.ui.mode == Mode::Object
+            && let Some(pivot) = pivot
+        {
+            cam.position = self.clamp_to_terrain(cam.position);
+            let (yaw, pitch) = camera::look_at(cam.position, pivot);
+            cam = FlyCamera { yaw, pitch, ..cam };
+        }
+        self.camera = cam;
     }
 
-    /// Each selected placement's classified colliders as an x-ray cage. The set holds at most one
-    /// item today, so this draws the single selection exactly as before; iterating means the
-    /// multi-select brief cages every member for free.
-    fn selection_lines(&self) -> Vec<LineSegment> {
-        let mut out = Vec::new();
-        for sel in self.model.selection.iter() {
-            if let Some(placement) = self.model.placement(sel)
-                && let Some(prefab) = self.model.prefabs.get(&placement.prefab)
-            {
-                for collider in pick::placement_colliders(prefab, placement, chunk_origin(sel.coord)) {
-                    lines::collider_lines(&collider, lines::SELECTION_COLOR, &mut out);
-                }
-            }
-        }
-        out
-    }
-
-    fn render(&mut self, ctx: &mut FrameCtx, ui_output: Option<egui::FullOutput>) {
-        let far = self.far_plane();
-        let cage = self.selection_lines();
-        let model = &self.model;
-        let Some(gpu) = self.gpu.as_mut() else { return };
-        let Gpu { renderer, gui, primitives, terrain } = gpu;
-
-        let aspect = self.size.0 as f32 / self.size.1.max(1) as f32;
-        let camera = Camera { view_proj: self.camera.view_proj(aspect, far), eye: self.camera.position };
-
-        let mut items: Vec<RenderItem> = Vec::new();
-        for (coord, runtime) in model.store.iter_loaded() {
-            let origin = Mat4::from_translation(chunk_origin(coord));
-            if let Some(mesh) = terrain.get(&coord) {
-                items.push(RenderItem { transform: origin, mesh, color: TERRAIN_COLOR, opacity: 1.0 });
-            }
-            for item in &runtime.visible {
-                match item {
-                    VisibleItem::Primitive { primitive, transform, surface } => {
-                        items.push(RenderItem {
-                            transform: origin * *transform,
-                            mesh: &primitives[primitive_index(*primitive)],
-                            color: surface_color(surface.as_ref()),
-                            opacity: 1.0,
-                        });
-                    }
-                    // Named replacement meshes need the glTF loader (wok-mesh, later); their
-                    // placements simply do not draw yet.
-                    VisibleItem::Mesh { .. } => {}
-                }
-            }
-        }
-        self.draw_items = items.len();
-
-        let Some(mut frame) = gfx::begin_frame(ctx.platform) else { return };
-        renderer.render(
-            &ctx.platform.device,
-            &ctx.platform.queue,
-            &mut frame.encoder,
-            &frame.view,
-            &camera,
-            &self.light,
-            scene_bounds(&model.store),
-            &items,
-        );
-        if !cage.is_empty() {
-            renderer.render_lines(
-                &ctx.platform.device,
-                &ctx.platform.queue,
-                &mut frame.encoder,
-                &frame.view,
-                &cage,
-                DepthMode::XRay,
-            );
-        }
-        if let Some(output) = ui_output {
-            gui.paint(ctx.platform, &mut frame.encoder, &frame.view, output, self.size);
-        }
-        frame.finish(ctx.platform);
+    /// Lift a world-space camera position to sit a small margin above the terrain under it (object
+    /// mode's vertical clamp), mapping through the chunk-local frame wok-physics expects. A point
+    /// over a chunk with no heightmap is returned unchanged.
+    fn clamp_to_terrain(&self, pos: Vec3) -> Vec3 {
+        /// Clearance the orbit camera keeps above the ground, metres.
+        const MARGIN: f32 = 0.5;
+        let coord = chunk_at(pos);
+        let Some(heightmap) = self.model.heightmaps.get(&coord) else { return pos };
+        let origin = chunk_origin(coord);
+        wok_physics::terrain_floor(pos - origin, heightmap, MARGIN) + origin
     }
 
     /// Keep the window title showing the scene name and the unsaved-changes indicator.
@@ -293,22 +159,8 @@ impl EditorApp {
 impl App for EditorApp {
     fn init(&mut self, platform: &Platform) {
         let config = &platform.surface_config;
-        let renderer = Renderer::new(&platform.device, config.format, config.width, config.height);
         self.size = (config.width, config.height);
-
-        let primitives = PRIMITIVES
-            .iter()
-            .map(|&p| MeshGpu::upload(&platform.device, &primitive_mesh(p)))
-            .collect();
-        let mut terrain = BTreeMap::new();
-        for (coord, runtime) in self.model.store.iter_loaded() {
-            if let Some(mesh) = runtime.terrain_mesh.as_ref() {
-                terrain.insert(coord, MeshGpu::upload(&platform.device, mesh));
-            }
-        }
-        let gui = Gui::new(platform);
-        theme::apply(&gui.ctx);
-        self.gpu = Some(Gpu { renderer, gui, primitives, terrain });
+        self.gpu = Some(Gpu::new(platform, &self.model));
         self.refresh_title(platform);
     }
 
@@ -382,11 +234,9 @@ impl App for EditorApp {
             self.apply_action(action);
         }
 
-        self.camera =
-            camera::update(&self.camera, &input::camera_input(&ctx.input, pointer_free, keys_free), ctx.dt);
-        // Input routing reads the model and emits its own actions; they apply in a second pass,
-        // after the UI actions and the camera update, so the established frame order holds and a
-        // selection stays visible to later same-frame reads exactly as before.
+        // Viewport input next (hotkeys, clicks, drags, the mode toggle), reading this frame's camera
+        // - the one that drew the image being clicked on - and emitted as actions applied right
+        // away, so a selection made this frame is visible to the camera step below.
         let mut input_actions = Vec::new();
         input::handle(
             &ctx.input,
@@ -402,6 +252,9 @@ impl App for EditorApp {
         for action in input_actions {
             self.apply_action(action);
         }
+
+        // Advance the camera last, so it sees the final selection and mode for this frame.
+        self.advance_camera(&ctx.input, pointer_free, keys_free, ctx.dt);
 
         self.render(ctx, ui_output);
         self.refresh_title(ctx.platform);

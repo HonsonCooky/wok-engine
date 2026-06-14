@@ -68,6 +68,11 @@ pub fn handle(
             actions.push(Action::Select(None));
         }
     }
+    // Mode toggle: backtick flips Object <-> Free-fly (not Tab - it fights egui's focus traversal);
+    // gated on keys_free, so a focused field types it instead. Interaction state, not an action.
+    if keys_free && input.char_pressed('`') {
+        ui.mode = ui.mode.toggled();
+    }
 
     // Telling a look-drag from a context click: accumulate raw motion across the whole right
     // hold; a release that never really moved is the click.
@@ -161,6 +166,7 @@ mod tests {
         CENTER_CURSOR, aim_at_pillar, any_camera, blank_input, clicked, emitted, looking_from_at,
         sample_model,
     };
+    use crate::mode::Mode;
     use crate::model::Selection;
 
     #[test]
@@ -371,5 +377,23 @@ mod tests {
         let mut actions = Vec::new();
         handle(&input, true, false, &any_camera(), (800, 600), 500.0, &model, &mut ui, &mut actions);
         assert!(actions.is_empty(), "Ctrl+Z is suppressed while a field has focus");
+    }
+
+    #[test]
+    fn backtick_toggles_the_mode_unless_a_field_has_focus() {
+        let model = sample_model();
+        let mut ui = UiState::default();
+        assert_eq!(ui.mode, Mode::Object, "object is the default mode");
+        let mut input = blank_input();
+        input.keys_pressed.insert(Key::Character("`".into()));
+        // Free keys: backtick flips the mode and emits no action (it is interaction state); the
+        // round trip back is mode.rs's to prove.
+        assert!(emitted(&input, &any_camera(), &model, &mut ui).is_empty(), "the toggle is not an action");
+        assert_eq!(ui.mode, Mode::FreeFly, "backtick flips to free-fly");
+
+        // A focused field (keys_free = false) keeps the backtick: it types instead of toggling.
+        let mut actions = Vec::new();
+        handle(&input, true, false, &any_camera(), (800, 600), 500.0, &model, &mut ui, &mut actions);
+        assert_eq!(ui.mode, Mode::FreeFly, "a focused field holds the mode");
     }
 }

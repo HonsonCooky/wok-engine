@@ -94,6 +94,37 @@ impl EditorModel {
             }
         }
     }
+
+    /// The selection's centroid: the mean of its members' world-bounds centres. `None` when nothing
+    /// is selected (or no member still resolves). The Object-mode camera orbits this point, so it
+    /// follows a drag-moved selection and sits in the middle of a multi-selection.
+    pub fn selection_pivot(&self) -> Option<Vec3> {
+        let mut sum = Vec3::ZERO;
+        let mut n = 0u32;
+        for sel in self.selection.iter() {
+            if let Some(bounds) = self.world_bounds(sel) {
+                sum += (bounds.min + bounds.max) * 0.5;
+                n += 1;
+            }
+        }
+        (n > 0).then(|| sum / n as f32)
+    }
+
+    /// The union of the selection's members' world bounds: what Object-mode framing fits in view.
+    /// `None` when nothing is selected (or no member resolves).
+    pub fn selection_bounds(&self) -> Option<Aabb> {
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        let mut any = false;
+        for sel in self.selection.iter() {
+            if let Some(bounds) = self.world_bounds(sel) {
+                min = min.min(bounds.min);
+                max = max.max(bounds.max);
+                any = true;
+            }
+        }
+        any.then(|| Aabb::new(min, max))
+    }
 }
 
 #[cfg(test)]
@@ -225,5 +256,38 @@ mod tests {
         assert_eq!(bounds.min, local.min);
         assert_eq!(bounds.max, local.max);
         assert!(bounds.min.is_finite() && bounds.max.is_finite());
+    }
+
+    #[test]
+    fn selection_pivot_is_the_centroid_of_the_member_bounds_centres() {
+        let mut model = sample_model();
+        let coord = ChunkCoord::new(0, 0);
+        let a = Selection { coord, id: InstanceId(0) };
+        let b = Selection { coord, id: InstanceId(3) };
+        let (ba, bb) = (model.world_bounds(a).unwrap(), model.world_bounds(b).unwrap());
+        let ca = (ba.min + ba.max) * 0.5;
+        let cb = (bb.min + bb.max) * 0.5;
+
+        // A single selection orbits its own bounds centre.
+        model.selection.replace(a);
+        assert!((model.selection_pivot().unwrap() - ca).length() < 1e-4, "one member: pivot is its centre");
+
+        // Two members: the pivot is the mean of the two centres - the centroid the camera orbits.
+        model.selection.toggle(b);
+        let expected = (ca + cb) * 0.5;
+        assert!((model.selection_pivot().unwrap() - expected).length() < 1e-4, "two members: the centroid");
+
+        // The framing bounds are the union of the members' bounds (so a frame fits both).
+        let union = model.selection_bounds().unwrap();
+        assert_eq!(union.min, ba.min.min(bb.min));
+        assert_eq!(union.max, ba.max.max(bb.max));
+    }
+
+    #[test]
+    fn an_empty_selection_has_no_pivot_or_bounds() {
+        let model = sample_model();
+        assert!(model.selection.is_empty());
+        assert_eq!(model.selection_pivot(), None);
+        assert_eq!(model.selection_bounds(), None);
     }
 }

@@ -1,11 +1,14 @@
-//! The editor's fly camera: pure update logic and matrix construction.
+//! The editor's camera state, the free-fly step, and framing - pure logic and matrix construction.
 //!
-//! Editor-owned per the brief: wok-physics's camera math (orbit, spring arm, terrain floor) models
-//! a follow camera constrained by world geometry, and a free-flying editor camera has none of
-//! those constraints, so building it from glam directly is the smaller idea. The camera is plain
-//! state plus a pure step function: [`update`] takes the previous state, a frame's [`CameraInput`]
-//! (already mapped from raw input by the caller), and `dt`, and returns the next state. Input
-//! mapping (which keys, which mouse button) lives in `crate::app`; everything here is unit
+//! [`FlyCamera`] is the one camera state the renderer and picking read, whichever mode produced it.
+//! This module owns the free-fly half: [`update`] takes the previous state, a frame's
+//! [`CameraInput`] (already mapped from raw input by the caller), and `dt`, and returns the next
+//! state - a free flight with no world constraints, so it is built from glam directly. The
+//! object-mode half (the camera locked to the selection) is `crate::orbit`, which composes
+//! wok-physics's orbit and spring-arm math because that camera *is* constrained by world geometry;
+//! both write the same [`FlyCamera`]. [`look_at`] is the shared bridge - the angles that aim the
+//! camera from a point at a target - used by framing, the orbit, and the terrain-floor re-aim.
+//! Input mapping (which keys, which mouse button) lives in `crate::input`; everything here is unit
 //! testable with no window.
 //!
 //! Conventions: right-handed, `+Y` up. `yaw` is radians about `+Y` with `0` facing `-Z`, positive
@@ -79,6 +82,17 @@ impl FlyCamera {
         let view = Mat4::look_to_rh(self.position, self.forward(), Vec3::Y);
         projection * view
     }
+}
+
+/// The `(yaw, pitch)` that aim a camera at `position` toward `target`, in [`FlyCamera`]'s
+/// convention (yaw about `+Y`, `0` facing `-Z`; pitch positive looking up). The inverse of
+/// [`FlyCamera::forward`]: feeding these back through `forward` points at the target. Degenerate
+/// (`position == target`) yields a level forward rather than a NaN, and the `asin` domain is
+/// guarded against float drift past `+/-1`. The orbit and the terrain-floor clamp both re-aim with
+/// it after moving the camera.
+pub fn look_at(position: Vec3, target: Vec3) -> (f32, f32) {
+    let dir = (target - position).normalize_or_zero();
+    (dir.x.atan2(-dir.z), dir.y.clamp(-1.0, 1.0).asin())
 }
 
 /// Margin factor on the framing distance: the framed bounds' enclosing sphere fills roughly 70%
@@ -287,5 +301,24 @@ mod tests {
         let clip = cam.view_proj(16.0 / 9.0, 400.0).project_point3(target);
         assert!(clip.x.abs() < EPS && clip.y.abs() < EPS, "clip was {clip:?}");
         assert!(clip.z > 0.0 && clip.z < 1.0, "depth should be inside wgpu's 0..1 range: {}", clip.z);
+    }
+
+    // ---- look_at ----
+
+    #[test]
+    fn look_at_inverts_forward() {
+        // The angles look_at returns, fed back through forward, point straight at the target: it is
+        // the exact inverse the orbit and the terrain-floor re-aim rely on.
+        let cam = FlyCamera { position: Vec3::new(2.0, 5.0, -3.0), yaw: 1.1, pitch: -0.4, speed: 16.0 };
+        let target = cam.position + cam.forward() * 12.0;
+        let (yaw, pitch) = look_at(cam.position, target);
+        let aimed = FlyCamera { yaw, pitch, ..cam };
+        assert!(close(aimed.forward(), cam.forward()), "forward {:?} vs {:?}", aimed.forward(), cam.forward());
+    }
+
+    #[test]
+    fn look_at_is_graceful_when_position_equals_target() {
+        let (yaw, pitch) = look_at(Vec3::splat(4.0), Vec3::splat(4.0));
+        assert!(yaw.is_finite() && pitch.is_finite(), "degenerate aim must not be NaN: {yaw}, {pitch}");
     }
 }

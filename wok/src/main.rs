@@ -18,6 +18,7 @@
 //! tracing events today, so a subscriber would observe nothing; it arrives when the first crate
 //! takes the tracing dependency.
 
+mod actions;
 mod app;
 mod camera;
 mod cli;
@@ -31,13 +32,16 @@ mod history;
 mod input;
 mod library;
 mod lines;
+mod mode;
 mod model;
+mod orbit;
 mod outline;
 mod pages;
 mod panels;
 mod pick;
 mod place;
 mod reload;
+mod render;
 mod sample;
 mod selection;
 mod selection_ops;

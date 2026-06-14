@@ -20,7 +20,7 @@ use glam::{Mat4, Vec2, Vec3};
 use wok_physics::{Capsule, Collider, classify_collider, sweep_capsule_colliders};
 use wok_scene::{Chunk, ChunkCoord, Heightmap, Placement, Prefab, PrefabRef};
 
-use crate::model::{Selection, chunk_at, chunk_origin};
+use crate::model::{EditorModel, Selection, chunk_at, chunk_origin};
 
 /// Probe sphere radius in metres: forgiving enough to land thin shapes (a plane's edge), small
 /// enough that adjacent placements stay separately clickable.
@@ -76,6 +76,27 @@ pub fn placement_colliders(prefab: &Prefab, placement: &Placement, origin: Vec3)
                 .translated(origin)
         })
         .collect()
+}
+
+/// Every loaded placement's colliders except the current selection's, in world space: the static
+/// set the Object-mode camera boom springs against (`crate::orbit`). The selection is excluded
+/// because the camera frames it - its colliders sit at the orbit pivot and would otherwise collapse
+/// the boom straight onto it. Built from the same [`placement_colliders`] the picker uses, so the
+/// camera springs off exactly the surfaces the player and the picker see.
+pub fn camera_statics(model: &EditorModel) -> Vec<Collider> {
+    let mut out = Vec::new();
+    for (&coord, chunk) in &model.chunks {
+        let origin = chunk_origin(coord);
+        for placement in &chunk.placements {
+            if model.selection.contains(Selection { coord, id: placement.instance_id }) {
+                continue;
+            }
+            if let Some(prefab) = model.prefabs.get(&placement.prefab) {
+                out.extend(placement_colliders(prefab, placement, origin));
+            }
+        }
+    }
+    out
 }
 
 /// Pick the placement under a ray: nearest swept-sphere impact over every placement's colliders,

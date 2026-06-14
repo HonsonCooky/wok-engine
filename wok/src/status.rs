@@ -10,6 +10,7 @@
 use egui::{Align, Layout, RichText, Sense, vec2};
 
 use crate::glyphs;
+use crate::mode::Mode;
 use crate::pages::{Page, PageState};
 
 /// The numbers the right side of the bar shows. fps and frame-ms are the app's one-second-window
@@ -31,13 +32,18 @@ const BAR_HEIGHT: f32 = 24.0;
 const TOGGLE_SIZE: f32 = 18.0;
 
 /// Build the status bar. Added to the context before the side panel so it spans the full window
-/// width and the panel stacks above it.
-pub fn bar(ctx: &egui::Context, pages: &mut PageState, stats: &Stats) {
+/// width and the panel stacks above it. The interaction mode reads at the left, beside the page
+/// toggles; the frame stats stay at the right.
+pub fn bar(ctx: &egui::Context, pages: &mut PageState, mode: Mode, stats: &Stats) {
     egui::TopBottomPanel::bottom("wok_status_bar").exact_height(BAR_HEIGHT).show(ctx, |ui| {
         ui.horizontal_centered(|ui| {
             for page in Page::ALL {
                 page_toggle(ui, pages, page);
             }
+            // The current mode, left of centre: not weak (unlike the stats), since it changes what
+            // the keys and the camera do and the user steers by it.
+            ui.add_space(8.0);
+            ui.label(RichText::new(mode.label()).small());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(RichText::new(right_text(stats)).weak().small());
             });
