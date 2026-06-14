@@ -22,6 +22,18 @@ The shell is Zed's, with wok's verbs.
 - Docks. The left dock hosts the panel switcher and the active panel (Scene, Prefabs, Integrity). The right dock hosts the Inspector (today a floating window). The bottom dock hosts Integrity and a log.
 - Status bar. Camera speed, framerate, frame time, placement and draw counts, save state, and an integrity count.
 
+## Input
+
+The editor is driven from the left hand on the keyboard and the right hand on the mouse, with the touch-typing home row kept under the fingers so moving between authoring and typing never repositions the hand. Bindings are focus-gated: while a text field holds keyboard focus the keys type, otherwise they drive the viewport. The scheme below is the default; it becomes a rebindable table when the command palette lands, not a hardcoded law.
+
+Camera movement is bare home-row keys, vim-style and all on one row: s strafe-left, d back, f forward, g strafe-right. Holding Ctrl turns that row to vertical and command use: Ctrl+f ascends, Ctrl+d descends, and Ctrl suppresses planar movement so a command chord like Ctrl+S never also strafes. Forward follows the look direction (flying up a slope is look-up-and-go), so the Ctrl vertical is a deliberate world-space elevator. f and g share the index finger, so forward-right has no chord: an accepted cost of the single-row layout.
+
+Mouse: right-drag orbits the camera, right-click opens the edit menu on what it hits, the scroll wheel sets fly speed. Left-click selects one placement, replacing the selection; Ctrl+left-click toggles a placement in or out of the selection set. Left-drag reads its start: pressed on a selected placement it repositions the whole selection, pressed anywhere else (empty space, or an unselected placement, which it passes over rather than grabs) it is an area marquee that replaces the selection, or adds to it while Ctrl is held.
+
+Commands: Ctrl+S save, Ctrl+Z undo, Ctrl+Shift+Z redo, Delete removes the selection, Esc cancels place mode then the context menu then the selection. Duplicate, rename, and frame-on-selection live in the edit menu until they earn hotkeys.
+
+Multi-selection is the set behind Ctrl+click and the marquee: it turns the single selection into a set and touches picking, the inspector, the tree, drag, and delete, so it is built as its own arc rather than bundled with the nav remap.
+
 ## Edit contexts
 
 The center hosts one tab per open thing, in four kinds:
