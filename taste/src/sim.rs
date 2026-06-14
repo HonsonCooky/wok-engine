@@ -1,28 +1,32 @@
 //! The fixed-step player simulation: state, the per-step composition, and spawn.
 //!
 //! This is the loop body the engine deliberately does not own (HLD principle 5): taste holds the
-//! player's [`Motion`] and grounded flag, and each fixed step sequences wok-physics's pure pieces in
-//! the composition the Level 2 locomotion harness proved out (wok-physics/tests/locomotion_replay):
+//! player's [`Motion`] and the jump state, and each fixed step sequences wok-physics's pure pieces.
+//! The movement model is deliberately small - a run speed, one gravity, and a jump counter:
 //!
-//!     steer the horizontal velocity toward intent (grounded approach or air redirection, plus
-//!                                                  the jump impulses and coyote grace - the
-//!                                                  game's policy)
-//!     -> integrate one fixed step under gravity   (wok-physics: integrate; ascent gravity while
-//!                                                  rising, the heavier fall gravity otherwise)
-//!     -> collide-and-slide against the statics    (crate::slide over the cylinder sweeps:
-//!                                                  supported contacts resolve flat, lips step up)
-//!     -> rest the slid body on the terrain        (wok-physics: rest_cylinder_on_heightmap,
-//!                                                  chunk-local)
+//!     set the horizontal velocity to the move intent * move_speed (instant, ground and air alike)
+//!     -> a jump press, if the counter has one, sets the vertical velocity to the launch speed
+//!     -> integrate one fixed step under a single gravity   (wok-physics: integrate)
+//!     -> collide-and-slide against the statics              (crate::slide: prefab collision)
+//!     -> rest the slid body on the terrain beneath          (wok-physics: rest_cylinder_on_heightmap)
+//!     -> refill the jump counter once the body has been vertically still for the reset dwell
 //!
-//! The player's collider is the flat-bottomed vertical cylinder (the player-collider brief); the
-//! drawn bean stays a capsule, documented at the draw site (`crate::app`). Two extensions over
-//! the harness. World space: statics were lifted to world space when the [`World`] was built, and
-//! the terrain rest maps the body into the local frame of the chunk it is over and back (a pure
-//! translation each way). Downhill snap-down: a grounded, non-jumping step whose support fell
-//! away by at most `SNAP_DOWN_DISTANCE` is glued back to the surface instead of flickering
-//! airborne (game policy over the engine's lift-only rest). Landing on statics is the slide's
-//! `supported` signal (a walkable contact under the disc footprint) plus downward motion; terrain
-//! landings are the rest's own signal.
+//! The player's collider is the flat-bottomed vertical cylinder; the drawn bean stays a capsule,
+//! documented at the draw site (`crate::app`). Horizontal control is instant and identical on the
+//! ground and in the air: holding a direction moves at `move_speed`, releasing stops, and the same
+//! is true mid-jump (air control). Every jump - the first off the ground and the double jump alike -
+//! sets the vertical velocity to the same launch speed, so a second jump acts like the first.
+//!
+//! The jump counter refills by vertical STILLNESS, not by ground detection: resting on the ground
+//! or on a surface pins the vertical velocity to zero, so the still timer fills and, once it passes
+//! a brief dwell (`JUMP_RESET_DWELL`, a step or two), the counter is restored - a landing hands the
+//! jumps back effectively at once. The dwell exists only to reject a jump's apex, which grazes zero
+//! for a single step; it is not a felt cooldown. Reading stillness instead of a grounded flag is
+//! what keeps complex terrain - slopes, ledges, edges - from ever leaving the player unable to jump.
+//!
+//! Two world-space wrinkles the engine leaves to the caller: statics were lifted to world space when
+//! the [`World`] was built, and the terrain rest maps the body into the local frame of the chunk it
+//! is over and back (a pure vertical translation each way).
 //!
 //! Everything here is deterministic: pure functions of the inputs and `SIM_DT`, no clocks, no RNG,
 //! which is what the replay test (`crate::replay`) pins bitwise.
@@ -30,53 +34,41 @@
 use glam::Vec3;
 use wok_physics::{Cylinder, Motion, boom_direction, integrate, rest_cylinder_on_heightmap};
 
-use crate::air;
+use crate::constants::{JUMP_RESET_DWELL, PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT, SPAWN_HEIGHT, STILL_VY};
 use crate::slide::slide_player;
-use crate::constants::{PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT, SPAWN_HEIGHT};
 use crate::tuning::Tuning;
 use crate::world::{CHUNK_SIZE_M, World};
+
+/// The terrain rest reports a `grounded` flag gated by a walkable-slope limit; the simple model
+/// does not read it (the jump counter refills by vertical stillness, not by grounding), and the
+/// lift onto the surface happens regardless of this value. Pass a permissive limit so nothing is
+/// ever gated out of the lift's report.
+const TERRAIN_REST_WALKABLE_COS: f32 = 0.0;
 
 /// The player: a cylinder-bodied actor the game owns between steps. `motion.position` is the
 /// cylinder centre (wok-physics's reference point for every resolve).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Player {
     pub motion: Motion,
-    pub grounded: bool,
-    /// Air jumps still available: spent by jumping airborne, restored to `AIR_JUMPS` on any
-    /// grounding. Part of the stepped state, so replay covers it like position and velocity.
-    pub air_jumps: u32,
-    /// Coyote grace remaining, in seconds of simulation time: refreshed to `COYOTE_S` while
-    /// grounded, burned down one `SIM_DT` per airborne step, zeroed by any jump. While positive an
-    /// airborne press still fires a full ground jump without spending the air jump - the
-    /// walked-off-a-ledge forgiveness. Stepped state, so replay covers it.
-    pub coyote: f32,
-}
-
-impl Player {
-    /// Does this player, at step entry, have a jump to give: grounded, inside the coyote window,
-    /// or holding an air jump? The single definition the jump latch and the step's own jump check
-    /// both read, so the latch can never fire a press the step would drop.
-    pub fn can_jump(&self) -> bool {
-        self.grounded || self.coyote > 0.0 || self.air_jumps > 0
-    }
+    /// Jumps still available before the counter must refill. Spent by jumping, restored to
+    /// `max_jumps` once `still_time` passes the reset dwell. Part of the stepped state, so replay
+    /// covers it like position and velocity.
+    pub jumps_remaining: u32,
+    /// How long the body's vertical velocity has been still, in seconds of simulation time: grows
+    /// while resting (vertical velocity at zero), zeroes the moment the body moves vertically. When
+    /// it passes the tuning's `jump_reset_time` the jump counter refills. Stepped state, so replay
+    /// covers it.
+    pub still_time: f32,
 }
 
 /// One fixed step's input, already resolved against the camera: a world-space horizontal move
 /// direction of length at most one, and whether a jump was asked for. The press is the whole
-/// signal: every jump flies the full authored arc (the play verdict against variable height), so
-/// the simulation never reads how long the control stays down.
+/// signal: every jump flies the full arc (the play verdict against variable height), so the
+/// simulation never reads how long the control stays down.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct StepInput {
     pub move_dir: Vec3,
     pub jump: bool,
-}
-
-/// The gravity in force for a body whose vertical velocity is `vy`, as the acceleration
-/// `integrate` takes. Rising bodies decelerate under the jump's derived ascent gravity; everything
-/// else (descent, standing) falls under the fall-multiplier-scaled descent gravity. The split is
-/// what makes the arc asymmetric: the rise keeps the tuned apex and time, the fall commits.
-pub fn gravity(vy: f32, tuning: &Tuning) -> Vec3 {
-    Vec3::new(0.0, if vy > 0.0 { -tuning.ascent_gravity() } else { -tuning.fall_gravity() }, 0.0)
 }
 
 /// Resolve the intent's movement axes against the camera yaw into a world-space horizontal move
@@ -114,156 +106,80 @@ pub fn spawn(world: &World, tuning: &Tuning) -> Player {
     });
     Player {
         motion: Motion { position, velocity: Vec3::ZERO },
-        grounded: false,
-        air_jumps: tuning.air_jumps,
-        coyote: 0.0,
+        jumps_remaining: tuning.max_jumps,
+        still_time: 0.0,
     }
-}
-
-/// Move `current` toward `target` by at most `max_delta`, arriving exactly: the constant-rate
-/// approach locomotion is built on. Unlike an exponential ease it has no asymptote, so a decaying
-/// velocity reaches a true zero (and a run reaches exactly top speed) in finite steps - which is
-/// also what makes the analytic time-to-speed in the tests exact rather than approximate.
-fn approach(current: Vec3, target: Vec3, max_delta: f32) -> Vec3 {
-    let gap = target - current;
-    let len = gap.length();
-    if len <= max_delta { target } else { current + gap * (max_delta / len) }
 }
 
 /// Advance the player by one fixed step. Pure: identical player, input, and world give an identical
 /// next player, bit for bit.
 pub fn step(player: Player, input: StepInput, world: &World, tuning: &Tuning) -> Player {
-    // Locomotion splits by grounding. Grounded, the horizontal velocity approaches intent *
-    // MOVE_SPEED at a constant rate (GROUND_ACCEL with input, GROUND_FRICTION toward rest
-    // without), so starts and stops take a beat and read as weight. Airborne is pure momentum
-    // (`crate::air`): input only rotates the velocity's heading toward the stick at
-    // AIR_TURN_RATE - the horizontal speed is set at launch and never changes in the air - so a
-    // mid-air do-over turns the moving body around instead of braking through a dead stop, and a
-    // jump's reach is committed at takeoff; no input stays ballistic - the momentum a jump
-    // promises, and what lets a body caught on a crate's corner accumulate slide-off speed and
-    // roll free.
     let mut m = player.motion;
-    let horizontal = Vec3::new(m.velocity.x, 0.0, m.velocity.z);
-    let horizontal = if player.grounded {
-        let target = Vec3::new(input.move_dir.x, 0.0, input.move_dir.z) * tuning.move_speed;
-        let rate = if input.move_dir == Vec3::ZERO { tuning.ground_friction } else { tuning.ground_accel };
-        approach(horizontal, target, rate * SIM_DT)
-    } else {
-        air::steer(horizontal, input.move_dir, SIM_DT, tuning)
-    };
-    m.velocity.x = horizontal.x;
-    m.velocity.z = horizontal.z;
 
-    // The jump impulse: grounded presses - and airborne presses inside the coyote window - push
-    // off at full strength without touching the air jump; the window is the walked-off-a-ledge
-    // grace, and the press spends it outright so it can never stack a second free jump. Past the
-    // window, airborne presses spend an air jump when one remains: vertical velocity is SET (not
-    // added) to the scaled launch speed, and the horizontal velocity splits on intent. With a
-    // direction held it is left exactly as it stands - direction changes are the air steering's
-    // job alone (AIR_TURN_RATE), so the air jump can never read as a violent re-aim.
-    // With NO direction held the horizontal is zeroed: a neutral air jump is a straight-up reset
-    // jump, the deliberate "stop here" the ballistic no-input air otherwise never offers. The
-    // latch upstream guarantees one press is one jump; this block only decides what a delivered
-    // press does. Every jump flies the full authored arc: hold duration never enters the
-    // simulation (the play verdict against variable height).
-    let mut air_jumps = player.air_jumps;
-    let mut coyote = player.coyote;
-    let mut jumped = false;
-    if input.jump {
-        if player.grounded || coyote > 0.0 {
-            m.velocity.y = tuning.jump_velocity();
-            jumped = true;
-        } else if air_jumps > 0 {
-            air_jumps -= 1;
-            m.velocity.y = tuning.jump_velocity() * tuning.air_jump_scale;
-            if input.move_dir == Vec3::ZERO {
-                m.velocity.x = 0.0;
-                m.velocity.z = 0.0;
-            }
-            jumped = true;
-        }
-        coyote = 0.0;
+    // Horizontal locomotion is the whole of the move model: the intent (length at most one) times
+    // the run speed, set instantly, the same on the ground and in the air. No acceleration or
+    // friction - releasing the stick stops the body, and holding a direction mid-jump steers it
+    // (air control). The vertical velocity rides through untouched here; gravity and the jump own
+    // it below.
+    m.velocity.x = input.move_dir.x * tuning.move_speed;
+    m.velocity.z = input.move_dir.z * tuning.move_speed;
+
+    // The jump: a press with a jump left in the counter sets the vertical velocity to the launch
+    // speed and spends one. Every jump is identical - the first off the ground and the double jump
+    // launch the same - so a second jump acts like the first. The latch upstream (`crate::jump`)
+    // guarantees one press is one jump.
+    let mut jumps = player.jumps_remaining;
+    if input.jump && jumps > 0 {
+        m.velocity.y = tuning.jump_velocity;
+        jumps -= 1;
     }
 
-    // One fixed step under gravity - ascent gravity while rising, the heavier fall gravity
-    // otherwise - then slide the resulting move along any static geometry it meets. The slide is
-    // the game's policy wrapper (`crate::slide`): supported contacts resolve flat so standing on
-    // walkable geometry never bleeds sideways, lips within STEP_HEIGHT are climbed (only from a
-    // grounded, non-jumping entry - the gate passed here), walls stop or slide per the wall
-    // policies.
-    let next = integrate(m, gravity(m.velocity.y, tuning), SIM_DT);
+    // One fixed step under a single gravity, then slide the resulting move along any static geometry
+    // it meets (`crate::slide`: stop at walls, slide along them, come to rest on surfaces landed on
+    // from above).
+    let next = integrate(m, Vec3::new(0.0, -tuning.gravity, 0.0), SIM_DT);
     let body = Cylinder::upright(m.position, PLAYER_HEIGHT, PLAYER_RADIUS);
-    let slid = slide_player(
-        body,
-        next.position - m.position,
-        next.velocity,
-        &world.statics,
-        player.grounded && !jumped,
-        tuning,
-    );
+    let slid = slide_player(body, next.position - m.position, next.velocity, &world.statics);
 
     // Rest the slid body on the terrain of the chunk beneath it, in that chunk's local frame
-    // (lift-only; the slide handled walls). Off every chunk there is no ground to rest on.
+    // (lift-only). Off every chunk there is no ground to rest on. A lift means the body met the
+    // surface this step, so its descent stops there.
     let slid_body = Cylinder::upright(slid.position, PLAYER_HEIGHT, PLAYER_RADIUS);
-    let (rested_position, rested_grounded) = match world.terrain_under(slid.position.x, slid.position.z) {
-        Some(t) => {
-            let rest =
-                rest_cylinder_on_heightmap(slid_body.translated(-t.origin), &t.heightmap, tuning.walkable_cos());
-            (rest.position + t.origin, rest.grounded)
-        }
-        None => (slid.position, false),
-    };
-
-    // Landing policy: a static-geometry landing must be genuine support, not a graze past an
-    // edge. The slide answers that geometrically now (`PlayerSlide::supported`: a walkable
-    // contact whose point lies under the disc footprint - the flat bottom is standing on
-    // something real), so landing requires that signal plus the body moving downward into it (a
-    // rising jump is never landing). Terrain landings are the rest's own signal, unchanged.
-    let supported = slid.supported && next.velocity.y <= 0.0;
-    let mut grounded = supported || rested_grounded;
+    let mut position = slid.position;
     let mut velocity = slid.velocity;
-    let mut position = rested_position;
-    if supported || rested_position.y > slid.position.y {
-        velocity.y = 0.0;
-    }
-
-    // Downhill snap-down, the game's ground glue: walking downhill the surface falls away faster
-    // than one step of gravity follows, so a grounded walk would flicker airborne every step. If
-    // the player was grounded, did not jump, and ended this step just above the terrain, probe
-    // SNAP_DOWN_DISTANCE below: when the lift-only rest brings that probe back up onto walkable
-    // ground (the support is within the glue distance), take its position and remain grounded.
-    // A drop taller than the glue leaves the probe unlifted and ungrounded, so real ledges and
-    // jumps still go airborne.
-    if player.grounded && !jumped && !grounded
-        && let Some(t) = world.terrain_under(position.x, position.z)
-    {
-        let probe = Cylinder::upright(position - t.origin, PLAYER_HEIGHT, PLAYER_RADIUS)
-            .translated(Vec3::new(0.0, -tuning.snap_down_distance, 0.0));
-        let snap = rest_cylinder_on_heightmap(probe, &t.heightmap, tuning.walkable_cos());
-        if snap.grounded {
-            position = snap.position + t.origin;
+    if let Some(t) = world.terrain_under(slid.position.x, slid.position.z) {
+        let rest = rest_cylinder_on_heightmap(slid_body.translated(-t.origin), &t.heightmap, TERRAIN_REST_WALKABLE_COS);
+        position = rest.position + t.origin;
+        if position.y > slid.position.y {
             velocity.y = 0.0;
-            grounded = true;
         }
     }
 
-    // Any grounding restores the air jumps and refreshes the coyote grace; airborne, the grace
-    // burns down one step of simulation time. The double jump is per airtime, not per life.
-    let air_jumps = if grounded { tuning.air_jumps } else { air_jumps };
-    let coyote = if grounded { tuning.coyote_s } else { (coyote - SIM_DT).max(0.0) };
-    Player { motion: Motion { position, velocity }, grounded, air_jumps, coyote }
+    // The jump counter refills by vertical stillness, not ground detection: resting on the ground or
+    // a surface pins the vertical velocity to zero (the slide projects out a landing's descent, the
+    // terrain rest's lift zeroes it just above), so the still timer fills while at rest and, after a
+    // brief dwell - just long enough to reject the apex's single still step - refills the counter, so
+    // a landing restores the jumps at once.
+    let still_time = if velocity.y.abs() <= STILL_VY { player.still_time + SIM_DT } else { 0.0 };
+    let jumps_remaining = if still_time >= JUMP_RESET_DWELL { tuning.max_jumps } else { jumps };
+
+    Player { motion: Motion { position, velocity }, jumps_remaining, still_time }
 }
 
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    use crate::world::ChunkTerrain;
+    use wok_scene::{CHUNK_GRID_LEN, Heightmap, SurfaceTag};
 
     const EPS: f32 = 1e-5;
 
     fn close(a: Vec3, b: Vec3) -> bool {
         (a - b).length() < EPS
     }
+
+    // ---- camera-relative movement direction ----
 
     #[test]
     fn forward_at_zero_yaw_moves_toward_negative_z() {
@@ -296,12 +212,13 @@ mod tests {
         assert_eq!(move_direction(1.3, 1.0, -0.5).y, 0.0);
     }
 
+    // ---- the interpolated draw position ----
+
     fn player_at(position: Vec3) -> Player {
         Player {
             motion: Motion { position, velocity: Vec3::ZERO },
-            grounded: false,
-            air_jumps: Tuning::default().air_jumps,
-            coyote: 0.0,
+            jumps_remaining: Tuning::default().max_jumps,
+            still_time: 0.0,
         }
     }
 
@@ -322,10 +239,7 @@ mod tests {
         assert_eq!(lerp_position(&prev, &curr, 2.0), curr.motion.position);
     }
 
-    // ---- acceleration ----
-
-    use crate::world::ChunkTerrain;
-    use wok_scene::{CHUNK_GRID_LEN, Heightmap, SurfaceTag};
+    // ---- the movement model through the real step ----
 
     fn flat_world(height_m: f32) -> World {
         let raw = Heightmap::meters_to_raw(height_m);
@@ -334,17 +248,21 @@ mod tests {
         World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }], ..World::default() }
     }
 
-    /// A player standing at rest mid-chunk: the cylinder's flat base exactly on the surface,
-    /// grounded (with the coyote grace a grounded step would carry).
+    /// A player settled at rest mid-chunk: the cylinder's flat base on the surface, vertically still
+    /// long enough that its jumps are full.
     fn at_rest(world: &World) -> Player {
         let ground = world.terrains[0].heightmap.height_at(64.0, 64.0);
         let t = Tuning::default();
         Player {
             motion: Motion { position: Vec3::new(64.0, ground + PLAYER_HEIGHT * 0.5, 64.0), velocity: Vec3::ZERO },
-            grounded: true,
-            air_jumps: t.air_jumps,
-            coyote: t.coyote_s,
+            jumps_remaining: t.max_jumps,
+            still_time: JUMP_RESET_DWELL,
         }
+    }
+
+    /// Airborne high over the terrain, moving at `velocity`, jumps full and the still timer reset.
+    fn airborne_at(position: Vec3, velocity: Vec3) -> Player {
+        Player { motion: Motion { position, velocity }, jumps_remaining: Tuning::default().max_jumps, still_time: 0.0 }
     }
 
     fn horizontal_speed(p: &Player) -> f32 {
@@ -352,69 +270,153 @@ mod tests {
     }
 
     #[test]
-    fn a_run_reaches_95_percent_of_top_speed_in_the_analytic_time() {
-        // Constant-rate approach from rest: v(t) = GROUND_ACCEL * t, so 95% of top speed arrives
-        // at 0.95 * MOVE_SPEED / GROUND_ACCEL seconds; the ceil grants the partial step.
+    fn horizontal_velocity_is_the_run_speed_instantly_grounded_and_airborne() {
+        // The whole horizontal model: one step at full stick is already move_speed, with no ramp,
+        // and the air behaves identically - holding a direction mid-air moves at the run speed.
         let world = flat_world(2.0);
         let t = Tuning::default();
-        let run = StepInput { move_dir: Vec3::X, jump: false };
-        let steps = (0.95 * t.move_speed / t.ground_accel / SIM_DT).ceil() as usize;
-        let mut p = at_rest(&world);
-        for _ in 0..steps {
-            p = step(p, run, &world, &t);
-        }
-        let speed = horizontal_speed(&p);
-        assert!(speed >= 0.95 * t.move_speed - EPS, "speed {speed} after {steps} steps");
-        // Top speed is unchanged: the approach arrives at exactly move_speed and cruises there.
-        for _ in 0..120 {
-            p = step(p, run, &world, &t);
-            assert!(horizontal_speed(&p) <= t.move_speed + EPS, "overshot top speed: {}", horizontal_speed(&p));
-        }
-        let cruise = horizontal_speed(&p);
-        assert!((cruise - t.move_speed).abs() < EPS, "should cruise at top speed: {cruise}");
+        let grounded = step(at_rest(&world), StepInput { move_dir: Vec3::X, jump: false }, &world, &t);
+        assert!((horizontal_speed(&grounded) - t.move_speed).abs() < EPS, "grounded: {}", horizontal_speed(&grounded));
+        let air = step(airborne_at(Vec3::new(64.0, 30.0, 64.0), Vec3::ZERO), StepInput { move_dir: Vec3::Z, jump: false }, &world, &t);
+        assert!((horizontal_speed(&air) - t.move_speed).abs() < EPS, "airborne: {}", horizontal_speed(&air));
     }
 
     #[test]
-    fn friction_decays_a_full_speed_run_to_exact_rest() {
-        // The approach has no asymptote: within MOVE_SPEED / GROUND_FRICTION seconds of no input
-        // the horizontal velocity is exactly zero, not a lingering creep.
+    fn releasing_the_stick_stops_the_horizontal_at_once() {
         let world = flat_world(2.0);
         let t = Tuning::default();
-        let mut p = at_rest(&world);
-        p.motion.velocity = Vec3::new(t.move_speed, 0.0, 0.0);
-        let steps = (t.move_speed / t.ground_friction / SIM_DT).ceil() as usize;
-        for _ in 0..steps {
-            p = step(p, StepInput::default(), &world, &t);
-        }
-        assert_eq!(p.motion.velocity.x, 0.0);
-        assert_eq!(p.motion.velocity.z, 0.0);
-        assert!(p.grounded, "decaying to rest should never leave the ground");
+        let mut running = at_rest(&world);
+        running.motion.velocity = Vec3::new(t.move_speed, 0.0, 0.0);
+        let stopped = step(running, StepInput::default(), &world, &t);
+        assert_eq!(horizontal_speed(&stopped), 0.0, "no input stops the horizontal at once");
     }
 
     #[test]
-    fn airborne_input_turns_the_heading_but_never_the_speed() {
-        // Pure momentum through the real step, against the grounded rate it is decoupled from: a
-        // grounded step from rest gains GROUND_ACCEL * dt, an airborne step from rest gains
-        // nothing (the unsteerable standing jump, pinned with its contingency in
-        // crate::air_feel), and an airborne steering step leaves a moving body's speed magnitude
-        // untouched.
+    fn a_jump_sets_the_launch_velocity_and_spends_one() {
         let world = flat_world(2.0);
         let t = Tuning::default();
-        let run = StepInput { move_dir: Vec3::X, jump: false };
-        let ground_dv = step(at_rest(&world), run, &world, &t).motion.velocity.x;
-        assert!((ground_dv - t.ground_accel * SIM_DT).abs() < EPS, "one grounded step from rest gains accel * dt");
-
-        let from_rest = step(player_at(Vec3::new(64.0, 30.0, 64.0)), run, &world, &t);
-        assert_eq!(horizontal_speed(&from_rest), 0.0, "airborne input must not move a body at rest");
-
-        let mut moving = player_at(Vec3::new(64.0, 30.0, 64.0));
-        moving.motion.velocity = Vec3::new(3.0, 0.0, 0.0);
-        let steered = step(moving, StepInput { move_dir: Vec3::Z, jump: false }, &world, &t);
+        let start = at_rest(&world);
+        let jumped = step(start, StepInput { move_dir: Vec3::ZERO, jump: true }, &world, &t);
+        // The impulse sets the launch speed; one step of gravity follows in the same step.
         assert!(
-            (horizontal_speed(&steered) - 3.0).abs() < EPS,
-            "an airborne steering step must not change the speed: {}",
-            horizontal_speed(&steered)
+            (jumped.motion.velocity.y - (t.jump_velocity - t.gravity * SIM_DT)).abs() < EPS,
+            "vy = {}",
+            jumped.motion.velocity.y
+        );
+        assert_eq!(jumped.jumps_remaining, start.jumps_remaining - 1, "the jump spends one");
+    }
+
+    #[test]
+    fn the_double_jump_launches_exactly_like_the_first() {
+        let world = flat_world(2.0);
+        let t = Tuning::default();
+        let jump = StepInput { move_dir: Vec3::ZERO, jump: true };
+        let first = step(at_rest(&world), jump, &world, &t);
+        let second = step(first, jump, &world, &t);
+        assert!(
+            (second.motion.velocity.y - first.motion.velocity.y).abs() < EPS,
+            "the double jump must match the first: {} vs {}",
+            second.motion.velocity.y,
+            first.motion.velocity.y
+        );
+        assert_eq!(first.jumps_remaining, t.max_jumps - 1);
+        assert_eq!(second.jumps_remaining, t.max_jumps - 2);
+    }
+
+    #[test]
+    fn a_jump_with_an_empty_counter_does_nothing() {
+        let world = flat_world(2.0);
+        let t = Tuning::default();
+        let jump = StepInput { move_dir: Vec3::ZERO, jump: true };
+        let mut p = step(at_rest(&world), jump, &world, &t);
+        for _ in 1..t.max_jumps {
+            p = step(p, jump, &world, &t);
+        }
+        assert_eq!(p.jumps_remaining, 0, "every jump spent");
+        let vy_before = p.motion.velocity.y;
+        let pressed = step(p, jump, &world, &t);
+        assert!(
+            (pressed.motion.velocity.y - (vy_before - t.gravity * SIM_DT)).abs() < EPS,
+            "a spent counter must not relaunch: {}",
+            pressed.motion.velocity.y
         );
     }
 
+    #[test]
+    fn the_jumps_do_not_refill_in_the_air() {
+        // Through the rise and the apex, the counter must never climb back: the apex is still for
+        // only an instant, far short of the reset dwell.
+        let world = flat_world(2.0);
+        let t = Tuning::default();
+        let mut p = step(at_rest(&world), StepInput { move_dir: Vec3::ZERO, jump: true }, &world, &t);
+        let spent = p.jumps_remaining;
+        for i in 0..30 {
+            p = step(p, StepInput::default(), &world, &t);
+            assert!(p.jumps_remaining <= spent, "step {i}: the counter refilled in the air");
+        }
+    }
+
+    #[test]
+    fn the_jumps_refill_shortly_after_landing() {
+        let world = flat_world(2.0);
+        let t = Tuning::default();
+        let jumped = step(at_rest(&world), StepInput { move_dir: Vec3::ZERO, jump: true }, &world, &t);
+        assert!(jumped.jumps_remaining < t.max_jumps, "a jump was spent");
+        let mut p = jumped;
+        let mut refilled = false;
+        for _ in 0..600 {
+            p = step(p, StepInput::default(), &world, &t);
+            if p.jumps_remaining == t.max_jumps {
+                refilled = true;
+                break;
+            }
+        }
+        assert!(refilled, "landing and coming to rest must refill the jumps");
+    }
+
+    #[test]
+    fn the_jumps_reset_while_resting_on_a_standable_prefab_slope() {
+        // The user's case: spend the jumps, land on a tilted prefab face, and the counter must
+        // refill - the floor-ish resolve rests the body on the slope so its vertical velocity
+        // settles, the same as on flat ground.
+        use glam::Quat;
+        use wok_physics::Collider;
+        let ramp = Collider::Obb {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            half_extents: Vec3::splat(2.0),
+            rotation: Quat::from_rotation_x(20.0_f32.to_radians()),
+        };
+        let world = World { statics: vec![ramp], ..World::default() };
+        let t = Tuning::default();
+        let mut p = airborne_at(Vec3::new(0.0, 4.0, 0.0), Vec3::ZERO);
+        p.jumps_remaining = 0;
+        for _ in 0..240 {
+            p = step(p, StepInput::default(), &world, &t);
+        }
+        assert!(
+            p.motion.velocity.y.abs() <= STILL_VY,
+            "the body should rest on the slope, not slide: vy = {}",
+            p.motion.velocity.y
+        );
+        assert_eq!(p.jumps_remaining, t.max_jumps, "resting on a standable prefab slope must refill the jumps");
+    }
+
+    #[test]
+    fn a_falling_body_lands_and_comes_to_rest_on_the_terrain() {
+        // Ground collision: the body falls, the terrain rest catches it on the surface, and the
+        // vertical velocity comes to rest (which is what feeds the jump-reset stillness timer).
+        let world = flat_world(2.0);
+        let t = Tuning::default();
+        let ground = world.terrains[0].heightmap.height_at(64.0, 64.0);
+        let mut p = airborne_at(Vec3::new(64.0, ground + 5.0, 64.0), Vec3::ZERO);
+        for _ in 0..600 {
+            p = step(p, StepInput::default(), &world, &t);
+            if p.motion.velocity.y.abs() <= STILL_VY && p.motion.position.y < ground + 5.0 {
+                break;
+            }
+        }
+        let base = p.motion.position.y - PLAYER_HEIGHT * 0.5;
+        assert!((base - ground).abs() < 1e-2, "the base should rest on the surface: base {base}, ground {ground}");
+        assert!(p.motion.velocity.y.abs() <= STILL_VY, "a rested body is vertically still: {}", p.motion.velocity.y);
+    }
 }

@@ -1,17 +1,18 @@
 //! The third-person follow camera: game-owned state sequencing wok-physics's camera math.
 //!
-//! The model splits what the player owns from what the world may do about it. The orbit - yaw,
-//! pitch, and the desired boom length - is the player's: look input writes the angles directly and
-//! in full the same frame (no smoothing on orbit angles, ever), and walls never write back into
-//! it, so no collision can displace the orbit the player set. Everything else is derived from the
-//! orbit each rendered frame:
+//! The model splits what the player owns from what the world may do about it. The orbit - yaw and
+//! pitch - is the player's: look input writes the angles directly and in full the same frame (no
+//! smoothing on orbit angles, ever), and walls never write back into it, so no collision can
+//! displace the orbit the player set. The desired boom length is the tuning's `camera_distance`,
+//! read live each frame (so it hot-reloads). Everything else is derived from the orbit each rendered
+//! frame:
 //!
 //!     yaw, pitch += look                                                   direct, zero lag
 //!     anchor   = smooth(anchor, target, CAMERA_TRACK_SMOOTH, dt)           the one tracking lag
 //!     dir      = boom_direction(yaw, pitch)                                orbit -> boom direction
-//!     desired  = boom_point(anchor, dir, boom)                             the eye the orbit asks for
-//!     arm      = smooth(arm, boom, CAMERA_ARM_RECOVER, dt)                 slow recovery toward the boom
-//!     arm      = min(arm, spring_arm(...))   ONLY if desired is inside a collider (contains)
+//!     desired  = boom_point(anchor, dir, camera_distance)                  the eye the orbit asks for
+//!     target   = camera_distance, pulled to spring_arm(...) ONLY if desired is inside a collider
+//!     arm      = smooth(arm, target, fast in / CAMERA_ARM_RECOVER out, dt) eased clamp-in, slow recover-out
 //!     eye      = boom_point(anchor, dir, arm)
 //!     position = terrain_floor(eye)                                        vertical clamp; if it engaged,
 //!     pitch, arm <- recomputed from position - anchor                      the clamp writes the orbit back
@@ -24,10 +25,11 @@
 //! (`Collider::contains`); otherwise the arm ignores prefabs entirely and the boom may pass
 //! through them - a prefab crossing the view fades out instead (the occlusion fade in
 //! `crate::fade`), which keeps the camera steady where the old always-on clamp pumped the arm
-//! every time a crate grazed the boom. The clamp that remains is the old one unchanged: the swept
-//! probe from the anchor, applied instantly via the `min` (easing into geometry would show the
-//! camera inside it), with clearance recovering toward the desired boom on the slow smooth so the
-//! boom drifts back out instead of whipping.
+//! every time a crate grazed the boom. When the clamp does engage, the arm EASES in toward the
+//! swept clearance on a fast half-life (`CAMERA_ARM_CLAMP`) rather than snapping via a hard `min`:
+//! the move is swift but smooth, and the occlusion fade covers the brief overlap while the arm
+//! closes. Recovery back out toward the desired boom rides the slow `CAMERA_ARM_RECOVER` smooth, so
+//! the boom drifts back out instead of whipping.
 //!
 //! The terrain floor is the one deliberate exception to "the world never writes the orbit". A
 //! purely derived clamp leaves the orbit believing in a virtual eye below the ground, and the
@@ -49,25 +51,26 @@ use glam::{Mat4, Vec2, Vec3};
 use wok_physics::{boom_direction, boom_point, smooth, spring_arm, terrain_floor};
 
 use crate::constants::{
-    CAMERA_PROBE_RADIUS, CAMERA_TERRAIN_MARGIN, FOV_Y_RADIANS, NEAR_PLANE, PITCH_DEFAULT, PITCH_MAX, PITCH_MIN,
+    CAMERA_ARM_CLAMP, CAMERA_PROBE_RADIUS, CAMERA_TERRAIN_MARGIN, FOV_Y_RADIANS, NEAR_PLANE, PITCH_DEFAULT, PITCH_MAX,
+    PITCH_MIN,
 };
 use crate::tuning::Tuning;
 use crate::world::World;
 
-/// The camera's whole state between frames. The orbit (`yaw`, `pitch`, `boom`) belongs to the
-/// player: look input writes it (or a future zoom, for `boom`), and the terrain floor's write-back
-/// is the one world influence (`pitch` and `arm` take the clamped reality; see the module docs).
-/// `arm` and `anchor` are the two smoothed follow values; `position` is the derived eye, kept only
-/// so the renderer reads the same point the last update produced.
+/// The camera's whole state between frames. The orbit (`yaw`, `pitch`) belongs to the player: look
+/// input writes it, and the terrain floor's write-back is the one world influence (`pitch` and `arm`
+/// take the clamped reality; see the module docs). The desired boom length is not stored - it is the
+/// tuning's `camera_distance`, read live each frame. `arm` and `anchor` are the two smoothed follow
+/// values; `position` is the derived eye, kept only so the renderer reads the same point the last
+/// update produced.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FollowCamera {
     pub yaw: f32,
     pub pitch: f32,
-    /// Desired boom length: where the arm settles with nothing in the way.
-    pub boom: f32,
-    /// Current arm length: clamped inward instantly by obstruction, recovering slowly toward
-    /// `boom` when clear. In `0.0..=boom` while only walls act on it; the floor write-back can
-    /// briefly hold it past `boom`, and recovery eases it back.
+    /// Current arm length: eased inward toward an obstruction's clearance (fast), recovering slowly
+    /// toward the desired boom (`camera_distance`) when clear. In `0.0..=camera_distance` while only
+    /// walls act on it; the floor write-back can briefly hold it past that, and recovery eases it
+    /// back.
     pub arm: f32,
     /// The boom's hanging point: the look target trailed by the tracking smooth.
     pub anchor: Vec3,
@@ -83,7 +86,6 @@ impl FollowCamera {
         FollowCamera {
             yaw,
             pitch,
-            boom: tuning.camera_distance,
             arm: tuning.camera_distance,
             anchor: target,
             position: boom_point(target, boom_direction(yaw, pitch), tuning.camera_distance),
@@ -138,19 +140,23 @@ pub fn update(
     // The anchor trails the target with the one tracking lag, vertical included.
     let anchor = smooth(camera.anchor, target, tuning.camera_track_smooth, dt);
 
-    // The arm. Prefab colliders engage only when the eye the orbit asks for is itself inside one:
-    // then the old swept clamp applies, instantly inward via the min, from the actual anchor so
-    // the clamp matches what the eye would really pass through. Otherwise prefabs are ignored -
-    // the boom may cross them, and the occlusion fade handles what that does to the view - and
-    // the arm just recovers toward the desired boom on the slow smooth.
+    // The arm. The desired boom is the tuning's camera_distance, read live (so it hot-reloads).
+    // Prefab colliders pull the target in only when the eye the orbit asks for is itself inside one:
+    // then the arm's target is the swept clearance from the anchor, matching what the eye would
+    // really pass through. Otherwise prefabs are ignored - the boom may cross them, and the
+    // occlusion fade handles what that does to the view. The arm eases toward the target: a fast
+    // half-life when pulling IN (a swift but smooth clamp, the fade covering the brief overlap),
+    // the slow recover half-life when extending back OUT, so the boom drifts out rather than whips.
+    let boom = tuning.camera_distance;
     let dir = boom_direction(yaw, pitch);
-    let desired_eye = boom_point(anchor, dir, camera.boom);
-    let recovered = smooth(camera.arm, camera.boom, tuning.camera_arm_recover, dt);
-    let arm = if world.statics.iter().any(|c| c.contains(desired_eye)) {
-        recovered.min(spring_arm(anchor, dir, camera.boom, CAMERA_PROBE_RADIUS, &world.statics))
+    let desired_eye = boom_point(anchor, dir, boom);
+    let target = if world.statics.iter().any(|c| c.contains(desired_eye)) {
+        boom.min(spring_arm(anchor, dir, boom, CAMERA_PROBE_RADIUS, &world.statics))
     } else {
-        recovered
+        boom
     };
+    let half_life = if target < camera.arm { CAMERA_ARM_CLAMP } else { tuning.camera_arm_recover };
+    let arm = smooth(camera.arm, target, half_life, dt);
 
     // The eye is derived, then the terrain floor clamps it vertically. When the clamp engages,
     // the clamped reality is written back into pitch and arm (yaw cannot change: the clamp is
@@ -169,7 +175,7 @@ pub fn update(
         (pitch, arm)
     };
 
-    FollowCamera { yaw, pitch, boom: camera.boom, arm, anchor, position: floored }
+    FollowCamera { yaw, pitch, arm, anchor, position: floored }
 }
 
 #[cfg(test)]
@@ -265,7 +271,7 @@ mod tests {
         let t = Tuning::default();
         let target = Vec3::new(64.0, 5.0, 64.0);
         let world = crossing_crate_world();
-        let cam = FollowCamera { yaw: 0.0, pitch: 0.0, boom: t.camera_distance, arm: t.camera_distance,
+        let cam = FollowCamera { yaw: 0.0, pitch: 0.0, arm: t.camera_distance,
             anchor: target, position: target + Vec3::Z * t.camera_distance };
         let next = update(&cam, target, Vec2::ZERO, &world, DT, &t);
         assert_eq!(next.arm, t.camera_distance, "the arm must ignore a crate it is not inside");
@@ -277,20 +283,26 @@ mod tests {
     }
 
     #[test]
-    fn a_desired_eye_inside_a_crate_clamps_the_arm_the_same_frame() {
-        // The clamp that remains: the desired eye lands inside the deep crate, so the old swept
-        // clamp applies - the near face is 1.5m behind the target and a single update pulls the
-        // arm from the full boom to inside that distance, no frames of easing through the wall.
+    fn a_desired_eye_inside_a_crate_eases_the_arm_inward() {
+        // The clamp that remains, now eased rather than snapped: the desired eye lands inside the
+        // deep crate, so the arm pulls in toward the swept clearance. It starts moving in on the
+        // very first frame (responsive) but does not snap straight to the clamp (the fast smooth),
+        // and settles inside the crate distance within a few frames.
         let t = Tuning::default();
         let target = Vec3::new(64.0, 5.0, 64.0);
         let world = engulfing_crate_world();
-        let cam = FollowCamera { yaw: 0.0, pitch: 0.0, boom: t.camera_distance, arm: t.camera_distance,
+        let cam = FollowCamera { yaw: 0.0, pitch: 0.0, arm: t.camera_distance,
             anchor: target, position: target + Vec3::Z * t.camera_distance };
-        let clamped = update(&cam, target, Vec2::ZERO, &world, DT, &t);
-        assert!(clamped.arm < 1.5, "arm should clamp inside the crate distance at once: {}", clamped.arm);
+        let one = update(&cam, target, Vec2::ZERO, &world, DT, &t);
+        assert!(one.arm < t.camera_distance, "the arm must start pulling in immediately: {}", one.arm);
+        assert!(one.arm > 1.5, "but ease in, not snap straight to the clamp in one frame: {}", one.arm);
+        let mut clamped = one;
+        for _ in 0..30 {
+            clamped = update(&clamped, target, Vec2::ZERO, &world, DT, &t);
+        }
+        assert!(clamped.arm < 1.5, "the arm should settle inside the crate distance: {}", clamped.arm);
         assert!(clamped.arm > 0.5, "but not collapse onto the target: {}", clamped.arm);
         assert!(clamped.position.z < 65.5, "camera should sit in front of the crate: {}", clamped.position.z);
-        assert_eq!(clamped.boom, t.camera_distance, "obstruction must not write into the desired boom");
     }
 
     #[test]
@@ -358,7 +370,7 @@ mod tests {
         let world = flat_world(8.0);
         let ground = world.terrains[0].heightmap.height_at(64.0, 70.0);
         let target = Vec3::new(64.0, 8.5, 64.0);
-        let cam = FollowCamera { yaw: 0.0, pitch: PITCH_MIN, boom: t.camera_distance, arm: t.camera_distance,
+        let cam = FollowCamera { yaw: 0.0, pitch: PITCH_MIN, arm: t.camera_distance,
             anchor: target, position: target + Vec3::Z };
         let floored = update(&cam, target, Vec2::ZERO, &world, DT, &t);
         assert!(
@@ -385,7 +397,7 @@ mod tests {
         let t = Tuning::default();
         let world = flat_world(8.0);
         let target = Vec3::new(64.0, 8.5, 64.0);
-        let mut cam = FollowCamera { yaw: 0.0, pitch: PITCH_MIN, boom: t.camera_distance, arm: t.camera_distance,
+        let mut cam = FollowCamera { yaw: 0.0, pitch: PITCH_MIN, arm: t.camera_distance,
             anchor: target, position: target + Vec3::Z };
         for _ in 0..30 {
             cam = update(&cam, target, Vec2::ZERO, &world, DT, &t);

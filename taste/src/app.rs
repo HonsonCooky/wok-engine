@@ -57,12 +57,13 @@ const MARKER_SIZE: f32 = 0.6;
 const MARKER_LIFT: f32 = 0.01;
 const MARKER_COLOR: Vec3 = Vec3::new(1.0, 0.0, 1.0);
 
-/// Vertical headroom added to the shadow region's top: the player must keep casting at the jump
-/// apex (the default `jump_apex_height`) plus half the body's height above the tracked position,
-/// even when standing on the region's highest point. Game knowledge, so it lives here rather than
-/// in the renderer's fit; the relationship against the shipped jump is pinned by a test below. The
-/// region is fit once at startup and not against the live tuning, so a tuning.json that raises the
-/// apex far past the default could pop the shadow at the apex - a live-tuning edge, not a regression.
+/// Vertical headroom added to the shadow region's top: the player must keep casting at a jump's apex
+/// (derived from the default `jump_velocity` and `gravity`) plus half the body's height above the
+/// tracked position, even when standing on the region's highest point. Game knowledge, so it lives
+/// here rather than in the renderer's fit; the relationship against the shipped jump is pinned by a
+/// test below. The region is fit once at startup, not against the live tuning, and covers only a
+/// single jump's apex - a double jump or a tuning.json that raises the jump far past the default can
+/// pop the shadow near the top of the arc, a known edge rather than a regression.
 const SHADOW_HEADROOM_M: f32 = 3.0;
 
 /// Draw order of the primitive mesh cache; `primitive_index` must match.
@@ -196,20 +197,18 @@ impl TasteApp {
         }
     }
 
-    /// Run this frame's fixed steps. The camera yaw is resolved into a move direction once per
-    /// frame (the camera turns at frame rate, between steps it is constant). The jump edge goes
-    /// through the latch (`crate::jump`): it survives a frame that runs zero steps, fires on the
-    /// first step that can jump - `Player::can_jump`: grounded, inside the coyote window, or with
-    /// an air jump in hand - inside the buffer window, and is consumed there, so a multi-step
-    /// catch-up frame still cannot bounce twice on one press, and a zero-step frame cannot eat the
-    /// double jump.
+    /// Run this frame's fixed steps. The camera yaw is resolved into a move direction once per frame
+    /// (the camera turns at frame rate, between steps it is constant). The jump edge goes through the
+    /// latch (`crate::jump`): it survives a frame that runs zero steps and is taken by the first step
+    /// that runs, so a zero-step frame cannot eat a jump and a multi-step catch-up frame cannot
+    /// bounce twice on one press. The step itself decides whether a jump is available (its counter).
     fn simulate(&mut self, intent: &Intent, steps: u32) {
         if intent.jump {
             self.jump.press();
         }
         let move_dir = sim::move_direction(self.camera.yaw, intent.move_forward, intent.move_right);
         for _ in 0..steps {
-            let input = StepInput { move_dir, jump: self.jump.consume(self.player.can_jump(), &self.tuning) };
+            let input = StepInput { move_dir, jump: self.jump.consume() };
             self.player_prev = self.player;
             self.player = sim::step(self.player, input, &self.world, &self.tuning);
         }
@@ -461,13 +460,15 @@ mod tests {
     // a default-apex change that breaks it fails loudly (the same stance as the constants tests).
     #[allow(clippy::assertions_on_constants)]
     fn the_shadow_headroom_clears_the_jump_apex() {
-        // The headroom must cover the shipped apex plus the capsule's upper half from the region's
+        // The headroom must cover a single jump's apex plus the body's upper half from the region's
         // highest point, or the shadow pops off mid-jump; pinned against the default tuning so a
-        // change to the shipped jump cannot out-jump the fit.
-        let apex = Tuning::default().jump_apex_height;
+        // change to the shipped jump cannot out-jump the fit. The apex derives from the launch and
+        // gravity: v^2 / 2g.
+        let t = Tuning::default();
+        let apex = t.jump_velocity * t.jump_velocity / (2.0 * t.gravity);
         assert!(
             SHADOW_HEADROOM_M >= apex + PLAYER_HEIGHT * 0.5,
-            "headroom {SHADOW_HEADROOM_M} cannot cover the apex {apex} plus the capsule's upper half"
+            "headroom {SHADOW_HEADROOM_M} cannot cover the apex {apex} plus the body's upper half"
         );
     }
 

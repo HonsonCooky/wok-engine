@@ -8,9 +8,10 @@
 //! the engine-side composition; this pins taste's.
 //!
 //! The world is a small fixture built in code, not `./content`: tests must not depend on what the
-//! editor last wrote to disk. Geometry mirrors the locomotion harness (a flat region, a gentle
-//! slope, a long wall) so the script exercises fall, landing, a wall stop, a jump, and a slide in
-//! one run.
+//! editor last wrote to disk. It carries a flat region, a cube wall, and a round pillar, so the
+//! script exercises the simple model's whole surface in one run: fall, land on the ground (terrain
+//! collision), walk into the wall and stop against it (prefab collision), jump, double-jump, and
+//! slide along the wall.
 
 use std::collections::HashMap;
 
@@ -18,8 +19,8 @@ use glam::{Quat, Vec3};
 use wok_content::ChunkStore;
 use wok_physics::{Collider, Motion};
 use wok_scene::{
-    Aabb, CHUNK_GRID_DIM, CHUNK_GRID_LEN, Chunk, ChunkCoord, ChunkStreaming, HEIGHT_MAX_M, HEIGHT_MIN_M, Heightmap,
-    InstanceId, Placement, Prefab, PrefabRef, PrefabState, Primitive, Shape, SurfaceTag, Transform,
+    CHUNK_GRID_DIM, CHUNK_GRID_LEN, Chunk, ChunkCoord, ChunkStreaming, Heightmap, InstanceId, Placement, Prefab,
+    PrefabRef, PrefabState, Primitive, Shape, SurfaceTag, Transform,
 };
 
 use crate::constants::{PLAYER_HEIGHT, PLAYER_RADIUS};
@@ -37,7 +38,7 @@ const WALL_NEAR_X: f32 = WALL_CENTER.x - WALL_SIZE.x * 0.5;
 const FLAT_HEIGHT_M: f32 = 2.0;
 
 /// Cells with x index at or below this are flat; beyond it the terrain ramps up along +x by
-/// `SLOPE_DELTA` raw units per cell (about 5.6 degrees, walkable).
+/// `SLOPE_DELTA` raw units per cell (about 5.6 degrees).
 const FLAT_MAX_CELL: u16 = 40;
 const SLOPE_DELTA: u16 = 100;
 
@@ -91,8 +92,8 @@ fn fixture_world() -> World {
         placements: vec![
             // The long wall along z the script stops against and slides along.
             placement("block", 1, WALL_CENTER, WALL_SIZE),
-            // A round pillar off the walked path: collision is shown to be selective, and the
-            // reduction is shown to classify a real cylinder hitbox round.
+            // A round pillar off the walked path: collision is selective, and the reduction is shown
+            // to classify a real cylinder hitbox round.
             placement("pillar", 2, Vec3::new(30.0, 4.0, 30.0), Vec3::new(2.0, 8.0, 2.0)),
         ],
         streaming: ChunkStreaming::default(),
@@ -108,22 +109,11 @@ fn fixture_world() -> World {
 
 // ---- the scripted run ----
 
-/// The script: fall from the air and land, walk +x head-on into the wall and stop pinned against
-/// it (the wall-stop incidence policy: head-on is inside WALL_STOP_DEG, so the contact reads as a
-/// stop), jump once at the wall (every jump flies the full authored arc), then slide along it at
-/// a glancing angle. The slide direction leans 2:1 along the wall - about 63 degrees from
-/// head-on, clearly outside the (narrowed, 30-degree) stop window with margin to spare, so the
-/// angle never sits near the edge where float roundoff would decide stop-versus-slide and the
-/// test would pin luck. Re-measured under the cylinder collider: the wall pin is x = 13.549
-/// (face less radius less skin - the radii match the capsule's, so the pin did not move), the
-/// wall-friction equilibrium holds the tangential speed at ~5.74 m/s against the 6.71 m/s
-/// tangential intent, and the 60-step phase advances ~5.83m along the wall; the jump gains
-/// ~0.87m in its first five steps. Re-justified under pure-momentum air: the jump launches from
-/// the wall stop's zero horizontal speed, so the held stick has no heading to rotate and the
-/// body rises and lands straight at the pin (the unsteerable standing jump) instead of the
-/// retired AIR_ACCEL pressing it back into the wall mid-arc - the wall pin, the jump's height
-/// figures, and the grounded glancing numbers all stand. Every locomotion arc the demo shows,
-/// in one sequence.
+/// The script: fall from the air and land on the flat ground, walk +x head-on into the wall and
+/// stop pinned against it (the slide projects out the into-wall motion), jump and then double-jump
+/// against the wall (both holding +x, both flying the same arc), then slide along the wall at a
+/// glancing angle so the into-wall part is blocked while the along-wall part carries the body in z.
+/// Every arc the simple model has, in one sequence.
 fn scripted_inputs() -> Vec<StepInput> {
     let forward = Vec3::new(1.0, 0.0, 0.0);
     let glancing = Vec3::new(1.0, 0.0, 2.0).normalize();
@@ -131,7 +121,9 @@ fn scripted_inputs() -> Vec<StepInput> {
     inputs.extend(std::iter::repeat_n(StepInput::default(), 90));
     inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false }, 150));
     inputs.push(StepInput { move_dir: forward, jump: true });
-    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false }, 59));
+    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false }, 10));
+    inputs.push(StepInput { move_dir: forward, jump: true });
+    inputs.extend(std::iter::repeat_n(StepInput { move_dir: forward, jump: false }, 40));
     inputs.extend(std::iter::repeat_n(StepInput { move_dir: glancing, jump: false }, 60));
     inputs
 }
@@ -156,13 +148,12 @@ fn bits(v: Vec3) -> [u32; 3] {
     [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]
 }
 
-/// A player at `position` with no velocity, airborne until proven otherwise.
+/// A player at `position` with no velocity, jumps full, the still timer reset.
 fn player_at(position: Vec3) -> Player {
     Player {
         motion: Motion { position, velocity: Vec3::ZERO },
-        grounded: false,
-        air_jumps: Tuning::default().air_jumps,
-        coyote: 0.0,
+        jumps_remaining: Tuning::default().max_jumps,
+        still_time: 0.0,
     }
 }
 
@@ -185,8 +176,8 @@ fn base_height(center: Vec3) -> f32 {
 #[test]
 fn the_world_reduction_classifies_each_hitbox_into_its_own_shape() {
     // The fixture's wall is a scaled cube and its pillar a uniform-xz cylinder; through the real
-    // store-to-world path the wall must stay a conservative box and the pillar must come out a
-    // true vertical cylinder at the placement's dimensions - not be lifted to its box.
+    // store-to-world path the wall must stay a conservative box and the pillar must come out a true
+    // vertical cylinder at the placement's dimensions - not be lifted to its box.
     let world = fixture_world();
     assert_eq!(world.statics.len(), 2);
     assert!(
@@ -205,157 +196,22 @@ fn the_world_reduction_classifies_each_hitbox_into_its_own_shape() {
 
 #[test]
 fn at_rest_on_flat_ground_the_base_sits_exactly_on_the_surface() {
-    // The at-rest convention tie, physics side: after settling on flat terrain the capsule's lowest
-    // point is the sampled surface height - no constant offset anywhere in the foot-vs-centre
-    // bookkeeping across sim, world, and the rest query. Measured residue is two ulps (about 0.24
-    // micrometres at 2m): one from the lift's `base + (ground - base)` add, one from reconstructing
-    // the base out of the centre (centre minus height/2 versus the capsule's own endpoint-minus-
-    // radius chain). The bound allows a few ulps of that roundoff; a convention bug would be
-    // centimetres or more and is what this test exists to catch.
+    // The at-rest convention tie: after settling on flat terrain the cylinder's lowest point is the
+    // sampled surface height - no constant offset anywhere in the foot-vs-centre bookkeeping across
+    // sim, world, and the rest query. Measured residue is a couple of ulps: the lift's
+    // `base + (ground - base)` add and reconstructing the base out of the centre. A convention bug
+    // would be centimetres, which is what this catches.
     let world = fixture_world();
     let rested = settle(&world, player_at(Vec3::new(6.0, 8.0, 6.0)), 240);
     let ground = world.terrains[0].heightmap.height_at(6.0, 6.0);
 
-    assert!(rested.grounded, "should have settled grounded on the flat region");
     let base = base_height(rested.motion.position);
     assert!(
         (base - ground).abs() <= 4.0 * f32::EPSILON * ground.abs(),
         "base {base} should rest exactly on the surface {ground} (gap {})",
         base - ground
     );
-}
-
-#[test]
-fn at_rest_on_the_slope_the_rim_bears_with_the_documented_gap_under_the_axis() {
-    // The flat-bottom rest convention on a planar ramp of gradient g: the disc bears on its
-    // up-slope rim contact (the footprint-MAX sample at +r along the slope), so the base rests
-    // r * g above the surface under the axis - a rigid disc bridging from the contact over the
-    // falling ground. The capsule's profile-discounted rest sat with zero gap under the centre;
-    // measured here, the new gap is r * g = 0.0439m on this 0.0977 m/m ramp. Pinned so the
-    // at-rest convention on slopes cannot quietly drift either way.
-    let world = fixture_world();
-    let terrain = &world.terrains[0].heightmap;
-    let (x, z) = (80.0, 100.0); // on the ramp, clear of the wall and the pillar
-    let start = player_at(Vec3::new(x, terrain.height_at(x, z) + PLAYER_HEIGHT, z));
-    let rested = settle(&world, start, 240);
-
-    let p = rested.motion.position;
-    let base = base_height(p);
-    let ground = terrain.height_at(p.x, p.z);
-    let slope = SLOPE_DELTA as f32 * (HEIGHT_MAX_M - HEIGHT_MIN_M) / u16::MAX as f32;
-    let gap = PLAYER_RADIUS * slope;
-
-    assert!(rested.grounded, "the ramp is well inside the walkable limit");
-    assert!(
-        (base - ground - gap).abs() <= 1e-3,
-        "base {base} should rest r * g = {gap} above the surface {ground} under the axis (gap {})",
-        base - ground
-    );
-    // And the bearing point itself is on the surface: the up-slope rim sample carries the body.
-    let rim_ground = terrain.height_at(p.x + PLAYER_RADIUS, p.z);
-    assert!(
-        (base - rim_ground).abs() <= 1e-3,
-        "the up-slope rim should sit on the surface: base {base} vs rim ground {rim_ground}"
-    );
-}
-
-// ---- downhill snap-down ----
-
-#[test]
-fn walking_downhill_stays_grounded_every_step_with_monotonic_descent() {
-    // The glue's purpose: walking down the ramp, the surface falls away faster than one step of
-    // gravity follows, so without the snap the walk flickers airborne every step. With it the
-    // player reads grounded at every step and the descent is monotonic.
-    let world = fixture_world();
-    let terrain = &world.terrains[0].heightmap;
-    let (x, z) = (100.0, 100.0); // high on the ramp, clear of the wall and the pillar
-    let settled = settle(&world, player_at(Vec3::new(x, terrain.height_at(x, z) + PLAYER_HEIGHT, z)), 120);
-    assert!(settled.grounded, "should start the walk settled on the ramp");
-
-    let t = Tuning::default();
-    let downhill = StepInput { move_dir: Vec3::new(-1.0, 0.0, 0.0), jump: false };
-    let mut state = settled;
-    let mut prev_y = state.motion.position.y;
-    for i in 0..240 {
-        state = sim::step(state, downhill, &world, &t);
-        assert!(state.grounded, "step {i}: flickered airborne walking downhill");
-        assert!(state.motion.position.y <= prev_y + 1e-5, "step {i}: rose during a descent");
-        prev_y = state.motion.position.y;
-    }
-    assert!(
-        state.motion.position.y < settled.motion.position.y - 2.0,
-        "should have descended the ramp, only dropped to {}",
-        state.motion.position.y
-    );
-}
-
-#[test]
-fn walking_off_a_ledge_taller_than_the_glue_goes_airborne() {
-    // A genuine drop must not be glued: standing on a 2m box (far beyond SNAP_DOWN_DISTANCE above
-    // the terrain) and walking off, the player goes airborne before landing back on the ground.
-    let mut world = fixture_world();
-    let drop = 2.0;
-    assert!(drop > Tuning::default().snap_down_distance, "fixture: the ledge must out-reach the glue");
-    world.statics.push(
-        Aabb::from_center_extents(
-            Vec3::new(6.0, FLAT_HEIGHT_M + drop * 0.5, 100.0),
-            Vec3::new(2.0, drop * 0.5, 2.0),
-        )
-        .into(),
-    );
-
-    let start = player_at(Vec3::new(6.0, FLAT_HEIGHT_M + drop + PLAYER_HEIGHT, 100.0));
-    let on_box = settle(&world, start, 120);
-    assert!(on_box.grounded, "should be standing on the box");
-    assert!(base_height(on_box.motion.position) > FLAT_HEIGHT_M + drop - 0.1, "should rest on the box top");
-
-    let off = StepInput { move_dir: Vec3::new(1.0, 0.0, 0.0), jump: false };
-    let t = Tuning::default();
-    let mut state = on_box;
-    let mut went_airborne = false;
-    for _ in 0..120 {
-        state = sim::step(state, off, &world, &t);
-        went_airborne |= !state.grounded;
-    }
-    assert!(went_airborne, "stepping off the ledge should go airborne, not glue down");
-    assert!(state.grounded, "should have landed on the terrain below");
-    let ground = world.terrains[0].heightmap.height_at(state.motion.position.x, state.motion.position.z);
-    assert!(
-        (base_height(state.motion.position) - ground).abs() < 1e-2,
-        "should end resting on the terrain at {ground}"
-    );
-}
-
-#[test]
-fn a_jump_from_a_downhill_walk_still_leaves_the_ground() {
-    // The glue must not eat jumps: jumping mid-descent goes airborne and gains height even though
-    // the support right below would otherwise be within snapping distance.
-    let world = fixture_world();
-    let terrain = &world.terrains[0].heightmap;
-    let (x, z) = (100.0, 100.0);
-    let settled = settle(&world, player_at(Vec3::new(x, terrain.height_at(x, z) + PLAYER_HEIGHT, z)), 120);
-
-    let t = Tuning::default();
-    let downhill = Vec3::new(-1.0, 0.0, 0.0);
-    let mut state = settled;
-    for _ in 0..60 {
-        state = sim::step(state, StepInput { move_dir: downhill, jump: false }, &world, &t);
-    }
-    assert!(state.grounded, "should still be walking the ramp when the jump comes");
-    let before = state.motion.position;
-
-    state = sim::step(state, StepInput { move_dir: downhill, jump: true }, &world, &t);
-    assert!(!state.grounded, "the jump step must leave the ground");
-    for _ in 0..5 {
-        state = sim::step(state, StepInput { move_dir: downhill, jump: false }, &world, &t);
-    }
-    assert!(!state.grounded, "should still be rising shortly after the jump");
-    assert!(
-        state.motion.position.y > before.y + 0.3,
-        "the jump should gain height downhill: {} -> {}",
-        before.y,
-        state.motion.position.y
-    );
+    assert!(rested.motion.velocity.y.abs() <= crate::constants::STILL_VY, "a settled body is vertically still");
 }
 
 #[test]
@@ -370,53 +226,47 @@ fn an_identical_scripted_run_reproduces_bitwise() {
     for (i, (a, b)) in first.iter().zip(&second).enumerate() {
         assert_eq!(bits(a.motion.position), bits(b.motion.position), "position differs at step {i}");
         assert_eq!(bits(a.motion.velocity), bits(b.motion.velocity), "velocity differs at step {i}");
-        assert_eq!(a.grounded, b.grounded, "grounded flag differs at step {i}");
-        // The precision kit grew the stepped state: the forgiveness timers must replay exactly
-        // too, or a divergence could hide in state the position has not expressed yet.
-        assert_eq!(a.air_jumps, b.air_jumps, "air jumps differ at step {i}");
-        assert_eq!(a.coyote.to_bits(), b.coyote.to_bits(), "coyote grace differs at step {i}");
+        // The stepped jump state must replay exactly too, or a divergence could hide in state the
+        // position has not expressed yet.
+        assert_eq!(a.jumps_remaining, b.jumps_remaining, "jumps remaining differ at step {i}");
+        assert_eq!(a.still_time.to_bits(), b.still_time.to_bits(), "the still timer differs at step {i}");
     }
 }
 
 #[test]
 fn the_scripted_run_actually_exercises_the_arcs() {
-    // Guard against a degenerate script silently passing the bitwise test: the run really did
-    // fall, land, stop at the wall, leave the ground on the jump, and slide along the wall.
+    // Guard against a degenerate script silently passing the bitwise test: the run really did fall,
+    // land, stop at the wall, leave the ground twice, and slide along the wall.
     let world = fixture_world();
     let inputs = scripted_inputs();
     let traj = run(&world, &inputs);
+    let t = Tuning::default();
 
-    assert!(!traj[0].grounded, "the run starts in the air");
-    assert!(traj[89].grounded, "the idle phase should end landed on the flat ground");
+    // The fall lands: the idle phase ends resting on the flat ground.
+    assert!(traj[0].motion.position.y > FLAT_HEIGHT_M + 1.0, "the run starts well above the ground");
+    let landed = &traj[89];
+    assert!((base_height(landed.motion.position) - FLAT_HEIGHT_M).abs() < 1e-2, "the idle phase should land flat");
 
-    // The head-on walk ends stopped at the wall's face: under the wall-stop policy the contact
-    // kills the run outright, and with the approach exactly head-on (no tangential component to
-    // kill) the body sits where the engine's projection would also have left it - pinned.
+    // The head-on walk ends pinned at the wall's face: the slide projects out the into-wall motion,
+    // so the body stops a skin short of (face - radius) and never penetrates.
     let pin = WALL_NEAR_X - PLAYER_RADIUS;
     let at_wall = &traj[239];
     assert!(at_wall.motion.position.x <= pin + 1e-2, "penetrated the wall: x = {}", at_wall.motion.position.x);
     assert!(at_wall.motion.position.x >= pin - 1e-1, "never reached the wall: x = {}", at_wall.motion.position.x);
-    let stopped = at_wall.motion.velocity;
-    assert!(
-        Vec3::new(stopped.x, 0.0, stopped.z).length() < 1e-3,
-        "the head-on contact must read as a stop: {stopped:?}"
-    );
 
-    // The jump at step 240 flies the full authored arc: airborne shortly after, having gained
-    // real height. Five steps in, the arc has climbed most of a metre (the launch velocity is
-    // 10 m/s and ascent gravity has only shaved ~0.7 m/s per step's worth); 0.2m is the loose
-    // floor that still catches a dead jump.
-    assert!(!traj[245].grounded, "the jump should leave the ground");
+    // The jump at step 240 leaves the ground and gains height; the double jump at step 251 spends
+    // the second of the two jumps, so the counter bottoms out at zero.
     assert!(
         traj[245].motion.position.y > traj[239].motion.position.y + 0.2,
         "the jump should gain height: {} -> {}",
         traj[239].motion.position.y,
         traj[245].motion.position.y
     );
+    assert_eq!(traj[240].jumps_remaining, t.max_jumps - 1, "the first jump spends one");
+    assert_eq!(traj[251].jumps_remaining, t.max_jumps - 2, "the double jump spends the second");
 
-    // The glancing phase (outside the stop window) slides along the wall: z advances (~5.8m over
-    // the 60 steps at the wall-friction equilibrium of ~5.74 m/s), x stays pinned.
-    let before = &traj[299];
+    // The glancing phase slides along the wall: z advances while x stays pinned by the wall.
+    let before = &traj[291];
     let last = traj.last().unwrap();
     assert!(last.motion.position.z > before.motion.position.z + 2.0, "should have slid along the wall in z");
     assert!(last.motion.position.x <= pin + 1e-2, "still pinned by the wall: x = {}", last.motion.position.x);

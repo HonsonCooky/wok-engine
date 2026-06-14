@@ -1,15 +1,13 @@
-//! Movement constants the build decides: the fixed step, the player body, the step-up, the spawn,
-//! and the placeholder color.
+//! Movement constants the build decides: the fixed step, the player body, the spawn, the
+//! vertical-stillness guards, and the placeholder color.
 //!
-//! What used to live here too - locomotion speeds, the parameterized jump, air steering, the wall
-//! policies, the walkable limit, and the downhill glue - moved to `crate::tuning`, the
-//! hot-reloadable feel record, because those are the numbers a play-test verdict retunes live.
-//! What stays is what changing mid-play would make a different game, not a different feel: the
-//! simulation rate (the determinism contract's day-one decision), the player's dimensions (the body
-//! the collider and the bean mesh share), the step-up height, the spawn height, and the body's
-//! color. The relationship sanity these values used to assert against the moved ones now lives in
-//! `Tuning::validate` (and the derivation round-trips in `crate::tuning`'s own tests); the tests
-//! kept here pin only the relationships among the constants that remain.
+//! The feel numbers - the run speed, gravity, the jump - live in `crate::tuning`, the
+//! hot-reloadable record, because those are what a play-test verdict retunes live. What stays here
+//! is what changing mid-play would make a different game, not a different feel: the simulation rate
+//! (the determinism contract's day-one decision), the player's dimensions (the body the collider
+//! and the bean mesh share), the spawn height, the velocity threshold and dwell the jump reset
+//! triggers on (numerical guards against the apex, not feel numbers), and the body's color. The
+//! tests kept here pin only the relationships among these remaining constants.
 
 use glam::Vec3;
 
@@ -41,16 +39,25 @@ pub const PLAYER_RADIUS: f32 = 0.45;
 /// the cylinder: the collider's straight wall is the full PLAYER_HEIGHT.
 pub const PLAYER_SEGMENT: f32 = PLAYER_HEIGHT - 2.0 * PLAYER_RADIUS;
 
-/// Step-up height, in metres: a grounded walk blocked by a wall-grade contact no taller than this
-/// above the foot climbs it (lift-move-drop in `crate::slide`) instead of stopping. The flat
-/// bottom needs the policy where the capsule's rounded bottom glided up small lips for free; 0.3m
-/// is shin height - kerbs and stair treads climb, crates (0.5m and up) are walls. Stays a constant
-/// rather than feel tuning: it is a property of the body's reach, paired with the player dimensions.
-pub const STEP_HEIGHT: f32 = 0.3;
-
 /// How far above the terrain surface the player spawns, in metres: high enough that the opening
 /// moments show gravity and the landing. Where play begins, not a feel value, so it stays here.
 pub const SPAWN_HEIGHT: f32 = 10.0;
+
+/// How close to zero the vertical velocity must be to count as still, in m/s, for the jump-reset
+/// timer (`crate::sim`). Resting on the ground or a surface pins the vertical velocity to exactly
+/// zero, so any positive value registers a rest; the only thing this margin must reject is a jump's
+/// apex, where the vertical velocity grazes zero for a single step before the fall. A numerical
+/// tolerance, not feel tuning, so it stays a constant.
+pub const STILL_VY: f32 = 0.05;
+
+/// How long the body must stay vertically still before the jump counter refills, in seconds: more
+/// than one fixed step, the smallest dwell that rejects a jump's apex (still for a single step as
+/// the vertical velocity crosses zero) while a real landing - still for as long as the player rests
+/// - refills the jumps within a couple of hundredths of a second, no perceptible wait. This is a
+/// robustness guard against the apex, NOT a cooldown, so it stays a constant rather than feel
+/// tuning. Reading stillness instead of a grounded flag is what keeps complex terrain from ever
+/// stranding the player without a jump.
+pub const JUMP_RESET_DWELL: f32 = 1.5 * SIM_DT;
 
 /// The placeholder ellipsoid's flat base color (linear RGB): a warm signal orange, distinct from
 /// every surface-tag color the terrain and prefabs use.
@@ -83,17 +90,15 @@ mod tests {
     }
 
     #[test]
-    fn the_step_height_is_a_shin_not_a_climb() {
-        // Zero would retire the policy; at or above half the body the "step" would swallow the
-        // crates the demo treats as obstacles, and a step should never substitute for a jump. (That
-        // a step stays under the jump's apex is pinned by `Tuning::validate`, since the apex is feel
-        // tuning now.)
-        assert!(STEP_HEIGHT > 0.0);
-        assert!(STEP_HEIGHT < PLAYER_HEIGHT * 0.5, "a step is climbed by the feet, not the body");
+    fn the_spawn_is_above_the_ground() {
+        assert!(SPAWN_HEIGHT > 0.0);
     }
 
     #[test]
-    fn the_spawn_is_above_the_ground() {
-        assert!(SPAWN_HEIGHT > 0.0);
+    fn the_stillness_threshold_is_a_small_positive_margin() {
+        // Positive so a true rest (vertical velocity pinned to zero) registers, and well under the
+        // run speed so it is unmistakably a vertical-only "barely moving" test.
+        assert!(STILL_VY > 0.0);
+        assert!(STILL_VY < 1.0, "the stillness margin should be a sliver, not a real speed");
     }
 }

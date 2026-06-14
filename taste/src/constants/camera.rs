@@ -1,5 +1,6 @@
-//! Camera constants the build decides: the spring-arm probe, the framing offsets, the occlusion
-//! fade, the look-input device policy (inversion and deadzone), and the orbit/projection limits.
+//! Camera constants the build decides: the spring-arm probe, the arm clamp-in speed, the framing
+//! offsets, the occlusion fade, the look-input device policy (inversion and deadzone), and the
+//! orbit/projection limits.
 //!
 //! The camera's FEEL - the boom length, the tracking and arm half-lives, the look-ahead lead, and
 //! the per-device look sensitivities - moved to `crate::tuning`, the hot-reloadable feel record,
@@ -24,6 +25,14 @@ pub const CAMERA_TARGET_LIFT: f32 = 0.35;
 
 /// Minimum height the camera keeps above the terrain surface under it, in metres.
 pub const CAMERA_TERRAIN_MARGIN: f32 = 0.4;
+
+/// Half-life of the arm pulling IN toward an obstruction's clearance, in seconds: short, so backing
+/// the camera into a prefab reads as a swift move rather than a hard snap, yet still eased over a
+/// few frames (the occlusion fade covers the brief overlap while the arm closes). Recovery back OUT
+/// uses the slow `Tuning::camera_arm_recover` instead - an obstruction is a fact to clear quickly,
+/// the boom drifting back out is the gentle part. Build-fixed: it shapes how the clamp resolves, not
+/// a framing verdict, so it stays a constant.
+pub const CAMERA_ARM_CLAMP: f32 = 0.08;
 
 /// Opacity an occluding prefab fades toward while it crosses the eye-to-anchor segment: low enough
 /// that the player reads through it, high enough that the prefab still reads as present rather
@@ -110,5 +119,12 @@ mod tests {
         // is a feel relationship pinned by `Tuning::validate` now.
         assert!(CAMERA_PROBE_RADIUS > 0.0);
         assert!(CAMERA_TERRAIN_MARGIN > 0.0);
+    }
+
+    #[test]
+    fn the_arm_clamp_in_is_a_real_half_life() {
+        // A live, positive half-life so the clamp-in eases over a few frames rather than snapping
+        // (zero) or never resolving.
+        assert!(CAMERA_ARM_CLAMP > 0.0);
     }
 }
