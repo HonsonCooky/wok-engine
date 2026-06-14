@@ -1,8 +1,9 @@
 //! Camera input: the frame's raw input snapshot mapped to the fly camera's movement and look.
 //!
-//! The vim home row drives planar movement, Ctrl reroutes it to a world-vertical elevator, and the
-//! right mouse button turns raw motion into look - each gated by egui's focus claims so the same
-//! physical input never drives the UI and the camera at once (`crate::input` derives those flags).
+//! WASD drives planar movement, Q/E a world-vertical elevator, and the right mouse button turns raw
+//! motion into look - each gated by egui's focus claims so the same physical input never drives the
+//! UI and the camera at once (`crate::input` derives those flags). Holding Ctrl suppresses movement,
+//! so a command chord like Ctrl+S never also flies the camera.
 
 use glam::Vec2;
 use wok_platform::input::InputState;
@@ -11,19 +12,21 @@ use wok_platform::winit::keyboard::{Key, NamedKey};
 
 use crate::camera::CameraInput;
 
-/// Map the frame's raw input snapshot to the camera's input. Movement is the vim home row: with
-/// Ctrl up, f/d drive forward/back and g/s strafe right/left; with Ctrl down the same f/d become
-/// a world-vertical elevator (f up, d down) and planar movement is suppressed, so a command chord
-/// like Ctrl+S never also drives the camera. Holding the right mouse button turns raw mouse
-/// motion into look, scroll adjusts speed - except for whatever egui claimed: pointer input
-/// (look, scroll) stops when the cursor is over the UI, movement keys stop when a field has
-/// keyboard focus.
+/// Map the frame's raw input snapshot to the camera's input. Movement is WASD plus a Q/E vertical
+/// elevator (E up, Q down); holding Ctrl suppresses all movement, so a command chord like Ctrl+S
+/// saves and Ctrl+Z undoes without also flying the camera. Holding the right mouse button turns raw
+/// mouse motion into look, scroll adjusts speed - except for whatever egui claimed: pointer input
+/// (look, scroll) stops when the cursor is over the UI, movement keys stop when a field has keyboard
+/// focus.
 pub fn camera_input(input: &InputState, pointer_free: bool, keys_free: bool) -> CameraInput {
     /// Mouse-look sensitivity, radians per pixel of raw motion.
     const LOOK_SENSITIVITY: f32 = 0.0035;
 
+    // Movement is suppressed when a field has focus (`keys_free`) or a command chord is held (Ctrl),
+    // so a chord like Ctrl+S saves and Ctrl+Z undoes without also flying the camera.
+    let move_free = keys_free && !input.key_held(NamedKey::Control);
     let axis = |pos: char, neg: char| {
-        if !keys_free {
+        if !move_free {
             return 0.0;
         }
         f32::from(char_held(input, pos)) - f32::from(char_held(input, neg))
@@ -33,13 +36,10 @@ pub fn camera_input(input: &InputState, pointer_free: bool, keys_free: bool) -> 
     } else {
         Vec2::ZERO
     };
-    // Ctrl reroutes the row to a world-vertical elevator and suppresses planar movement, so a
-    // command chord (Ctrl+S, Ctrl+Z) never also flies the camera.
-    let ctrl = input.key_held(NamedKey::Control);
     CameraInput {
-        move_forward: if ctrl { 0.0 } else { axis('f', 'd') },
-        move_right: if ctrl { 0.0 } else { axis('g', 's') },
-        move_up: if ctrl { axis('f', 'd') } else { 0.0 },
+        move_forward: axis('w', 's'),
+        move_right: axis('d', 'a'),
+        move_up: axis('e', 'q'),
         look_delta,
         speed_steps: if pointer_free { input.scroll_delta.1 } else { 0.0 },
     }
@@ -77,42 +77,44 @@ mod tests {
     }
 
     #[test]
-    fn home_row_drives_planar_movement_with_no_vertical() {
-        // f/d forward/back, g/s right/left; the bare row never rises or sinks, and scroll still
+    fn wasd_drives_planar_movement_with_no_vertical() {
+        // W/S forward/back, A/D left/right; the bare cluster never rises or sinks, and scroll still
         // sets fly speed.
-        let fwd_right = camera_input(&input_with(&["f", "g"]), true, true);
+        let fwd_right = camera_input(&input_with(&["w", "d"]), true, true);
         assert_eq!(fwd_right.move_forward, 1.0);
         assert_eq!(fwd_right.move_right, 1.0);
         assert_eq!(fwd_right.move_up, 0.0);
         assert_eq!(fwd_right.speed_steps, 2.0);
 
-        let back_left = camera_input(&input_with(&["d", "s"]), true, true);
+        let back_left = camera_input(&input_with(&["s", "a"]), true, true);
         assert_eq!(back_left.move_forward, -1.0);
         assert_eq!(back_left.move_right, -1.0);
         assert_eq!(back_left.move_up, 0.0);
     }
 
     #[test]
-    fn ctrl_turns_the_row_into_a_vertical_elevator_and_suppresses_planar() {
-        // Ctrl+f ascends; the planar keys held alongside it (here g) are suppressed, so a command
-        // chord never also drives the camera.
-        let mut up = input_with(&["f", "g"]);
-        up.keys_held.insert(Key::Named(NamedKey::Control));
-        let up = camera_input(&up, true, true);
-        assert_eq!(up.move_up, 1.0, "Ctrl+f ascends");
-        assert_eq!(up.move_forward, 0.0);
-        assert_eq!(up.move_right, 0.0, "Ctrl suppresses planar even with g held");
+    fn q_and_e_drive_the_vertical_elevator() {
+        assert_eq!(camera_input(&input_with(&["e"]), true, true).move_up, 1.0, "E ascends");
+        assert_eq!(camera_input(&input_with(&["q"]), true, true).move_up, -1.0, "Q descends");
+    }
 
-        let mut down = input_with(&["d"]);
-        down.keys_held.insert(Key::Named(NamedKey::Control));
-        assert_eq!(camera_input(&down, true, true).move_up, -1.0, "Ctrl+d descends");
+    #[test]
+    fn ctrl_suppresses_movement_so_a_command_chord_never_flies() {
+        // A command chord (Ctrl+S save, Ctrl+Z undo) must not also drive the camera, so every
+        // movement key is suppressed while Ctrl is held - planar and vertical alike.
+        let mut held = input_with(&["w", "d", "e"]);
+        held.keys_held.insert(Key::Named(NamedKey::Control));
+        let c = camera_input(&held, true, true);
+        assert_eq!(c.move_forward, 0.0);
+        assert_eq!(c.move_right, 0.0);
+        assert_eq!(c.move_up, 0.0, "Ctrl suppresses the vertical keys too");
     }
 
     #[test]
     fn opposed_keys_cancel_and_shifted_keys_still_count() {
-        // f and d are the forward/back pair; held together they cancel, and a shifted F still
+        // W and S are the forward/back pair; held together they cancel, and a shifted W still
         // counts (char matching is case-insensitive).
-        let input = input_with(&["F", "d"]);
+        let input = input_with(&["W", "s"]);
         assert_eq!(camera_input(&input, true, true).move_forward, 0.0);
     }
 
@@ -129,7 +131,7 @@ mod tests {
 
     #[test]
     fn egui_focus_suppresses_exactly_its_share_of_the_input() {
-        let mut input = input_with(&["f", "g"]);
+        let mut input = input_with(&["w", "d"]);
         input.mouse_buttons_held.insert(MouseButton::Right);
 
         // Pointer over the UI: no look, no speed scroll; movement keys still work.

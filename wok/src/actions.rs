@@ -9,7 +9,6 @@
 
 use crate::camera;
 use crate::app::EditorApp;
-use crate::orbit::Orbit;
 use crate::panels::Action;
 use crate::sync;
 
@@ -70,12 +69,11 @@ impl EditorApp {
                 }
             }
             Action::Frame(sel) => {
+                // Frames the free-fly camera (the double-click "take me to it"). In object mode the
+                // camera is locked to the selection and re-derived from the orbit each frame, so this
+                // set is harmless there - the orbit step keeps the camera on the selection.
                 if let Some(bounds) = self.model.world_bounds(sel) {
                     self.camera = camera::frame(&self.camera, bounds.min, bounds.max);
-                    // Keep the object-mode orbit consistent with this framing, so an immediate
-                    // toggle to object mode (or the same-frame auto-frame) holds this pose instead
-                    // of snapping back to a stale orbit.
-                    self.orbit = Orbit::aiming(&self.camera, (bounds.min + bounds.max) * 0.5);
                 }
             }
             Action::Save => match sync::save(&mut self.model, &self.paths) {

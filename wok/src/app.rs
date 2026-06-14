@@ -23,14 +23,13 @@ use wok_platform::winit::event::WindowEvent;
 use wok_platform::{App, FrameCtx, Platform};
 use wok_scene::Watcher;
 
-use crate::camera::{self, FlyCamera};
+use crate::camera::FlyCamera;
 use crate::content::{ContentPaths, LoadedContent};
 use crate::input;
 use crate::mode::Mode;
-use crate::model::{CHUNK_SIZE_M, EditorModel, chunk_at, chunk_origin};
+use crate::model::{CHUNK_SIZE_M, EditorModel, chunk_origin};
 use crate::orbit::{self, Orbit};
 use crate::panels::{self, Stats, UiState};
-use crate::pick;
 use crate::reload;
 use crate::render::Gpu;
 use crate::selection::SelectionSet;
@@ -44,8 +43,9 @@ pub struct EditorApp {
     /// The desired object-mode orbit (boom angles + arm length). The source of truth for the camera
     /// in object mode; stale and ignored in free-fly (`crate::orbit`).
     pub(crate) orbit: Orbit,
-    /// The selection the object-mode camera last framed. When the live selection differs the camera
-    /// re-frames; tracking it makes the auto-frame fire once per selection change, not every frame.
+    /// The selection the object-mode camera is locked onto; empty means not locked. The camera
+    /// frames only when it locks on from empty - so switching between objects keeps the zoom and
+    /// only re-centres - and the lock is cleared in free-fly, so entering object mode re-locks.
     framed_selection: SelectionSet,
     pub(crate) ui: UiState,
     pub(crate) size: (u32, u32),
@@ -97,52 +97,27 @@ impl EditorApp {
     }
 
     /// Advance the camera one frame, modal on the interaction mode. Free-fly flies; object mode
-    /// locks to the selection - it re-frames when the selection changes, then orbits the centroid
-    /// (right-drag turns, scroll zooms), springs the boom clear of the other placements, and clamps
-    /// the camera above the terrain. With nothing selected, object mode holds the last pose. Runs
-    /// after input is applied, so it sees this frame's final selection and mode.
+    /// locks to the selection - it frames the set when it first locks on (from an empty selection),
+    /// then orbits the centroid (right-drag turns, scroll zooms) at the set distance, holding the
+    /// last pose when nothing is selected. Runs after input is applied, so it sees this frame's
+    /// final selection and mode.
     fn advance_camera(&mut self, input: &InputState, pointer_free: bool, keys_free: bool, dt: f32) {
         let nav = input::camera_input(input, pointer_free, keys_free);
         let pivot = self.model.selection_pivot();
 
-        // Auto-frame on a selection change (object mode only): a fresh orbit from the new bounds.
-        // In free-fly the framed marker is left stale, so entering object mode frames the selection.
-        if self.ui.mode == Mode::Object && self.model.selection != self.framed_selection {
-            if let (Some(bounds), Some(pivot)) = (self.model.selection_bounds(), pivot) {
+        // Frame only when the object-mode camera first locks on (from an empty selection); switching
+        // between objects keeps the orbit's distance and angles, re-centring on the new pivot on its
+        // own. In free-fly the lock is left cleared, so entering object mode frames the selection.
+        if self.ui.mode == Mode::Object {
+            if self.framed_selection.is_empty()
+                && let (Some(bounds), Some(pivot)) = (self.model.selection_bounds(), pivot)
+            {
                 self.orbit = Orbit::framing(&self.camera, bounds, pivot);
             }
             self.framed_selection = self.model.selection.clone();
         }
 
-        let statics = if self.ui.mode == Mode::Object && pivot.is_some() {
-            pick::camera_statics(&self.model)
-        } else {
-            Vec::new()
-        };
-        let mut cam = orbit::advance(self.ui.mode, &self.camera, &mut self.orbit, &nav, dt, pivot, &statics);
-
-        // Object mode's terrain floor: lift the camera above the ground under it, then re-aim at the
-        // pivot so it keeps looking at the selection from the lifted spot.
-        if self.ui.mode == Mode::Object
-            && let Some(pivot) = pivot
-        {
-            cam.position = self.clamp_to_terrain(cam.position);
-            let (yaw, pitch) = camera::look_at(cam.position, pivot);
-            cam = FlyCamera { yaw, pitch, ..cam };
-        }
-        self.camera = cam;
-    }
-
-    /// Lift a world-space camera position to sit a small margin above the terrain under it (object
-    /// mode's vertical clamp), mapping through the chunk-local frame wok-physics expects. A point
-    /// over a chunk with no heightmap is returned unchanged.
-    fn clamp_to_terrain(&self, pos: Vec3) -> Vec3 {
-        /// Clearance the orbit camera keeps above the ground, metres.
-        const MARGIN: f32 = 0.5;
-        let coord = chunk_at(pos);
-        let Some(heightmap) = self.model.heightmaps.get(&coord) else { return pos };
-        let origin = chunk_origin(coord);
-        wok_physics::terrain_floor(pos - origin, heightmap, MARGIN) + origin
+        self.camera = orbit::advance(self.ui.mode, &self.camera, &mut self.orbit, &nav, dt, pivot);
     }
 
     /// Keep the window title showing the scene name and the unsaved-changes indicator.

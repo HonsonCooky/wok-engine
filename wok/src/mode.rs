@@ -6,8 +6,8 @@
 //!
 //! - [`Mode::Object`] (the default): the camera locks to and orbits the selection, and the home row
 //!   operates on it (the object verbs are the next slice; the row is inert for now).
-//! - [`Mode::FreeFly`]: a first-person fly to get around, where the home row drives the camera and
-//!   the mouse looks - today's camera, now gated behind this mode.
+//! - [`Mode::FreeFly`]: a first-person fly to get around, where WASD flies the camera and the mouse
+//!   looks - today's camera, now gated behind this mode.
 //!
 //! Only the camera and the home-row keys are modal; mouse selection (click, Ctrl+click, marquee,
 //! drag-to-reposition) works the same in both. The mode is interaction state, never authored data:
@@ -21,8 +21,8 @@ pub enum Mode {
     /// and the home row will act on it (next slice). The editor's resting state.
     #[default]
     Object,
-    /// Camera-centric free flight. The home row flies and the mouse looks, to get around; toggled
-    /// back to [`Mode::Object`] when the roam is done.
+    /// Camera-centric free flight. WASD flies and the mouse looks, to get around; toggled back to
+    /// [`Mode::Object`] when the roam is done.
     FreeFly,
 }
 
