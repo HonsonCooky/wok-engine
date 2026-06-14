@@ -39,6 +39,7 @@ mod pick;
 mod place;
 mod reload;
 mod sample;
+mod selection;
 mod status;
 mod sync;
 mod theme;

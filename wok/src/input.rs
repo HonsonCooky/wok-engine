@@ -101,7 +101,7 @@ pub fn handle(
         }
     }
     if keys_free && input.key_pressed(NamedKey::Delete)
-        && let Some(sel) = model.selection
+        && let Some(sel) = model.selection.primary()
     {
         actions.push(Action::Delete(sel));
     }
@@ -143,12 +143,11 @@ pub fn handle(
         } else {
             let picked =
                 pick::pick(&model.chunks, &model.prefabs, &model.heightmaps, camera.position, dir, far);
-            if picked.is_some() && picked == model.selection {
-                // A press on the already-selected placement arms a drag instead of re-picking:
+            if let Some(sel) = picked.filter(|&sel| model.selection.contains(sel)) {
+                // A press on an already-selected placement arms a drag instead of re-picking:
                 // past the slop it moves the placement; released under it, it was a click on
                 // what is already selected, which changes nothing.
-                ui.drag =
-                    picked.map(|sel| PlacementDrag { sel, press_px: cursor, active: false, anchor: None });
+                ui.drag = Some(PlacementDrag { sel, press_px: cursor, active: false, anchor: None });
             } else {
                 actions.push(Action::Select(picked));
                 // A viewport selection brings its tree row into view.
@@ -163,7 +162,7 @@ pub fn handle(
     // the cursor crosses a panel, exactly as a panel widget's own drag would over the viewport.
     if let Some(mut drag) = ui.drag.take()
         && input.mouse_held(MouseButton::Left)
-        && model.selection == Some(drag.sel)
+        && model.selection.contains(drag.sel)
     {
         if let Some(dir) = ray(camera) {
             drag_selected(input, camera.position, dir, far, model, &mut drag, cursor, actions);
@@ -402,7 +401,7 @@ mod tests {
     fn delete_emits_delete_of_the_current_selection() {
         let mut model = sample_model();
         let sel = Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(2) };
-        model.selection = Some(sel);
+        model.selection.replace(sel);
         let mut ui = UiState::default();
         let mut input = blank_input();
         input.keys_pressed.insert(Key::Named(NamedKey::Delete));
@@ -412,7 +411,7 @@ mod tests {
     #[test]
     fn escape_with_nothing_to_cancel_emits_deselect() {
         let mut model = sample_model();
-        model.selection = Some(Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(0) });
+        model.selection.replace(Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(0) });
         let mut ui = UiState::default();
         let mut input = blank_input();
         input.keys_pressed.insert(Key::Named(NamedKey::Escape));
@@ -503,7 +502,7 @@ mod tests {
                 .expect("a boulder in the sample");
             Selection { coord, id: boulder.instance_id }
         };
-        model.selection = Some(sel);
+        model.selection.replace(sel);
         // An already-active drag anchored at a zero grab offset: the dragged spot is the cursor's
         // terrain hit itself. Aiming at the chunk centre puts that hit well away from the boulder's
         // authored position, so the frame moves it and must emit an Edit.

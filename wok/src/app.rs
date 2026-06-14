@@ -130,7 +130,8 @@ impl EditorApp {
         // nothing. Doing it here covers both the UI and the input-routing apply passes.
         self.model.checkpoint(&action);
         match action {
-            Action::Select(sel) => self.model.selection = sel,
+            Action::Select(Some(sel)) => self.model.selection.replace(sel),
+            Action::Select(None) => self.model.selection.clear(),
             Action::Edit { sel, transform, state } => {
                 if let Err(err) = self.model.edit_placement(sel, transform, state) {
                     eprintln!("wok: edit failed: {err}");
@@ -179,15 +180,18 @@ impl EditorApp {
         }
     }
 
-    /// The selected placement's classified colliders as an x-ray cage.
+    /// Each selected placement's classified colliders as an x-ray cage. The set holds at most one
+    /// item today, so this draws the single selection exactly as before; iterating means the
+    /// multi-select brief cages every member for free.
     fn selection_lines(&self) -> Vec<LineSegment> {
         let mut out = Vec::new();
-        if let Some(sel) = self.model.selection
-            && let Some(placement) = self.model.placement(sel)
-            && let Some(prefab) = self.model.prefabs.get(&placement.prefab)
-        {
-            for collider in pick::placement_colliders(prefab, placement, chunk_origin(sel.coord)) {
-                lines::collider_lines(&collider, lines::SELECTION_COLOR, &mut out);
+        for sel in self.model.selection.iter() {
+            if let Some(placement) = self.model.placement(sel)
+                && let Some(prefab) = self.model.prefabs.get(&placement.prefab)
+            {
+                for collider in pick::placement_colliders(prefab, placement, chunk_origin(sel.coord)) {
+                    lines::collider_lines(&collider, lines::SELECTION_COLOR, &mut out);
+                }
             }
         }
         out

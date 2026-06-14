@@ -58,7 +58,7 @@ pub fn page(ui: &mut egui::Ui, model: &EditorModel, ui_state: &mut UiState, acti
         for node in outline::tree(model) {
             // A viewport selection must be visible even if its chunk was folded away.
             let force_open = ui_state.scroll_to_selection
-                && model.selection.is_some_and(|sel| sel.coord == node.coord);
+                && model.selection.primary().is_some_and(|sel| sel.coord == node.coord);
             if force_open {
                 ui_state.collapsed.remove(&node.coord);
             }
@@ -162,7 +162,7 @@ fn placement_row(
     }
 
     let (rect, response) = row_alloc(ui, Sense::click());
-    let selected = model.selection == Some(sel);
+    let selected = model.selection.contains(sel);
     row_fill(ui, rect, &response, selected);
 
     // The selected row's marks take the selection foreground; the metadata stays dim either way.

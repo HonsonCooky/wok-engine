@@ -24,7 +24,7 @@ use crate::panels::Action;
 /// Whether the details window exists this frame: a selection that still resolves to a placement.
 /// Pure, so the panel's visibility rule is testable without a window.
 pub fn visible(model: &EditorModel) -> bool {
-    model.selection.is_some_and(|sel| model.placement(sel).is_some())
+    model.selection.primary().is_some_and(|sel| model.placement(sel).is_some())
 }
 
 /// Build the details window (or nothing, per [`visible`]).
@@ -32,7 +32,7 @@ pub fn window(ctx: &egui::Context, model: &EditorModel, actions: &mut Vec<Action
     if !visible(model) {
         return;
     }
-    let Some(sel) = model.selection else { return };
+    let Some(sel) = model.selection.primary() else { return };
     let Some(placement) = model.placement(sel) else { return };
     egui::Window::new("wok_details")
         .title_bar(false)
@@ -203,7 +203,7 @@ mod tests {
         assert!(!visible(&model), "no selection, no panel");
 
         let sel = Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(3) };
-        model.selection = Some(sel);
+        model.selection.replace(sel);
         assert!(visible(&model), "a live selection shows the panel");
 
         model.delete(sel).unwrap();
@@ -211,7 +211,7 @@ mod tests {
 
         // A selection dangling at a placement that no longer exists (set before validation ran)
         // must not show a panel either.
-        model.selection = Some(Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(999) });
+        model.selection.replace(Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(999) });
         assert!(!visible(&model), "a dangling selection shows nothing");
     }
 

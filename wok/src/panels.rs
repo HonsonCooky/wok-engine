@@ -114,7 +114,7 @@ pub fn ui(
 /// selection vanishing.
 fn viewport_menu(ctx: &egui::Context, model: &EditorModel, ui_state: &mut UiState, actions: &mut Vec<Action>) {
     let Some((px, py)) = ui_state.context_menu else { return };
-    let Some(sel) = model.selection else {
+    let Some(sel) = model.selection.primary() else {
         ui_state.context_menu = None;
         return;
     };

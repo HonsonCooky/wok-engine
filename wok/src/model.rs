@@ -29,6 +29,7 @@ use wok_scene::{
 
 use crate::history::History;
 use crate::place;
+use crate::selection::SelectionSet;
 
 /// Chunk side in metres, derived from the heightmap grid (128 one-metre cells; the 129th sample
 /// is the shared edge). wok-scene deliberately does not bake the chunk size into ChunkCoord.
@@ -99,7 +100,7 @@ pub struct EditorModel {
     /// Absent entry = chunk without terrain.
     pub heightmaps: BTreeMap<ChunkCoord, Heightmap>,
     pub store: ChunkStore,
-    pub selection: Option<Selection>,
+    pub selection: SelectionSet,
     pub dirty_chunks: BTreeSet<ChunkCoord>,
     /// The manifest changed (the instance-id counter advances on place).
     pub scene_dirty: bool,
@@ -120,7 +121,7 @@ impl EditorModel {
             chunks: BTreeMap::new(),
             heightmaps: BTreeMap::new(),
             store: ChunkStore::new(),
-            selection: None,
+            selection: SelectionSet::new(),
             dirty_chunks: BTreeSet::new(),
             scene_dirty: false,
             history: History::default(),
@@ -153,14 +154,13 @@ impl EditorModel {
             .find(|p| p.instance_id == sel.id)
     }
 
-    /// Drop the selection if its placement no longer exists (deleted, or removed by an external
-    /// reload). Call after any operation that can remove placements.
+    /// Prune any selected placement that no longer resolves (deleted, or removed by an external
+    /// reload), keeping the survivors in order. Call after any operation that can remove
+    /// placements. Taking the set out first lets the resolve check borrow `self` while it filters.
     pub fn validate_selection(&mut self) {
-        if let Some(sel) = self.selection
-            && self.placement(sel).is_none()
-        {
-            self.selection = None;
-        }
+        let mut selection = std::mem::take(&mut self.selection);
+        selection.retain(|&sel| self.placement(sel).is_some());
+        self.selection = selection;
     }
 
     /// Re-transform one chunk from its authored form: release the old runtime arrays and load
@@ -231,7 +231,7 @@ impl EditorModel {
         self.retransform(coord)?;
 
         let selection = Selection { coord, id };
-        self.selection = Some(selection);
+        self.selection.replace(selection);
         Ok(Some(selection))
     }
 
@@ -340,11 +340,28 @@ mod tests {
     fn deleting_the_selected_placement_clears_the_selection() {
         let mut model = sample_model();
         let sel = Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(0) };
-        model.selection = Some(sel);
+        model.selection.replace(sel);
         assert!(model.delete(sel).unwrap());
-        assert_eq!(model.selection, None);
+        assert!(model.selection.is_empty());
         assert!(model.placement(sel).is_none());
         assert_eq!(model.placement_count(), 7);
+    }
+
+    #[test]
+    fn delete_prunes_only_the_deleted_member_from_the_selection_set() {
+        // The set keeps its other members: deleting one selected placement prunes just that one and
+        // hands primary to what remains, rather than clearing the whole selection.
+        let mut model = sample_model();
+        let coord = ChunkCoord::new(0, 0);
+        let kept = Selection { coord, id: InstanceId(0) };
+        let doomed = Selection { coord, id: InstanceId(2) };
+        model.selection.toggle(kept);
+        model.selection.toggle(doomed);
+
+        assert!(model.delete(doomed).unwrap());
+        assert!(!model.selection.contains(doomed), "the deleted placement leaves the set");
+        assert!(model.selection.contains(kept), "the surviving placement stays selected");
+        assert_eq!(model.selection.primary(), Some(kept), "primary falls back to what remains");
     }
 
     #[test]

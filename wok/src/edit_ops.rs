@@ -38,7 +38,7 @@ impl EditorModel {
         self.retransform(sel.coord)?;
 
         let selection = Selection { coord: sel.coord, id };
-        self.selection = Some(selection);
+        self.selection.replace(selection);
         Ok(Some(selection))
     }
 
@@ -119,7 +119,7 @@ mod tests {
         let copy_sel = model.duplicate(sel).unwrap().expect("duplicated");
         assert_eq!(copy_sel.id, InstanceId(next), "the copy takes the next monotonic id");
         assert_eq!(model.scene.next_instance_id.0, next + 1, "the counter advanced");
-        assert_eq!(model.selection, Some(copy_sel), "the copy is selected");
+        assert_eq!(model.selection.primary(), Some(copy_sel), "the copy is selected");
 
         let copy = model.placement(copy_sel).unwrap();
         assert_eq!(

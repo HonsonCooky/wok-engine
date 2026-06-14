@@ -21,6 +21,7 @@ use wok_scene::{Chunk, ChunkCoord, Scene};
 
 use crate::model::{EditorModel, Selection};
 use crate::panels::Action;
+use crate::selection::SelectionSet;
 
 /// One authored-state snapshot: what a mutating action is checkpointed against, and what undo or
 /// redo swaps back. Private to the history mechanism - only the model methods below build and
@@ -28,7 +29,7 @@ use crate::panels::Action;
 struct Snapshot {
     scene: Scene,
     chunks: BTreeMap<ChunkCoord, Chunk>,
-    selection: Option<Selection>,
+    selection: SelectionSet,
 }
 
 /// The undo and redo stacks plus the open-edit-run marker that drives coalescing. Owned by
@@ -114,7 +115,7 @@ impl EditorModel {
         Snapshot {
             scene: self.scene.clone(),
             chunks: self.chunks.clone(),
-            selection: self.selection,
+            selection: self.selection.clone(),
         }
     }
 
@@ -167,23 +168,23 @@ mod tests {
         let coord = ChunkCoord::new(0, 0);
         let count = model.placement_count();
         // A prior selection the undo must restore.
-        let before = Some(Selection { coord, id: InstanceId(3) });
-        model.selection = before;
+        let before = Selection { coord, id: InstanceId(3) };
+        model.selection.replace(before);
 
         let place = Action::Place { prefab: PrefabRef::new("crate"), point: interior(40.0, 40.0) };
         model.checkpoint(&place);
         let placed = model.place(&PrefabRef::new("crate"), interior(40.0, 40.0)).unwrap().expect("placed");
         assert_eq!(model.placement_count(), count + 1);
-        assert_eq!(model.selection, Some(placed));
+        assert_eq!(model.selection.primary(), Some(placed));
 
         assert!(model.undo().unwrap(), "undo reports it acted");
         assert_eq!(model.placement_count(), count, "the placement is gone");
         assert!(model.placement(placed).is_none(), "gone by id, too");
-        assert_eq!(model.selection, before, "the pre-place selection is restored");
+        assert_eq!(model.selection.primary(), Some(before), "the pre-place selection is restored");
 
         assert!(model.redo().unwrap(), "redo reports it acted");
         assert_eq!(model.placement_count(), count + 1, "the placement is back");
-        assert_eq!(model.selection, Some(placed), "and selected again, same id");
+        assert_eq!(model.selection.primary(), Some(placed), "and selected again, same id");
     }
 
     #[test]
@@ -191,19 +192,19 @@ mod tests {
         let mut model = sample_model();
         let coord = ChunkCoord::new(0, 0);
         let sel = Selection { coord, id: InstanceId(2) };
-        model.selection = Some(sel);
+        model.selection.replace(sel);
         let count = model.placement_count();
         let original = model.placement(sel).unwrap().clone();
 
         model.checkpoint(&Action::Delete(sel));
         assert!(model.delete(sel).unwrap());
         assert_eq!(model.placement_count(), count - 1);
-        assert_eq!(model.selection, None, "delete clears the dangling selection");
+        assert!(model.selection.is_empty(), "delete clears the dangling selection");
 
         assert!(model.undo().unwrap());
         assert_eq!(model.placement_count(), count, "the placement is back");
         assert_eq!(model.placement(sel), Some(&original), "and identical to before");
-        assert_eq!(model.selection, Some(sel), "the snapshot held the selection, so it reselects");
+        assert_eq!(model.selection.primary(), Some(sel), "the snapshot held the selection, so it reselects");
 
         assert!(model.redo().unwrap());
         assert_eq!(model.placement_count(), count - 1, "deleted again");

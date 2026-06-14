@@ -167,7 +167,7 @@ mod tests {
         let on_disk = on_disk.map(|(c, _)| (c, model.heightmaps.get(&coord).cloned()));
         let outcome = apply_external_chunk(&mut model, coord, on_disk).unwrap();
         assert_eq!(outcome, ChunkOutcome::Unchanged);
-        assert_eq!(model.selection, Some(sel), "selection survives the echo");
+        assert_eq!(model.selection.primary(), Some(sel), "selection survives the echo");
         assert!(!model.is_dirty(), "clean stays clean: no reload loop");
 
         let scene = wok_scene::load_scene(paths.scene()).unwrap();
@@ -183,13 +183,13 @@ mod tests {
         let mut external = model.chunks.get(&coord).unwrap().clone();
         external.placements.truncate(3);
         let heightmap = model.heightmaps.get(&coord).cloned();
-        model.selection = Some(Selection { coord, id: InstanceId(7) });
+        model.selection.replace(Selection { coord, id: InstanceId(7) });
 
         let outcome = apply_external_chunk(&mut model, coord, Some((external, heightmap))).unwrap();
         assert_eq!(outcome, ChunkOutcome::Updated);
         assert_eq!(model.placement_count(), 3);
         assert_eq!(model.store.get(coord).unwrap().hitboxes.len(), 3, "runtime re-transformed");
-        assert_eq!(model.selection, None, "selection of a vanished placement clears");
+        assert!(model.selection.is_empty(), "selection of a vanished placement clears");
     }
 
     #[test]
