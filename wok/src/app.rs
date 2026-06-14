@@ -31,6 +31,7 @@ use crate::model::{CHUNK_SIZE_M, EditorModel, chunk_origin, scene_bounds};
 use crate::panels::{self, Action, Stats, UiState};
 use crate::pick;
 use crate::reload;
+use crate::sync;
 use crate::theme;
 
 const TERRAIN_COLOR: Vec3 = Vec3::new(0.40, 0.60, 0.35);
@@ -133,6 +134,11 @@ impl EditorApp {
             }
             Action::ArmPlace(prefab) => self.ui.placing = Some(prefab),
             Action::DisarmPlace => self.ui.placing = None,
+            Action::Place { prefab, point } => {
+                if let Err(err) = self.model.place(&prefab, point) {
+                    eprintln!("wok: place failed: {err}");
+                }
+            }
             Action::Duplicate(sel) => match self.model.duplicate(sel) {
                 // The copy is selected by the model; bring its tree row into view.
                 Ok(Some(_)) => self.ui.scroll_to_selection = true,
@@ -152,6 +158,10 @@ impl EditorApp {
                     self.camera = camera::frame(&self.camera, bounds.min, bounds.max);
                 }
             }
+            Action::Save => match sync::save(&mut self.model, &self.paths) {
+                Ok(()) => println!("wok: saved"),
+                Err(err) => eprintln!("wok: save failed: {err}"),
+            },
         }
     }
 
@@ -335,6 +345,10 @@ impl App for EditorApp {
 
         self.camera =
             camera::update(&self.camera, &input::camera_input(&ctx.input, pointer_free, keys_free), ctx.dt);
+        // Input routing reads the model and emits its own actions; they apply in a second pass,
+        // after the UI actions and the camera update, so the established frame order holds and a
+        // selection stays visible to later same-frame reads exactly as before.
+        let mut input_actions = Vec::new();
         input::handle(
             &ctx.input,
             pointer_free,
@@ -342,10 +356,13 @@ impl App for EditorApp {
             &self.camera,
             self.size,
             self.far_plane(),
-            &mut self.model,
+            &self.model,
             &mut self.ui,
-            &self.paths,
+            &mut input_actions,
         );
+        for action in input_actions {
+            self.apply_action(action);
+        }
 
         self.render(ctx, ui_output);
         self.refresh_title(ctx.platform);

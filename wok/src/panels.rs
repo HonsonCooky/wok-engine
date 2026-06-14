@@ -11,6 +11,7 @@
 
 use std::collections::HashSet;
 
+use glam::Vec3;
 use wok_scene::{ChunkCoord, PrefabRef, Transform};
 
 use crate::details;
@@ -54,18 +55,24 @@ pub struct Rename {
     pub take_focus: bool,
 }
 
-/// What the user asked for this frame, applied by the frame loop after the UI runs.
+/// What the user asked for this frame, from the UI surfaces or the viewport input routing, applied
+/// by the frame loop so model state has a single writer.
+#[derive(Debug, PartialEq)]
 pub enum Action {
     Select(Option<Selection>),
     Edit { sel: Selection, transform: Transform, state: Option<String> },
     ArmPlace(PrefabRef),
     DisarmPlace,
+    /// Place the armed prefab at a viewport-resolved terrain point; the model selects the result.
+    Place { prefab: PrefabRef, point: Vec3 },
     Duplicate(Selection),
     /// Commit a rename with the raw edited text; the model normalizes (trims, empty clears).
     Rename { sel: Selection, name: String },
     Delete(Selection),
     /// Frame the fly camera on the placement's bounds.
     Frame(Selection),
+    /// Write every dirty chunk and the manifest to disk through `crate::sync`.
+    Save,
 }
 
 /// Build the whole UI for one frame: status bar first (it spans the window bottom), then the

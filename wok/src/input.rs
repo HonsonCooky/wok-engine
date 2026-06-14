@@ -7,7 +7,10 @@
 //! focus) - so the same physical input never acts in the UI and the viewport at once. The fly
 //! camera keeps right-mouse-hold to look, which leaves the cursor free for the UI by
 //! construction. The left button picks, places, and (on the already-selected placement) drags to
-//! move, with `crate::drag` owning the drag math.
+//! move, with `crate::drag` owning the drag math. Every authored-model change is emitted as an
+//! [`Action`] for the frame loop to apply, never written here, so the loop stays the model's
+//! single writer; only presentation state (place mode, the context menu, the drag) is touched in
+//! place.
 
 use glam::{Vec2, Vec3};
 use wok_platform::input::InputState;
@@ -16,12 +19,10 @@ use wok_platform::winit::keyboard::{Key, NamedKey};
 use wok_scene::Transform;
 
 use crate::camera::{CameraInput, FlyCamera};
-use crate::content::ContentPaths;
 use crate::drag::{DragMode, PlacementDrag, drag_offset, dragged_translation};
 use crate::model::{EditorModel, chunk_origin};
-use crate::panels::UiState;
+use crate::panels::{Action, UiState};
 use crate::pick;
-use crate::sync;
 
 /// Map the frame's raw input snapshot to the camera's input: WASD moves, Q/E sink and rise,
 /// holding the right mouse button turns raw mouse motion into look, scroll adjusts speed -
@@ -56,12 +57,16 @@ pub fn camera_input(input: &InputState, pointer_free: bool, keys_free: bool) -> 
 /// look vs context click) and the left button (placement drag vs pick).
 const CLICK_SLOP_PX: f32 = 4.0;
 
-/// Hotkeys and viewport clicks: Ctrl+S saves, Delete removes the selection, Esc cancels place
-/// mode, then an open context menu, then deselects. A left click places (in place mode) or picks;
-/// a left press on the already-selected placement arms a drag that moves it once it crosses the
-/// slop (Shift moves vertically); a right click (a clean press-release - dragging is camera look)
-/// picks and opens the context menu on what it hit. Ctrl+S deliberately ignores `keys_free`:
-/// saving must work mid-edit in a details field.
+/// Hotkeys and viewport clicks, read against the current model and emitted as [`Action`]s for the
+/// frame loop to apply, so this routing reads model state and never writes it. Ctrl+S emits `Save`,
+/// Delete emits `Delete`, Esc cancels place mode, then an open context menu, then emits
+/// `Select(None)` to deselect. A left click emits `Place` (in place mode) or `Select` on what it
+/// picks; a left press on the already-selected placement arms a drag that emits `Edit` once it
+/// crosses the slop (Shift moves vertically); a right click (a clean press-release - dragging is
+/// camera look) selects and opens the context menu on what it hit. Presentation state - place mode,
+/// the context menu, the right-drag accumulator, the scroll-to flag - is mutated here in place;
+/// only authored model changes go through actions. Ctrl+S deliberately ignores `keys_free`: saving
+/// must work mid-edit in a details field.
 pub fn handle(
     input: &InputState,
     pointer_free: bool,
@@ -69,21 +74,17 @@ pub fn handle(
     camera: &FlyCamera,
     size: (u32, u32),
     far: f32,
-    model: &mut EditorModel,
+    model: &EditorModel,
     ui: &mut UiState,
-    paths: &ContentPaths,
+    actions: &mut Vec<Action>,
 ) {
     if input.key_held(NamedKey::Control) && input.char_pressed('s') {
-        match sync::save(model, paths) {
-            Ok(()) => println!("wok: saved"),
-            Err(err) => eprintln!("wok: save failed: {err}"),
-        }
+        actions.push(Action::Save);
     }
     if keys_free && input.key_pressed(NamedKey::Delete)
         && let Some(sel) = model.selection
-        && let Err(err) = model.delete(sel)
     {
-        eprintln!("wok: delete failed: {err}");
+        actions.push(Action::Delete(sel));
     }
     if keys_free && input.key_pressed(NamedKey::Escape) {
         if ui.placing.is_some() {
@@ -91,7 +92,7 @@ pub fn handle(
         } else if ui.context_menu.is_some() {
             ui.context_menu = None;
         } else {
-            model.selection = None;
+            actions.push(Action::Select(None));
         }
     }
 
@@ -116,11 +117,7 @@ pub fn handle(
         let Some(dir) = ray(camera) else { return };
         if let Some(prefab) = ui.placing.take() {
             match pick::terrain_hit(&model.heightmaps, camera.position, dir, far) {
-                Some(hit) => {
-                    if let Err(err) = model.place(&prefab, hit.point) {
-                        eprintln!("wok: place failed: {err}");
-                    }
-                }
+                Some(hit) => actions.push(Action::Place { prefab, point: hit.point }),
                 // No terrain under the click: stay armed instead of silently dropping the mode.
                 None => ui.placing = Some(prefab),
             }
@@ -134,9 +131,9 @@ pub fn handle(
                 ui.drag =
                     picked.map(|sel| PlacementDrag { sel, press_px: cursor, active: false, anchor: None });
             } else {
-                model.selection = picked;
+                actions.push(Action::Select(picked));
                 // A viewport selection brings its tree row into view.
-                ui.scroll_to_selection = model.selection.is_some();
+                ui.scroll_to_selection = picked.is_some();
             }
         }
     }
@@ -150,7 +147,7 @@ pub fn handle(
         && model.selection == Some(drag.sel)
     {
         if let Some(dir) = ray(camera) {
-            drag_selected(input, camera.position, dir, far, model, &mut drag, cursor);
+            drag_selected(input, camera.position, dir, far, model, &mut drag, cursor, actions);
         }
         ui.drag = Some(drag);
     }
@@ -162,7 +159,7 @@ pub fn handle(
         let Some(dir) = ray(camera) else { return };
         let picked = pick::pick(&model.chunks, &model.prefabs, &model.heightmaps, camera.position, dir, far);
         if picked.is_some() {
-            model.selection = picked;
+            actions.push(Action::Select(picked));
             ui.scroll_to_selection = true;
             ui.context_menu = Some((cursor.x, cursor.y));
         } else {
@@ -172,18 +169,19 @@ pub fn handle(
 }
 
 /// One held frame of a placement drag: enforce the slop, pick the mode by Shift (re-anchoring
-/// whenever the mode is entered, so the placement never jumps to the cursor), and commit the
-/// frame's translation through the model - the same authored-form edit the details panel makes,
-/// so dirty tracking and the unsaved indicator follow for free. A frame whose cursor gives
-/// nothing to track (no terrain under it, a degenerate ray) holds the placement still.
+/// whenever the mode is entered, so the placement never jumps to the cursor), and emit the frame's
+/// translation as an [`Action::Edit`] - the same authored-form edit the details panel makes, so
+/// dirty tracking and the unsaved indicator follow for free. A frame whose cursor gives nothing to
+/// track (no terrain under it, a degenerate ray) holds the placement still.
 fn drag_selected(
     input: &InputState,
     eye: Vec3,
     dir: Vec3,
     far: f32,
-    model: &mut EditorModel,
+    model: &EditorModel,
     drag: &mut PlacementDrag,
     cursor: Vec2,
+    actions: &mut Vec<Action>,
 ) {
     if !drag.active {
         if (cursor - drag.press_px).length() < CLICK_SLOP_PX {
@@ -208,10 +206,8 @@ fn drag_selected(
     else {
         return;
     };
-    if translation != current.translation
-        && let Err(err) = model.edit_placement(drag.sel, Transform { translation, ..current }, state)
-    {
-        eprintln!("wok: drag move failed: {err}");
+    if translation != current.translation {
+        actions.push(Action::Edit { sel: drag.sel, transform: Transform { translation, ..current }, state });
     }
 }
 
@@ -229,6 +225,10 @@ fn char_held(input: &InputState, ch: char) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    use crate::model::Selection;
+    use crate::sample;
+    use wok_scene::{ChunkCoord, InstanceId, PrefabRef};
 
     fn input_with(keys: &[&str]) -> InputState {
         InputState {
@@ -288,5 +288,197 @@ mod tests {
         let typing = camera_input(&input, true, false);
         assert_eq!(typing.move_forward, 0.0);
         assert!(typing.look_delta != Vec2::ZERO);
+    }
+
+    // ---- viewport input emits actions (the single-writer pin) ----
+
+    fn blank_input() -> InputState {
+        InputState {
+            keys_held: HashSet::new(),
+            keys_pressed: HashSet::new(),
+            keys_released: HashSet::new(),
+            mouse_pos: (0.0, 0.0),
+            mouse_delta: (0.0, 0.0),
+            mouse_motion: (0.0, 0.0),
+            mouse_buttons_held: HashSet::new(),
+            mouse_buttons_pressed: HashSet::new(),
+            mouse_buttons_released: HashSet::new(),
+            scroll_delta: (0.0, 0.0),
+            gamepads: vec![],
+        }
+    }
+
+    fn sample_model() -> EditorModel {
+        let content = sample::build();
+        EditorModel::new(
+            content.scene,
+            content.prefabs.into_iter().collect(),
+            vec![(content.chunk, Some(content.heightmap))],
+        )
+        .expect("sample content loads")
+    }
+
+    /// A camera at `eye` looking straight at `target`, so a screen-centre cursor rays exactly along
+    /// that line (the centre-ray-is-forward property `crate::pick` pins). Keep `target` off the
+    /// camera's vertical line: looking along world up is the look-matrix singularity.
+    fn looking_from_at(eye: Vec3, target: Vec3) -> FlyCamera {
+        let d = (target - eye).normalize();
+        FlyCamera { position: eye, yaw: d.x.atan2(-d.z), pitch: d.y.asin(), speed: 16.0 }
+    }
+
+    /// A camera for the keyboard-only cases, where no ray is cast.
+    fn any_camera() -> FlyCamera {
+        FlyCamera { position: Vec3::new(64.0, 40.0, 100.0), yaw: 0.0, pitch: -0.6, speed: 16.0 }
+    }
+
+    /// Run `handle` with the pointer and keys free (egui claims nothing) over an 800x600 viewport,
+    /// returning the actions it emitted. A centred `mouse_pos` then rays along the camera forward.
+    fn emitted(input: &InputState, camera: &FlyCamera, model: &EditorModel, ui: &mut UiState) -> Vec<Action> {
+        let mut actions = Vec::new();
+        handle(input, true, true, camera, (800, 600), 500.0, model, ui, &mut actions);
+        actions
+    }
+
+    /// Screen centre for the viewport `emitted` uses; a centred cursor rays along forward.
+    const CENTER_CURSOR: (f64, f64) = (400.0, 300.0);
+
+    #[test]
+    fn ctrl_s_emits_save() {
+        let model = sample_model();
+        let mut ui = UiState::default();
+        let mut input = blank_input();
+        input.keys_held.insert(Key::Named(NamedKey::Control));
+        input.keys_pressed.insert(Key::Character("s".into()));
+        assert_eq!(emitted(&input, &any_camera(), &model, &mut ui), vec![Action::Save]);
+    }
+
+    #[test]
+    fn delete_emits_delete_of_the_current_selection() {
+        let mut model = sample_model();
+        let sel = Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(2) };
+        model.selection = Some(sel);
+        let mut ui = UiState::default();
+        let mut input = blank_input();
+        input.keys_pressed.insert(Key::Named(NamedKey::Delete));
+        assert_eq!(emitted(&input, &any_camera(), &model, &mut ui), vec![Action::Delete(sel)]);
+    }
+
+    #[test]
+    fn escape_with_nothing_to_cancel_emits_deselect() {
+        let mut model = sample_model();
+        model.selection = Some(Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(0) });
+        let mut ui = UiState::default();
+        let mut input = blank_input();
+        input.keys_pressed.insert(Key::Named(NamedKey::Escape));
+        assert_eq!(emitted(&input, &any_camera(), &model, &mut ui), vec![Action::Select(None)]);
+    }
+
+    #[test]
+    fn escape_in_place_mode_cancels_in_place_without_an_action() {
+        // Place-mode cancel is presentation, not an authored change: it clears UiState and emits
+        // nothing, exactly as before.
+        let model = sample_model();
+        let mut ui = UiState { placing: Some(PrefabRef::new("crate")), ..UiState::default() };
+        let mut input = blank_input();
+        input.keys_pressed.insert(Key::Named(NamedKey::Escape));
+        assert!(emitted(&input, &any_camera(), &model, &mut ui).is_empty());
+        assert!(ui.placing.is_none(), "Esc disarmed place mode");
+    }
+
+    #[test]
+    fn left_click_in_place_mode_over_terrain_emits_place_and_consumes_the_mode() {
+        let model = sample_model();
+        let mut ui = UiState { placing: Some(PrefabRef::new("crate")), ..UiState::default() };
+        // Aim down into the chunk interior: the centre ray meets terrain.
+        let cam = looking_from_at(Vec3::new(64.0, 40.0, 100.0), Vec3::new(64.0, 0.0, 64.0));
+        let mut input = blank_input();
+        input.mouse_pos = CENTER_CURSOR;
+        input.mouse_buttons_pressed.insert(MouseButton::Left);
+
+        let actions = emitted(&input, &cam, &model, &mut ui);
+        assert_eq!(actions.len(), 1, "one click, one place");
+        match &actions[0] {
+            Action::Place { prefab, point } => {
+                assert_eq!(*prefab, PrefabRef::new("crate"));
+                assert!(point.is_finite(), "placed at a real terrain point: {point:?}");
+            }
+            other => panic!("expected Place, got {other:?}"),
+        }
+        assert!(ui.placing.is_none(), "a hit consumes place mode");
+    }
+
+    #[test]
+    fn left_click_in_place_mode_off_terrain_stays_armed_and_emits_nothing() {
+        let model = sample_model();
+        let mut ui = UiState { placing: Some(PrefabRef::new("crate")), ..UiState::default() };
+        // Aim up and away from the loaded chunk: the ray never meets terrain.
+        let cam = looking_from_at(Vec3::new(64.0, 30.0, 64.0), Vec3::new(64.0, 60.0, 30.0));
+        let mut input = blank_input();
+        input.mouse_pos = CENTER_CURSOR;
+        input.mouse_buttons_pressed.insert(MouseButton::Left);
+
+        assert!(emitted(&input, &cam, &model, &mut ui).is_empty(), "no terrain, nothing placed");
+        assert_eq!(ui.placing, Some(PrefabRef::new("crate")), "place mode stays armed on a miss");
+    }
+
+    #[test]
+    fn left_click_on_a_placement_emits_select() {
+        let model = sample_model();
+        // The first pillar (chunk-local 60, 70): aim at its rested world centre from above and to
+        // the south, so the ray meets it before any terrain and no other placement is in the way.
+        let coord = ChunkCoord::new(0, 0);
+        let pillar = model.chunks[&coord]
+            .placements
+            .iter()
+            .find(|p| p.prefab.as_str() == "pillar")
+            .expect("a pillar in the sample");
+        let sel = Selection { coord, id: pillar.instance_id };
+        let target = chunk_origin(coord) + pillar.transform.translation;
+        let cam = looking_from_at(target + Vec3::new(0.0, 30.0, 30.0), target);
+
+        let mut ui = UiState::default();
+        let mut input = blank_input();
+        input.mouse_pos = CENTER_CURSOR;
+        input.mouse_buttons_pressed.insert(MouseButton::Left);
+
+        assert_eq!(emitted(&input, &cam, &model, &mut ui), vec![Action::Select(Some(sel))]);
+        assert!(ui.scroll_to_selection, "a viewport pick brings its tree row into view");
+    }
+
+    #[test]
+    fn an_active_drag_emits_edit_when_the_cursor_moves_the_placement() {
+        let mut model = sample_model();
+        let coord = ChunkCoord::new(0, 0);
+        let sel = {
+            let boulder = model.chunks[&coord]
+                .placements
+                .iter()
+                .find(|p| p.prefab.as_str() == "boulder")
+                .expect("a boulder in the sample");
+            Selection { coord, id: boulder.instance_id }
+        };
+        model.selection = Some(sel);
+        // An already-active drag anchored at a zero grab offset: the dragged spot is the cursor's
+        // terrain hit itself. Aiming at the chunk centre puts that hit well away from the boulder's
+        // authored position, so the frame moves it and must emit an Edit.
+        let drag = PlacementDrag {
+            sel,
+            press_px: Vec2::ZERO,
+            active: true,
+            anchor: Some((DragMode::Terrain, Vec3::ZERO)),
+        };
+        let mut ui = UiState { drag: Some(drag), ..UiState::default() };
+        let cam = looking_from_at(Vec3::new(64.0, 40.0, 100.0), Vec3::new(64.0, 0.0, 64.0));
+        let mut input = blank_input();
+        input.mouse_pos = CENTER_CURSOR;
+        // Held, not pressed: the drag branch advances, the press-only re-pick branch does not.
+        input.mouse_buttons_held.insert(MouseButton::Left);
+
+        let actions = emitted(&input, &cam, &model, &mut ui);
+        assert_eq!(actions.len(), 1, "one moved frame, one edit");
+        match &actions[0] {
+            Action::Edit { sel: edited, .. } => assert_eq!(*edited, sel),
+            other => panic!("expected Edit, got {other:?}"),
+        }
     }
 }
