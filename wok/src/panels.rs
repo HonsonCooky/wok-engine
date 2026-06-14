@@ -73,6 +73,9 @@ pub enum Action {
     Frame(Selection),
     /// Write every dirty chunk and the manifest to disk through `crate::sync`.
     Save,
+    /// Step the model back one checkpoint, or forward one, through `crate::history`.
+    Undo,
+    Redo,
 }
 
 /// Build the whole UI for one frame: status bar first (it spans the window bottom), then the

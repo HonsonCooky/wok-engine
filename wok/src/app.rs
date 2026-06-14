@@ -125,6 +125,10 @@ impl EditorApp {
     }
 
     fn apply_action(&mut self, action: Action) {
+        // The single writer checkpoints before every mutating action; a run of edits to one
+        // selection coalesces into one undo step (`crate::history`), and inert actions record
+        // nothing. Doing it here covers both the UI and the input-routing apply passes.
+        self.model.checkpoint(&action);
         match action {
             Action::Select(sel) => self.model.selection = sel,
             Action::Edit { sel, transform, state } => {
@@ -162,6 +166,16 @@ impl EditorApp {
                 Ok(()) => println!("wok: saved"),
                 Err(err) => eprintln!("wok: save failed: {err}"),
             },
+            Action::Undo => {
+                if let Err(err) = self.model.undo() {
+                    eprintln!("wok: undo failed: {err}");
+                }
+            }
+            Action::Redo => {
+                if let Err(err) = self.model.redo() {
+                    eprintln!("wok: redo failed: {err}");
+                }
+            }
         }
     }
 

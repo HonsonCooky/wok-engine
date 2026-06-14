@@ -27,6 +27,7 @@ mod drag;
 mod edit_ops;
 mod glyphs;
 mod gui;
+mod history;
 mod input;
 mod library;
 mod lines;

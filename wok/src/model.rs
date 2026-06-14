@@ -13,11 +13,10 @@
 //! instance-id counter advances on place); `crate::sync` owns save and external-change
 //! application.
 //!
-//! Undo/redo is deferred, with a criterion rather than a date: the first real authoring session
-//! that loses work to its absence builds it. Every edit here commits immediately with no way back
-//! short of re-authoring, and the predicted first trips are Delete (the placement is gone outright)
-//! and drag-to-move (a slipped drag overwrites the transform it started from). When one of those
-//! actually costs a session work, the command-history layer goes in over these operations.
+//! Undo/redo rides this writer: `crate::history` checkpoints the authored form before each mutating
+//! action and restores it on undo, re-running the same authored -> runtime transform. The first
+//! trips it guards are Delete (the placement is gone outright) and drag-to-move (a slipped drag
+//! overwrites the transform it started from); both are now reversible.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -28,6 +27,7 @@ use wok_scene::{
     Transform,
 };
 
+use crate::history::History;
 use crate::place;
 
 /// Chunk side in metres, derived from the heightmap grid (128 one-metre cells; the 129th sample
@@ -103,6 +103,8 @@ pub struct EditorModel {
     pub dirty_chunks: BTreeSet<ChunkCoord>,
     /// The manifest changed (the instance-id counter advances on place).
     pub scene_dirty: bool,
+    /// Undo/redo, checkpointed before each mutating action at the single writer (`crate::history`).
+    pub(crate) history: History,
 }
 
 impl EditorModel {
@@ -121,6 +123,7 @@ impl EditorModel {
             selection: None,
             dirty_chunks: BTreeSet::new(),
             scene_dirty: false,
+            history: History::default(),
         };
         for (chunk, heightmap) in chunks {
             let coord = chunk.coord;

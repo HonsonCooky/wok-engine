@@ -59,14 +59,16 @@ const CLICK_SLOP_PX: f32 = 4.0;
 
 /// Hotkeys and viewport clicks, read against the current model and emitted as [`Action`]s for the
 /// frame loop to apply, so this routing reads model state and never writes it. Ctrl+S emits `Save`,
-/// Delete emits `Delete`, Esc cancels place mode, then an open context menu, then emits
+/// Ctrl+Z and Ctrl+Shift+Z (or Ctrl+Y) emit `Undo` / `Redo`, Delete emits `Delete`, Esc cancels
+/// place mode, then an open context menu, then emits
 /// `Select(None)` to deselect. A left click emits `Place` (in place mode) or `Select` on what it
 /// picks; a left press on the already-selected placement arms a drag that emits `Edit` once it
 /// crosses the slop (Shift moves vertically); a right click (a clean press-release - dragging is
 /// camera look) selects and opens the context menu on what it hit. Presentation state - place mode,
 /// the context menu, the right-drag accumulator, the scroll-to flag - is mutated here in place;
 /// only authored model changes go through actions. Ctrl+S deliberately ignores `keys_free`: saving
-/// must work mid-edit in a details field.
+/// must work mid-edit in a details field; undo and redo, by contrast, honor it, leaving a focused
+/// field egui's own in-field undo.
 pub fn handle(
     input: &InputState,
     pointer_free: bool,
@@ -80,6 +82,17 @@ pub fn handle(
 ) {
     if input.key_held(NamedKey::Control) && input.char_pressed('s') {
         actions.push(Action::Save);
+    }
+    // Undo/redo, gated on keys_free so a focused text field keeps egui's own in-field undo (Ctrl+S
+    // above is the deliberate exception). char_pressed is case-insensitive, so Shift only picks the
+    // direction: Ctrl+Z undoes, Ctrl+Shift+Z and Ctrl+Y both redo.
+    if keys_free && input.key_held(NamedKey::Control) {
+        if input.char_pressed('z') {
+            actions.push(if input.key_held(NamedKey::Shift) { Action::Redo } else { Action::Undo });
+        }
+        if input.char_pressed('y') {
+            actions.push(Action::Redo);
+        }
     }
     if keys_free && input.key_pressed(NamedKey::Delete)
         && let Some(sel) = model.selection
@@ -480,5 +493,44 @@ mod tests {
             Action::Edit { sel: edited, .. } => assert_eq!(*edited, sel),
             other => panic!("expected Edit, got {other:?}"),
         }
+    }
+
+    // ---- undo/redo hotkeys ----
+
+    #[test]
+    fn ctrl_z_undoes_and_ctrl_shift_z_or_ctrl_y_redo_when_keys_are_free() {
+        let model = sample_model();
+        let mut ui = UiState::default();
+        let chord = |held: &[NamedKey], ch: &str| {
+            let mut input = blank_input();
+            for &k in held {
+                input.keys_held.insert(Key::Named(k));
+            }
+            input.keys_pressed.insert(Key::Character(ch.into()));
+            input
+        };
+
+        let ctrl_z = chord(&[NamedKey::Control], "z");
+        assert_eq!(emitted(&ctrl_z, &any_camera(), &model, &mut ui), vec![Action::Undo]);
+
+        let ctrl_shift_z = chord(&[NamedKey::Control, NamedKey::Shift], "z");
+        assert_eq!(emitted(&ctrl_shift_z, &any_camera(), &model, &mut ui), vec![Action::Redo]);
+
+        let ctrl_y = chord(&[NamedKey::Control], "y");
+        assert_eq!(emitted(&ctrl_y, &any_camera(), &model, &mut ui), vec![Action::Redo]);
+    }
+
+    #[test]
+    fn undo_redo_keys_are_suppressed_while_a_field_has_focus() {
+        // keys_free = false stands in for a focused text field: Ctrl+Z must stay egui's in-field
+        // undo and never reach the editor.
+        let model = sample_model();
+        let mut ui = UiState::default();
+        let mut input = blank_input();
+        input.keys_held.insert(Key::Named(NamedKey::Control));
+        input.keys_pressed.insert(Key::Character("z".into()));
+        let mut actions = Vec::new();
+        handle(&input, true, false, &any_camera(), (800, 600), 500.0, &model, &mut ui, &mut actions);
+        assert!(actions.is_empty(), "Ctrl+Z is suppressed while a field has focus");
     }
 }
