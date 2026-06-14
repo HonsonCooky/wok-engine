@@ -24,10 +24,13 @@ use crate::model::{EditorModel, chunk_origin};
 use crate::panels::{Action, UiState};
 use crate::pick;
 
-/// Map the frame's raw input snapshot to the camera's input: WASD moves, Q/E sink and rise,
-/// holding the right mouse button turns raw mouse motion into look, scroll adjusts speed -
-/// except for whatever egui claimed: pointer input (look, scroll) stops when the cursor is over
-/// the UI, movement keys stop when a field has keyboard focus.
+/// Map the frame's raw input snapshot to the camera's input. Movement is the vim home row: with
+/// Ctrl up, f/d drive forward/back and g/s strafe right/left; with Ctrl down the same f/d become
+/// a world-vertical elevator (f up, d down) and planar movement is suppressed, so a command chord
+/// like Ctrl+S never also drives the camera. Holding the right mouse button turns raw mouse
+/// motion into look, scroll adjusts speed - except for whatever egui claimed: pointer input
+/// (look, scroll) stops when the cursor is over the UI, movement keys stop when a field has
+/// keyboard focus.
 pub fn camera_input(input: &InputState, pointer_free: bool, keys_free: bool) -> CameraInput {
     /// Mouse-look sensitivity, radians per pixel of raw motion.
     const LOOK_SENSITIVITY: f32 = 0.0035;
@@ -43,10 +46,13 @@ pub fn camera_input(input: &InputState, pointer_free: bool, keys_free: bool) -> 
     } else {
         Vec2::ZERO
     };
+    // Ctrl reroutes the row to a world-vertical elevator and suppresses planar movement, so a
+    // command chord (Ctrl+S, Ctrl+Z) never also flies the camera.
+    let ctrl = input.key_held(NamedKey::Control);
     CameraInput {
-        move_forward: axis('w', 's'),
-        move_right: axis('d', 'a'),
-        move_up: axis('e', 'q'),
+        move_forward: if ctrl { 0.0 } else { axis('f', 'd') },
+        move_right: if ctrl { 0.0 } else { axis('g', 's') },
+        move_up: if ctrl { axis('f', 'd') } else { 0.0 },
         look_delta,
         speed_steps: if pointer_free { input.scroll_delta.1 } else { 0.0 },
     }
@@ -260,18 +266,42 @@ mod tests {
     }
 
     #[test]
-    fn wasd_and_qe_map_to_movement_axes() {
-        let input = input_with(&["w", "d", "q"]);
-        let mapped = camera_input(&input, true, true);
-        assert_eq!(mapped.move_forward, 1.0);
-        assert_eq!(mapped.move_right, 1.0);
-        assert_eq!(mapped.move_up, -1.0);
-        assert_eq!(mapped.speed_steps, 2.0);
+    fn home_row_drives_planar_movement_with_no_vertical() {
+        // f/d forward/back, g/s right/left; the bare row never rises or sinks, and scroll still
+        // sets fly speed.
+        let fwd_right = camera_input(&input_with(&["f", "g"]), true, true);
+        assert_eq!(fwd_right.move_forward, 1.0);
+        assert_eq!(fwd_right.move_right, 1.0);
+        assert_eq!(fwd_right.move_up, 0.0);
+        assert_eq!(fwd_right.speed_steps, 2.0);
+
+        let back_left = camera_input(&input_with(&["d", "s"]), true, true);
+        assert_eq!(back_left.move_forward, -1.0);
+        assert_eq!(back_left.move_right, -1.0);
+        assert_eq!(back_left.move_up, 0.0);
+    }
+
+    #[test]
+    fn ctrl_turns_the_row_into_a_vertical_elevator_and_suppresses_planar() {
+        // Ctrl+f ascends; the planar keys held alongside it (here g) are suppressed, so a command
+        // chord never also drives the camera.
+        let mut up = input_with(&["f", "g"]);
+        up.keys_held.insert(Key::Named(NamedKey::Control));
+        let up = camera_input(&up, true, true);
+        assert_eq!(up.move_up, 1.0, "Ctrl+f ascends");
+        assert_eq!(up.move_forward, 0.0);
+        assert_eq!(up.move_right, 0.0, "Ctrl suppresses planar even with g held");
+
+        let mut down = input_with(&["d"]);
+        down.keys_held.insert(Key::Named(NamedKey::Control));
+        assert_eq!(camera_input(&down, true, true).move_up, -1.0, "Ctrl+d descends");
     }
 
     #[test]
     fn opposed_keys_cancel_and_shifted_keys_still_count() {
-        let input = input_with(&["W", "s"]);
+        // f and d are the forward/back pair; held together they cancel, and a shifted F still
+        // counts (char matching is case-insensitive).
+        let input = input_with(&["F", "d"]);
         assert_eq!(camera_input(&input, true, true).move_forward, 0.0);
     }
 
@@ -288,7 +318,7 @@ mod tests {
 
     #[test]
     fn egui_focus_suppresses_exactly_its_share_of_the_input() {
-        let mut input = input_with(&["w"]);
+        let mut input = input_with(&["f", "g"]);
         input.mouse_buttons_held.insert(MouseButton::Right);
 
         // Pointer over the UI: no look, no speed scroll; movement keys still work.
@@ -296,10 +326,13 @@ mod tests {
         assert_eq!(over_ui.look_delta, Vec2::ZERO);
         assert_eq!(over_ui.speed_steps, 0.0);
         assert_eq!(over_ui.move_forward, 1.0);
+        assert_eq!(over_ui.move_right, 1.0);
 
-        // A text field has focus: no movement; pointer look still works.
+        // A text field has focus: nothing fires on any axis; pointer look still works.
         let typing = camera_input(&input, true, false);
         assert_eq!(typing.move_forward, 0.0);
+        assert_eq!(typing.move_right, 0.0);
+        assert_eq!(typing.move_up, 0.0);
         assert!(typing.look_delta != Vec2::ZERO);
     }
 
