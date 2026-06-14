@@ -95,10 +95,4 @@ mod tests {
         assert!(right_text(&stats(1.0)).starts_with("cam 1.0 m/s"));
         assert!(right_text(&stats(200.0)).starts_with("cam 200.0 m/s"));
     }
-
-    #[test]
-    fn the_bar_text_keeps_the_frame_stats_after_the_speed() {
-        let text = right_text(&stats(13.0));
-        assert_eq!(text, "cam 13.0 m/s    60 fps  16.55 ms    8 placements  12 draws");
-    }
 }

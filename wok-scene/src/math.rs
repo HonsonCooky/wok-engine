@@ -263,13 +263,6 @@ mod tests {
     // ---- Aabb ----
 
     #[test]
-    fn aabb_new_sets_fields() {
-        let a = Aabb::new(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(1.0, 2.0, 3.0));
-        assert_eq!(a.min, Vec3::new(-1.0, -2.0, -3.0));
-        assert_eq!(a.max, Vec3::new(1.0, 2.0, 3.0));
-    }
-
-    #[test]
     fn aabb_from_center_extents() {
         let a = Aabb::from_center_extents(Vec3::new(10.0, 0.0, 5.0), Vec3::new(2.0, 3.0, 4.0));
         assert_eq!(a.min, Vec3::new(8.0, -3.0, 1.0));

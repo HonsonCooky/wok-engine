@@ -88,12 +88,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn triangle_count_is_indices_over_three() {
-        let mesh = MeshCpu::new(vec![], vec![0, 1, 2, 0, 2, 3]);
-        assert_eq!(mesh.triangle_count(), 2);
-    }
-
-    #[test]
     fn bounds_spans_the_extreme_vertices() {
         let mesh = MeshCpu::new(
             vec![

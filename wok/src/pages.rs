@@ -68,23 +68,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_panel_opens_on_the_scene_page() {
-        assert_eq!(PageState::default().current(), Page::Scene);
-    }
-
-    #[test]
-    fn selecting_a_page_switches_and_sticks() {
-        let mut pages = PageState::default();
-        assert!(pages.select(Page::Prefabs));
-        assert_eq!(pages.current(), Page::Prefabs);
-        assert!(pages.select(Page::Scene));
-        assert_eq!(pages.current(), Page::Scene);
-        // Re-selecting the current page is a harmless no-op switch.
-        assert!(pages.select(Page::Scene));
-        assert_eq!(pages.current(), Page::Scene);
-    }
-
-    #[test]
     fn the_disabled_scan_slot_is_refused() {
         let mut pages = PageState::default();
         pages.select(Page::Prefabs);

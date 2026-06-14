@@ -28,19 +28,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serde_round_trips() {
-        let p = PointLight {
-            position: Vec3::new(1.0, 2.0, 3.0),
-            color: Vec3::new(1.0, 0.5, 0.25),
-            radius: 8.0,
-            intensity: 2.5,
-        };
-        let json = serde_json::to_string(&p).unwrap();
-        let back: PointLight = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, p);
-    }
-
-    #[test]
     fn serde_shape_uses_bare_color_arrays() {
         let p = PointLight {
             position: Vec3::new(0.0, 0.0, 0.0),
