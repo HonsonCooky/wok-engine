@@ -112,6 +112,44 @@ pub fn pick(
     }
 }
 
+/// Every placement whose origin projects inside a screen-space rectangle: the marquee box-select.
+/// The box is two opposite corners in physical pixels (any order); a placement is included when
+/// its world-space origin (its chunk origin plus the placement's translation) projects to a point
+/// inside the box. Center-in-rect for v1 - the origin point, not the projected bounds - so a large
+/// placement whose centre sits just outside the box is missed; bounds-overlap is a later
+/// refinement. Placements behind the camera are skipped (their clip `w` is non-positive, so they
+/// have no real screen position). Iteration is chunk-coordinate then authored order, so the result
+/// is deterministic and its last element is the primary the selection set will frame.
+pub fn pick_rect(
+    chunks: &BTreeMap<ChunkCoord, Chunk>,
+    view_proj: Mat4,
+    size: Vec2,
+    corner_a: Vec2,
+    corner_b: Vec2,
+) -> Vec<Selection> {
+    let mut out = Vec::new();
+    if size.x <= 0.0 || size.y <= 0.0 {
+        return out;
+    }
+    let lo = corner_a.min(corner_b);
+    let hi = corner_a.max(corner_b);
+    for (&coord, chunk) in chunks {
+        let origin = chunk_origin(coord);
+        for placement in &chunk.placements {
+            let clip = view_proj * (origin + placement.transform.translation).extend(1.0);
+            if clip.w <= 0.0 {
+                continue; // behind the camera: no screen position
+            }
+            let ndc = clip.truncate() / clip.w;
+            let screen = Vec2::new((ndc.x + 1.0) * 0.5 * size.x, (1.0 - ndc.y) * 0.5 * size.y);
+            if screen.x >= lo.x && screen.x <= hi.x && screen.y >= lo.y && screen.y <= hi.y {
+                out.push(Selection { coord, id: placement.instance_id });
+            }
+        }
+    }
+    out
+}
+
 /// March the ray against the loaded terrain: the first point where the ray passes below the
 /// heightmap surface, bisected to precision. `None` when the ray never crosses loaded terrain
 /// within `range`.
@@ -304,5 +342,34 @@ mod tests {
             }
             ref other => panic!("a uniform ellipsoid must pick as a sphere, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rect_pick_includes_whats_inside_and_skips_the_outside_and_behind() {
+        // Camera at the origin looking down -Z. Two balls in front, left and right of centre; one
+        // behind the camera (at +Z), which has no screen position at all.
+        let (chunks, _) = world(&[
+            (1, Vec3::new(-5.0, 0.0, -20.0)),
+            (2, Vec3::new(5.0, 0.0, -20.0)),
+            (3, Vec3::new(0.0, 0.0, 20.0)),
+        ]);
+        let cam = FlyCamera { position: Vec3::ZERO, yaw: 0.0, pitch: 0.0, speed: 1.0 };
+        let size = Vec2::new(800.0, 600.0);
+        let view_proj = cam.view_proj(size.x / size.y, 100.0);
+        let ids = |sels: Vec<Selection>| sels.into_iter().map(|s| s.id).collect::<Vec<_>>();
+
+        // The whole screen catches both balls in front and never the one behind the camera.
+        let all = pick_rect(&chunks, view_proj, size, Vec2::ZERO, size);
+        assert_eq!(ids(all), vec![InstanceId(1), InstanceId(2)], "both in front, the behind ball skipped");
+
+        // The left half catches only the ball left of centre; the right half only the right one.
+        let left = pick_rect(&chunks, view_proj, size, Vec2::ZERO, Vec2::new(400.0, 600.0));
+        assert_eq!(ids(left), vec![InstanceId(1)], "only the left ball is inside the left half");
+        let right = pick_rect(&chunks, view_proj, size, Vec2::new(400.0, 0.0), size);
+        assert_eq!(ids(right), vec![InstanceId(2)], "only the right ball is inside the right half");
+
+        // Corner order does not matter: the box is normalized to min/max internally.
+        let swapped = pick_rect(&chunks, view_proj, size, size, Vec2::ZERO);
+        assert_eq!(ids(swapped), vec![InstanceId(1), InstanceId(2)], "opposite corners select the same set");
     }
 }

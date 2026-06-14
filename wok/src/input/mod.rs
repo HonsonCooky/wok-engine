@@ -6,21 +6,25 @@
 //! not over a panel and no widget is being dragged) and `keys_free` (no field has keyboard
 //! focus) - so the same physical input never acts in the UI and the viewport at once. The fly
 //! camera keeps right-mouse-hold to look, which leaves the cursor free for the UI by
-//! construction. The left button picks, places, and (on the already-selected placement) drags to
-//! move, with `crate::drag` owning the drag math. Every authored-model change is emitted as an
+//! construction. The left button picks, places, drags a selected placement to move it
+//! (`crate::drag` owns that drag math), and box-selects with a marquee over empty or unselected
+//! space (`marquee`). Every authored-model change is emitted as an
 //! [`Action`](crate::panels::Action) for the frame loop to apply, never written here, so the loop
 //! stays the model's single writer; only presentation state (place mode, the context menu, the
-//! drag) is touched in place.
+//! drag, the marquee) is touched in place.
 //!
 //! The module is split at the camera-vs-viewport seam: [`camera_input`] maps the raw snapshot to
-//! camera movement and look, [`handle`] routes hotkeys, clicks, and the placement drag. Both are
-//! re-exported here so callers address the `input` module, not its parts.
+//! camera movement and look, [`handle`] routes hotkeys, clicks, and the left-button drags,
+//! delegating the per-frame drag math to the `reposition` and `marquee` submodules. The public
+//! entry points are re-exported here so callers address the `input` module, not its parts.
 
 mod camera;
+mod marquee;
 mod reposition;
 mod viewport;
 
 pub use camera::camera_input;
+pub use marquee::Marquee;
 pub use viewport::handle;
 
 /// Motion (pixels) under which a press-and-release still reads as a click rather than a drag:
@@ -37,6 +41,8 @@ pub(crate) mod test_support {
 
     use glam::Vec3;
     use wok_platform::input::InputState;
+    use wok_platform::winit::event::MouseButton;
+    use wok_platform::winit::keyboard::{Key, NamedKey};
     use wok_scene::ChunkCoord;
 
     use crate::camera::FlyCamera;
@@ -110,6 +116,61 @@ pub(crate) mod test_support {
         let mut actions = Vec::new();
         handle(input, true, true, camera, (800, 600), 500.0, model, ui, &mut actions);
         actions
+    }
+
+    /// Run a full left click at `input`'s cursor: a press frame (which arms a marquee) then a
+    /// release frame with the cursor unmoved (under the slop, so the click resolves), returning the
+    /// actions the release emits. Any modifiers and the cursor on `input` carry into both frames.
+    /// The click resolves on release now that a press first arms a marquee.
+    pub(crate) fn clicked(
+        input: &InputState,
+        camera: &FlyCamera,
+        model: &EditorModel,
+        ui: &mut UiState,
+    ) -> Vec<Action> {
+        let mut press = input.clone();
+        press.mouse_buttons_pressed.insert(MouseButton::Left);
+        press.mouse_buttons_held.insert(MouseButton::Left);
+        let _ = emitted(&press, camera, model, ui);
+
+        let mut release = input.clone();
+        release.mouse_buttons_released.insert(MouseButton::Left);
+        emitted(&release, camera, model, ui)
+    }
+
+    /// Run a left marquee drag from `from` to `to` (physical pixels), optionally with Ctrl held the
+    /// whole gesture: a press at `from`, a held frame at `to`, then a release at `to`. The corners
+    /// must be at least the slop apart so the box goes active. Returns the actions the release
+    /// emits. Callers must keep `from` off any selected member, or the press arms a reposition drag
+    /// instead (Ctrl held always arms the marquee).
+    pub(crate) fn marquee_dragged(
+        camera: &FlyCamera,
+        model: &EditorModel,
+        ui: &mut UiState,
+        from: (f64, f64),
+        to: (f64, f64),
+        ctrl: bool,
+    ) -> Vec<Action> {
+        let frame = |pos: (f64, f64), pressed: bool, held: bool, released: bool| {
+            let mut input = blank_input();
+            input.mouse_pos = pos;
+            if pressed {
+                input.mouse_buttons_pressed.insert(MouseButton::Left);
+            }
+            if held {
+                input.mouse_buttons_held.insert(MouseButton::Left);
+            }
+            if released {
+                input.mouse_buttons_released.insert(MouseButton::Left);
+            }
+            if ctrl {
+                input.keys_held.insert(Key::Named(NamedKey::Control));
+            }
+            input
+        };
+        let _ = emitted(&frame(from, true, true, false), camera, model, ui);
+        let _ = emitted(&frame(to, false, true, false), camera, model, ui);
+        emitted(&frame(to, false, false, true), camera, model, ui)
     }
 
     /// Screen centre for the viewport `emitted` uses; a centred cursor rays along forward.

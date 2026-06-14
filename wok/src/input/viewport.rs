@@ -1,6 +1,7 @@
-//! Viewport input routing: hotkeys, left-click pick/place, and the placement drag, read against
-//! the model and emitted as [`Action`]s for the frame loop to apply (never written here, so the
-//! loop stays the model's single writer). `crate::input` covers the egui focus-gating these honor.
+//! Viewport input routing: hotkeys, left-click pick/place, the placement drag, and the area
+//! marquee, read against the model and emitted as [`Action`]s for the frame loop to apply (never
+//! written here, so the loop stays the model's single writer). `crate::input` covers the egui
+//! focus-gating these honor; `super::reposition` and `super::marquee` own the two left-drag gestures.
 
 use glam::Vec2;
 use wok_platform::input::InputState;
@@ -13,16 +14,19 @@ use crate::model::EditorModel;
 use crate::panels::{Action, UiState};
 use crate::pick;
 
-use super::{CLICK_SLOP_PX, reposition};
+use super::{CLICK_SLOP_PX, marquee, reposition};
 
 /// Hotkeys and viewport clicks, read against the current model and emitted as [`Action`]s for the
 /// frame loop to apply, so this routing reads model state and never writes it. Ctrl+S emits `Save`,
 /// Ctrl+Z and Ctrl+Shift+Z (or Ctrl+Y) emit `Undo` / `Redo`, Delete emits `Delete`, Esc cancels
 /// place mode, then an open context menu, then emits
-/// `Select(None)` to deselect. A left click emits `Place` (in place mode) or `Select` on what it
-/// picks; a left press on any selected placement arms a drag that moves the whole selection once
-/// it crosses the slop (Shift moves vertically); a right click (a clean press-release - dragging is
-/// camera look) selects and opens the context menu on what it hit. Presentation state - place mode,
+/// `Select(None)` to deselect. In place mode a left click emits `Place`. Otherwise a left press on
+/// any selected placement arms a reposition drag (the whole selection moves once it crosses the
+/// slop, Shift vertically); a left press anywhere else arms a marquee that resolves on release -
+/// past the slop a box `SelectMany` (Ctrl extends, else replaces), under it the click it always
+/// was (`Select` on the pick or empty, `ToggleSelect` under Ctrl). A right click (a clean
+/// press-release - dragging is camera look) selects and opens the context menu on what it hit.
+/// Presentation state - place mode,
 /// the context menu, the right-drag accumulator, the scroll-to flag - is mutated here in place;
 /// only authored model changes go through actions. Ctrl+S deliberately ignores `keys_free`: saving
 /// must work mid-edit in a details field; undo and redo, by contrast, honor it, leaving a focused
@@ -97,19 +101,14 @@ pub fn handle(
             if let Some(sel) = picked.filter(|&sel| !ctrl && model.selection.contains(sel)) {
                 // A plain press on any selected placement arms a reposition drag instead of
                 // re-picking: past the slop the whole selection moves rigidly with the grabbed
-                // member; released under it, nothing changes. (Ctrl is toggle, handled below.)
+                // member; released under it, nothing changes.
                 ui.drag = Some(PlacementDrag { sel, press_px: cursor, active: false, anchor: None });
-            } else if ctrl {
-                // Ctrl+click toggles the picked placement in or out of the set; Ctrl on empty space
-                // is a no-op, so a stray click never clears a built-up selection.
-                if let Some(sel) = picked {
-                    actions.push(Action::ToggleSelect(sel));
-                    ui.scroll_to_selection = true;
-                }
             } else {
-                // Plain click replaces the selection with what it hit (empty space clears it).
-                actions.push(Action::Select(picked));
-                ui.scroll_to_selection = picked.is_some();
+                // A press anywhere else - empty space, or an unselected placement it passes over
+                // rather than grabs - arms a marquee. The click-vs-box and plain-vs-Ctrl decisions
+                // are deferred to release (`marquee::step`): at press time we cannot yet tell a
+                // click from the start of a box.
+                ui.marquee = Some(marquee::Marquee::new(cursor));
             }
         }
     }
@@ -127,6 +126,12 @@ pub fn handle(
         }
         ui.drag = Some(drag);
     }
+
+    // An armed marquee advances while the left button stays down and resolves on release - a box
+    // `SelectMany` past the slop, or the deferred single click under it. Like the reposition drag
+    // it owns the pointer once armed (ignores `pointer_free`), so dragging the box over a panel
+    // does not break it. A no-op on frames with no marquee.
+    marquee::step(input, camera, size, far, model, ui, cursor, actions);
 
     if pointer_free
         && input.mouse_buttons_released.contains(&MouseButton::Right)
@@ -153,7 +158,8 @@ mod tests {
 
     use crate::drag::DragMode;
     use crate::input::test_support::{
-        CENTER_CURSOR, aim_at_pillar, any_camera, blank_input, emitted, looking_from_at, sample_model,
+        CENTER_CURSOR, aim_at_pillar, any_camera, blank_input, clicked, emitted, looking_from_at,
+        sample_model,
     };
     use crate::model::Selection;
 
@@ -246,30 +252,30 @@ mod tests {
     }
 
     #[test]
-    fn left_click_on_a_placement_emits_select() {
+    fn a_click_under_the_slop_replace_selects_the_pick() {
         let model = sample_model();
         let (sel, cam) = aim_at_pillar(&model);
         let mut ui = UiState::default();
         let mut input = blank_input();
         input.mouse_pos = CENTER_CURSOR;
-        input.mouse_buttons_pressed.insert(MouseButton::Left);
-
-        assert_eq!(emitted(&input, &cam, &model, &mut ui), vec![Action::Select(Some(sel))]);
+        // A click is now a press (which arms a marquee) then a release under the slop, where the
+        // click resolves: the plain click still replace-selects the pick, exactly as before.
+        assert_eq!(clicked(&input, &cam, &model, &mut ui), vec![Action::Select(Some(sel))]);
         assert!(ui.scroll_to_selection, "a viewport pick brings its tree row into view");
     }
 
     #[test]
-    fn ctrl_left_click_on_a_placement_toggles_rather_than_replacing() {
+    fn a_ctrl_click_under_the_slop_toggles_the_pick() {
         let model = sample_model();
         let (sel, cam) = aim_at_pillar(&model);
         let mut ui = UiState::default();
         let mut input = blank_input();
         input.mouse_pos = CENTER_CURSOR;
-        input.mouse_buttons_pressed.insert(MouseButton::Left);
         input.keys_held.insert(Key::Named(NamedKey::Control));
 
-        // Ctrl held turns the pick into a toggle of the set, not a replace-select.
-        assert_eq!(emitted(&input, &cam, &model, &mut ui), vec![Action::ToggleSelect(sel)]);
+        // Ctrl held the whole click: the under-slop release toggles the pick in or out of the set,
+        // still a toggle and not a replace-select.
+        assert_eq!(clicked(&input, &cam, &model, &mut ui), vec![Action::ToggleSelect(sel)]);
     }
 
     #[test]

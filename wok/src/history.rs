@@ -83,9 +83,11 @@ impl History {
             }
             // Non-mutating actions, plus Save (it writes disk; undoing it would desync memory from
             // files) and Undo/Redo themselves, record nothing but still close any open run.
-            // ToggleSelect changes only the selection, so it records nothing, like Select.
-            Action::Select(_) | Action::ToggleSelect(_) | Action::ArmPlace(_) | Action::DisarmPlace
-            | Action::Frame(_) | Action::Save | Action::Undo | Action::Redo => {
+            // ToggleSelect and SelectMany (the marquee) change only the selection, so they record
+            // nothing, like Select.
+            Action::Select(_) | Action::ToggleSelect(_) | Action::SelectMany { .. }
+            | Action::ArmPlace(_) | Action::DisarmPlace | Action::Frame(_) | Action::Save
+            | Action::Undo | Action::Redo => {
                 self.open = OpenRun::None;
                 false
             }

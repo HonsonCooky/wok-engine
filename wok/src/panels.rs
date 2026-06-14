@@ -16,6 +16,7 @@ use wok_scene::{ChunkCoord, PrefabRef, Transform};
 
 use crate::details;
 use crate::drag::PlacementDrag;
+use crate::input::Marquee;
 use crate::library;
 use crate::model::{EditorModel, Selection};
 use crate::pages::{Page, PageState};
@@ -45,6 +46,10 @@ pub struct UiState {
     /// A left-button drag on the selected placement in progress, if any; the same 4px rule tells
     /// it from a click. Lives here because it is interaction state, never authored data.
     pub drag: Option<PlacementDrag>,
+    /// A left-button area marquee in progress, if any: a press on empty or unselected space that
+    /// becomes a box past the slop. Interaction state like `drag`; the UI draws it, the input
+    /// routing arms and resolves it.
+    pub marquee: Option<Marquee>,
 }
 
 /// An inline rename in progress: the row being renamed and the live text.
@@ -63,6 +68,10 @@ pub enum Action {
     Select(Option<Selection>),
     /// Toggle one placement in or out of the selection set, last-in becoming primary. The Ctrl+click.
     ToggleSelect(Selection),
+    /// Select several placements at once - the marquee box result. `add` extends the current set
+    /// (Ctrl held at release); otherwise it replaces. The model applies it as `selection.extend`,
+    /// so a plain box over empty space clears and a Ctrl box over empty space leaves the set.
+    SelectMany { items: Vec<Selection>, add: bool },
     Edit { sel: Selection, transform: Transform, state: Option<String> },
     /// Move every selected placement rigidly by a uniform delta - the viewport group-drag, one
     /// undo step per drag (consecutive moves coalesce in `crate::history`).
@@ -115,6 +124,32 @@ pub fn ui(
         });
     details::window(ctx, model, actions);
     viewport_menu(ctx, model, ui_state, actions);
+    marquee_overlay(ctx, ui_state);
+}
+
+/// Draw the active marquee as a foreground overlay: a faint fill and a thin outline from the press
+/// corner to the current cursor, so the selection box is visible as it is dragged. Only the
+/// active box (past the slop) draws; the enclosed set is computed on release by
+/// `crate::input::marquee`, not here. The marquee corners are physical pixels; egui paints in
+/// points, so they divide by `pixels_per_point` exactly as the viewport menu's anchor does.
+fn marquee_overlay(ctx: &egui::Context, ui_state: &UiState) {
+    let Some(marquee) = ui_state.marquee.as_ref().filter(|m| m.active) else { return };
+    let ppp = ctx.pixels_per_point();
+    let rect = egui::Rect::from_two_pos(
+        egui::pos2(marquee.start_px.x / ppp, marquee.start_px.y / ppp),
+        egui::pos2(marquee.current_px.x / ppp, marquee.current_px.y / ppp),
+    );
+    let selection = ctx.style().visuals.selection;
+    let fill = egui::Color32::from_rgba_unmultiplied(
+        selection.bg_fill.r(),
+        selection.bg_fill.g(),
+        selection.bg_fill.b(),
+        40,
+    );
+    let stroke = egui::Stroke::new(1.0, selection.stroke.color);
+    let painter =
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("wok_marquee")));
+    painter.rect(rect, 0.0, fill, stroke, egui::StrokeKind::Inside);
 }
 
 /// The viewport's context menu: the same items as a tree row's, floated at the right-click

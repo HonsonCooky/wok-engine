@@ -133,6 +133,7 @@ impl EditorApp {
             Action::Select(Some(sel)) => self.model.selection.replace(sel),
             Action::Select(None) => self.model.selection.clear(),
             Action::ToggleSelect(sel) => self.model.selection.toggle(sel),
+            Action::SelectMany { items, add } => self.model.selection.extend(items, add),
             Action::Edit { sel, transform, state } => {
                 if let Err(err) = self.model.edit_placement(sel, transform, state) {
                     eprintln!("wok: edit failed: {err}");
