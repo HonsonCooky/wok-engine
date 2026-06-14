@@ -36,9 +36,10 @@ pub(crate) mod test_support {
 
     use glam::Vec3;
     use wok_platform::input::InputState;
+    use wok_scene::ChunkCoord;
 
     use crate::camera::FlyCamera;
-    use crate::model::EditorModel;
+    use crate::model::{EditorModel, Selection, chunk_origin};
     use crate::panels::{Action, UiState};
     use crate::sample;
 
@@ -81,6 +82,20 @@ pub(crate) mod test_support {
     /// A camera for the keyboard-only cases, where no ray is cast.
     pub(crate) fn any_camera() -> FlyCamera {
         FlyCamera { position: Vec3::new(64.0, 40.0, 100.0), yaw: 0.0, pitch: -0.6, speed: 16.0 }
+    }
+
+    /// The sample's first pillar and a camera aimed at it from above-south, so a centre-cursor ray
+    /// meets it before any terrain. Shared by the viewport pick tests (plain and Ctrl click).
+    pub(crate) fn aim_at_pillar(model: &EditorModel) -> (Selection, FlyCamera) {
+        let coord = ChunkCoord::new(0, 0);
+        let pillar = model.chunks[&coord]
+            .placements
+            .iter()
+            .find(|p| p.prefab.as_str() == "pillar")
+            .expect("a pillar in the sample");
+        let sel = Selection { coord, id: pillar.instance_id };
+        let target = chunk_origin(coord) + pillar.transform.translation;
+        (sel, looking_from_at(target + Vec3::new(0.0, 30.0, 30.0), target))
     }
 
     /// Run `handle` with the pointer and keys free (egui claims nothing) over an 800x600 viewport,

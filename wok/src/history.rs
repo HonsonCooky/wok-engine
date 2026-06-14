@@ -57,15 +57,18 @@ impl History {
                 self.open_edit = Some(*sel);
                 true
             }
-            // Every other mutating action closes any run and takes its own checkpoint.
-            Action::Place { .. } | Action::Delete(_) | Action::Duplicate(_) | Action::Rename { .. } => {
+            // Every other mutating action closes any run and takes its own checkpoint. The set
+            // delete/duplicate are one action and so one checkpoint, exactly like their single
+            // forms were - the whole group undoes in a single step.
+            Action::Place { .. } | Action::Delete | Action::Duplicate | Action::Rename { .. } => {
                 self.open_edit = None;
                 true
             }
             // Non-mutating actions, plus Save (it writes disk; undoing it would desync memory from
             // files) and Undo/Redo themselves, record nothing but still close any open run.
-            Action::Select(_) | Action::ArmPlace(_) | Action::DisarmPlace | Action::Frame(_)
-            | Action::Save | Action::Undo | Action::Redo => {
+            // ToggleSelect changes only the selection, so it records nothing, like Select.
+            Action::Select(_) | Action::ToggleSelect(_) | Action::ArmPlace(_) | Action::DisarmPlace
+            | Action::Frame(_) | Action::Save | Action::Undo | Action::Redo => {
                 self.open_edit = None;
                 false
             }
@@ -196,7 +199,7 @@ mod tests {
         let count = model.placement_count();
         let original = model.placement(sel).unwrap().clone();
 
-        model.checkpoint(&Action::Delete(sel));
+        model.checkpoint(&Action::Delete);
         assert!(model.delete(sel).unwrap());
         assert_eq!(model.placement_count(), count - 1);
         assert!(model.selection.is_empty(), "delete clears the dangling selection");
@@ -209,6 +212,58 @@ mod tests {
         assert!(model.redo().unwrap());
         assert_eq!(model.placement_count(), count - 1, "deleted again");
         assert!(model.placement(sel).is_none());
+    }
+
+    #[test]
+    fn set_delete_removes_every_selected_placement_and_one_undo_restores_them() {
+        let mut model = sample_model();
+        let coord = ChunkCoord::new(0, 0);
+        let group = [
+            Selection { coord, id: InstanceId(0) },
+            Selection { coord, id: InstanceId(2) },
+            Selection { coord, id: InstanceId(5) },
+        ];
+        for sel in group {
+            model.selection.toggle(sel);
+        }
+        let count = model.placement_count();
+
+        // One checkpoint for the whole group (the writer takes it once per action), then delete all.
+        model.checkpoint(&Action::Delete);
+        model.delete_selection().unwrap();
+        assert_eq!(model.placement_count(), count - 3, "all three gone");
+        assert!(model.selection.is_empty(), "nothing left selected");
+        assert!(group.iter().all(|s| model.placement(*s).is_none()));
+
+        // One undo brings the whole group and the selection back.
+        assert!(model.undo().unwrap());
+        assert_eq!(model.placement_count(), count, "all three restored in one step");
+        assert!(group.iter().all(|s| model.placement(*s).is_some()));
+        assert!(group.iter().all(|s| model.selection.contains(*s)), "the group is selected again");
+        assert!(!model.undo().unwrap(), "the group delete was a single undo step");
+    }
+
+    #[test]
+    fn set_duplicate_copies_the_group_selects_the_copies_and_undoes_in_one_step() {
+        let mut model = sample_model();
+        let coord = ChunkCoord::new(0, 0);
+        let a = Selection { coord, id: InstanceId(0) };
+        let b = Selection { coord, id: InstanceId(3) };
+        model.selection.toggle(a);
+        model.selection.toggle(b);
+        let count = model.placement_count();
+
+        model.checkpoint(&Action::Duplicate);
+        model.duplicate_selection().unwrap();
+        assert_eq!(model.placement_count(), count + 2, "both members copied");
+        assert_eq!(model.selection.len(), 2, "the copies are selected");
+        assert!(!model.selection.contains(a) && !model.selection.contains(b), "the originals are not");
+        assert!(model.selection.iter().all(|c| model.placement(c).is_some()), "each copy resolves");
+
+        assert!(model.undo().unwrap());
+        assert_eq!(model.placement_count(), count, "both copies removed in one step");
+        assert!(model.selection.contains(a) && model.selection.contains(b), "the originals reselect");
+        assert!(!model.undo().unwrap(), "the group duplicate was a single undo step");
     }
 
     #[test]

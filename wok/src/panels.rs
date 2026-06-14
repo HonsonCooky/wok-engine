@@ -59,16 +59,21 @@ pub struct Rename {
 /// by the frame loop so model state has a single writer.
 #[derive(Debug, PartialEq)]
 pub enum Action {
+    /// Replace the whole selection with this placement, or clear it (`None`). The plain click.
     Select(Option<Selection>),
+    /// Toggle one placement in or out of the selection set, last-in becoming primary. The Ctrl+click.
+    ToggleSelect(Selection),
     Edit { sel: Selection, transform: Transform, state: Option<String> },
     ArmPlace(PrefabRef),
     DisarmPlace,
     /// Place the armed prefab at a viewport-resolved terrain point; the model selects the result.
     Place { prefab: PrefabRef, point: Vec3 },
-    Duplicate(Selection),
+    /// Duplicate every selected placement and reselect the copies (one undo step).
+    Duplicate,
     /// Commit a rename with the raw edited text; the model normalizes (trims, empty clears).
     Rename { sel: Selection, name: String },
-    Delete(Selection),
+    /// Delete every selected placement (one undo step).
+    Delete,
     /// Frame the fly camera on the placement's bounds.
     Frame(Selection),
     /// Write every dirty chunk and the manifest to disk through `crate::sync`.

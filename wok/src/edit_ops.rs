@@ -42,6 +42,23 @@ impl EditorModel {
         Ok(Some(selection))
     }
 
+    /// Duplicate every selected placement and reselect the copies in order (primary last), so the
+    /// user is immediately manipulating the new group rather than the originals. One pass over a
+    /// snapshot of the set; the single checkpoint that makes it one undo step is taken by the
+    /// writer before this runs. A member that no longer resolves is skipped.
+    pub fn duplicate_selection(&mut self) -> Result<(), StoreError> {
+        let targets: Vec<Selection> = self.selection.iter().collect();
+        let mut copies: Vec<Selection> = Vec::with_capacity(targets.len());
+        for sel in targets {
+            if let Some(copy) = self.duplicate(sel)? {
+                copies.push(copy);
+            }
+        }
+        // `duplicate` left the selection on the last copy alone; widen it to the whole group.
+        self.selection.extend(copies, false);
+        Ok(())
+    }
+
     /// Set or clear a placement's display name: trimmed, and an empty result clears back to
     /// `None` (the file omits the field again). Returns whether the placement existed. No
     /// re-transform: names never reach the runtime arrays.
@@ -143,6 +160,25 @@ mod tests {
         let gone = Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(999) };
         assert_eq!(model.duplicate(gone).unwrap(), None);
         assert!(!model.is_dirty());
+    }
+
+    #[test]
+    fn duplicate_selection_copies_every_member_and_selects_the_copies() {
+        let mut model = sample_model();
+        let coord = ChunkCoord::new(0, 0);
+        let a = Selection { coord, id: InstanceId(0) };
+        let b = Selection { coord, id: InstanceId(3) };
+        model.selection.toggle(a);
+        model.selection.toggle(b);
+        let count = model.placement_count();
+
+        model.duplicate_selection().unwrap();
+        assert_eq!(model.placement_count(), count + 2, "both members copied");
+        assert!(model.placement(a).is_some() && model.placement(b).is_some(), "originals remain");
+        // The selection now holds exactly the two copies, not the originals; each copy resolves.
+        assert_eq!(model.selection.len(), 2, "the copies are selected");
+        assert!(!model.selection.contains(a) && !model.selection.contains(b), "the originals are deselected");
+        assert!(model.selection.iter().all(|copy| model.placement(copy).is_some()), "each copy resolves");
     }
 
     #[test]

@@ -132,6 +132,7 @@ impl EditorApp {
         match action {
             Action::Select(Some(sel)) => self.model.selection.replace(sel),
             Action::Select(None) => self.model.selection.clear(),
+            Action::ToggleSelect(sel) => self.model.selection.toggle(sel),
             Action::Edit { sel, transform, state } => {
                 if let Err(err) = self.model.edit_placement(sel, transform, state) {
                     eprintln!("wok: edit failed: {err}");
@@ -144,17 +145,16 @@ impl EditorApp {
                     eprintln!("wok: place failed: {err}");
                 }
             }
-            Action::Duplicate(sel) => match self.model.duplicate(sel) {
-                // The copy is selected by the model; bring its tree row into view.
-                Ok(Some(_)) => self.ui.scroll_to_selection = true,
-                Ok(None) => {}
+            Action::Duplicate => match self.model.duplicate_selection() {
+                // The copies are selected by the model; bring the primary's tree row into view.
+                Ok(()) => self.ui.scroll_to_selection = true,
                 Err(err) => eprintln!("wok: duplicate failed: {err}"),
             },
             Action::Rename { sel, name } => {
                 self.model.rename(sel, &name);
             }
-            Action::Delete(sel) => {
-                if let Err(err) = self.model.delete(sel) {
+            Action::Delete => {
+                if let Err(err) = self.model.delete_selection() {
                     eprintln!("wok: delete failed: {err}");
                 }
             }

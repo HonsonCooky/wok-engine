@@ -53,10 +53,8 @@ pub fn handle(
             actions.push(Action::Redo);
         }
     }
-    if keys_free && input.key_pressed(NamedKey::Delete)
-        && let Some(sel) = model.selection.primary()
-    {
-        actions.push(Action::Delete(sel));
+    if keys_free && input.key_pressed(NamedKey::Delete) && !model.selection.is_empty() {
+        actions.push(Action::Delete);
     }
     if keys_free && input.key_pressed(NamedKey::Escape) {
         if ui.placing.is_some() {
@@ -96,14 +94,22 @@ pub fn handle(
         } else {
             let picked =
                 pick::pick(&model.chunks, &model.prefabs, &model.heightmaps, camera.position, dir, far);
-            if let Some(sel) = picked.filter(|&sel| model.selection.contains(sel)) {
-                // A press on an already-selected placement arms a drag instead of re-picking:
-                // past the slop it moves the placement; released under it, it was a click on
-                // what is already selected, which changes nothing.
+            let ctrl = input.key_held(NamedKey::Control);
+            if let Some(sel) = picked.filter(|&sel| !ctrl && model.selection.is_only(sel)) {
+                // A plain press on the sole selected placement arms a reposition drag instead of
+                // re-picking: past the slop it moves the placement; released under it, nothing
+                // changes. A drag arms only on a single selection - group-move is the marquee brief.
                 ui.drag = Some(PlacementDrag { sel, press_px: cursor, active: false, anchor: None });
+            } else if ctrl {
+                // Ctrl+click toggles the picked placement in or out of the set; Ctrl on empty space
+                // is a no-op, so a stray click never clears a built-up selection.
+                if let Some(sel) = picked {
+                    actions.push(Action::ToggleSelect(sel));
+                    ui.scroll_to_selection = true;
+                }
             } else {
+                // Plain click replaces the selection with what it hit (empty space clears it).
                 actions.push(Action::Select(picked));
-                // A viewport selection brings its tree row into view.
                 ui.scroll_to_selection = picked.is_some();
             }
         }
@@ -185,7 +191,9 @@ fn drag_selected(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::test_support::{CENTER_CURSOR, any_camera, blank_input, emitted, looking_from_at, sample_model};
+    use crate::input::test_support::{
+        CENTER_CURSOR, aim_at_pillar, any_camera, blank_input, emitted, looking_from_at, sample_model,
+    };
     use crate::model::Selection;
     use wok_platform::winit::keyboard::Key;
     use wok_scene::{ChunkCoord, InstanceId, PrefabRef};
@@ -201,14 +209,23 @@ mod tests {
     }
 
     #[test]
-    fn delete_emits_delete_of_the_current_selection() {
+    fn delete_emits_a_set_delete_when_something_is_selected() {
         let mut model = sample_model();
-        let sel = Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(2) };
-        model.selection.replace(sel);
+        model.selection.replace(Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(2) });
         let mut ui = UiState::default();
         let mut input = blank_input();
         input.keys_pressed.insert(Key::Named(NamedKey::Delete));
-        assert_eq!(emitted(&input, &any_camera(), &model, &mut ui), vec![Action::Delete(sel)]);
+        assert_eq!(emitted(&input, &any_camera(), &model, &mut ui), vec![Action::Delete]);
+    }
+
+    #[test]
+    fn delete_emits_nothing_on_an_empty_selection() {
+        // No selection, no checkpoint-worthy action: the key is inert rather than a no-op undo step.
+        let model = sample_model();
+        let mut ui = UiState::default();
+        let mut input = blank_input();
+        input.keys_pressed.insert(Key::Named(NamedKey::Delete));
+        assert!(emitted(&input, &any_camera(), &model, &mut ui).is_empty());
     }
 
     #[test]
@@ -272,18 +289,7 @@ mod tests {
     #[test]
     fn left_click_on_a_placement_emits_select() {
         let model = sample_model();
-        // The first pillar (chunk-local 60, 70): aim at its rested world centre from above and to
-        // the south, so the ray meets it before any terrain and no other placement is in the way.
-        let coord = ChunkCoord::new(0, 0);
-        let pillar = model.chunks[&coord]
-            .placements
-            .iter()
-            .find(|p| p.prefab.as_str() == "pillar")
-            .expect("a pillar in the sample");
-        let sel = Selection { coord, id: pillar.instance_id };
-        let target = chunk_origin(coord) + pillar.transform.translation;
-        let cam = looking_from_at(target + Vec3::new(0.0, 30.0, 30.0), target);
-
+        let (sel, cam) = aim_at_pillar(&model);
         let mut ui = UiState::default();
         let mut input = blank_input();
         input.mouse_pos = CENTER_CURSOR;
@@ -291,6 +297,20 @@ mod tests {
 
         assert_eq!(emitted(&input, &cam, &model, &mut ui), vec![Action::Select(Some(sel))]);
         assert!(ui.scroll_to_selection, "a viewport pick brings its tree row into view");
+    }
+
+    #[test]
+    fn ctrl_left_click_on_a_placement_toggles_rather_than_replacing() {
+        let model = sample_model();
+        let (sel, cam) = aim_at_pillar(&model);
+        let mut ui = UiState::default();
+        let mut input = blank_input();
+        input.mouse_pos = CENTER_CURSOR;
+        input.mouse_buttons_pressed.insert(MouseButton::Left);
+        input.keys_held.insert(Key::Named(NamedKey::Control));
+
+        // Ctrl held turns the pick into a toggle of the set, not a replace-select.
+        assert_eq!(emitted(&input, &cam, &model, &mut ui), vec![Action::ToggleSelect(sel)]);
     }
 
     #[test]

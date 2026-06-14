@@ -180,11 +180,17 @@ fn placement_row(
 
     let response = response
         .on_hover_text(format!("{}\nprefab: {}\ninstance: {}", row.label, row.prefab, row.id.0));
+    let ctrl = ui.input(|i| i.modifiers.ctrl);
     if response.double_clicked() {
         // Select and frame: the double click is "take me to it".
         actions.push(Action::Select(Some(sel)));
         actions.push(Action::Frame(sel));
     } else if response.clicked() {
+        // Ctrl+click toggles this row in or out of the set; a plain click replaces the selection.
+        actions.push(if ctrl { Action::ToggleSelect(sel) } else { Action::Select(Some(sel)) });
+    } else if response.secondary_clicked() && !model.selection.contains(sel) {
+        // Right-clicking an unselected row selects it first, so the menu's set actions act on what
+        // was clicked; right-clicking a member of a multi-selection leaves the set intact.
         actions.push(Action::Select(Some(sel)));
     }
     response.context_menu(|ui| {
@@ -254,7 +260,7 @@ pub fn placement_menu(
 ) -> bool {
     let mut chose = false;
     if ui.button("Duplicate").clicked() {
-        actions.push(Action::Duplicate(sel));
+        actions.push(Action::Duplicate);
         chose = true;
     }
     if ui.button("Rename").clicked() {
@@ -262,7 +268,7 @@ pub fn placement_menu(
         chose = true;
     }
     if ui.button("Delete").clicked() {
-        actions.push(Action::Delete(sel));
+        actions.push(Action::Delete);
         chose = true;
     }
     chose

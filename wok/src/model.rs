@@ -249,6 +249,17 @@ impl EditorModel {
         self.validate_selection();
         Ok(true)
     }
+
+    /// Delete every selected placement, leaving the selection empty. The whole group goes in one
+    /// pass over a snapshot of the set (so pruning the selection mid-loop is safe); the single
+    /// checkpoint that makes it one undo step is taken by the writer before this runs.
+    pub fn delete_selection(&mut self) -> Result<(), StoreError> {
+        let targets: Vec<Selection> = self.selection.iter().collect();
+        for sel in targets {
+            self.delete(sel)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

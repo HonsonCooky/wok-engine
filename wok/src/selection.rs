@@ -29,16 +29,24 @@ impl SelectionSet {
     }
 
     /// Nothing is selected.
-    // A base predicate the brief lists; production reads `primary` today, so in this binary crate
-    // (where `pub` does not exempt it) only the tests call it until the UX brief wires it up.
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// How many placements are selected.
+    pub fn len(&self) -> usize {
+        self.items.len()
     }
 
     /// Is this placement in the selection?
     pub fn contains(&self, sel: Selection) -> bool {
         self.items.contains(&sel)
+    }
+
+    /// Is `sel` the one and only member? The reposition drag arms only on a sole selection, so a
+    /// left-press on one of several selected placements does nothing until group-move (part 2).
+    pub fn is_only(&self, sel: Selection) -> bool {
+        self.items.len() == 1 && self.items[0] == sel
     }
 
     /// The primary selection - the last-added member - or `None` when the set is empty. What the
@@ -72,8 +80,7 @@ impl SelectionSet {
 
     /// Toggle a placement in or out, keeping the set ordered and duplicate-free: an absent item is
     /// added as the new primary, a present one is removed (and the member now last becomes primary).
-    /// The Ctrl+click verb, wired in a later brief - unused here by design.
-    #[allow(dead_code)]
+    /// The Ctrl+click verb.
     pub fn toggle(&mut self, sel: Selection) {
         match self.items.iter().position(|s| *s == sel) {
             Some(i) => {
@@ -85,9 +92,7 @@ impl SelectionSet {
 
     /// Add several items in order, optionally clearing first: `add == false` replaces the selection,
     /// `add == true` extends it, and either way items already present are skipped so the set stays
-    /// duplicate-free. The marquee's replace-or-extend verb, wired in a later brief - unused here by
-    /// design.
-    #[allow(dead_code)]
+    /// duplicate-free. Used to reselect a duplicated group; the marquee will extend with it too.
     pub fn extend(&mut self, items: impl IntoIterator<Item = Selection>, add: bool) {
         if !add {
             self.items.clear();
@@ -172,6 +177,23 @@ mod tests {
         // add == false again replaces the whole set.
         set.extend([sel(9)], false);
         assert_eq!(set.iter().collect::<Vec<_>>(), vec![sel(9)]);
+    }
+
+    #[test]
+    fn is_only_and_len_track_a_sole_member() {
+        let mut set = SelectionSet::new();
+        assert_eq!(set.len(), 0);
+        assert!(!set.is_only(sel(1)));
+
+        set.replace(sel(1));
+        assert_eq!(set.len(), 1);
+        assert!(set.is_only(sel(1)), "the sole member");
+        assert!(!set.is_only(sel(2)), "a different placement is not the sole member");
+
+        set.toggle(sel(2));
+        assert_eq!(set.len(), 2);
+        assert!(!set.is_only(sel(1)), "no member is sole once two are selected");
+        assert!(!set.is_only(sel(2)));
     }
 
     #[test]

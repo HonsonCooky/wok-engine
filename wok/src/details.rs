@@ -27,6 +27,14 @@ pub fn visible(model: &EditorModel) -> bool {
     model.selection.primary().is_some_and(|sel| model.placement(sel).is_some())
 }
 
+/// The multi-selection banner: `Some("N selected")` when more than one placement is selected (the
+/// fields still edit the primary - multi-field editing is later work), `None` otherwise. Pure, so
+/// the count rule is testable without a window.
+fn multi_select_header(model: &EditorModel) -> Option<String> {
+    let n = model.selection.len();
+    (n > 1).then(|| format!("{n} selected"))
+}
+
 /// Build the details window (or nothing, per [`visible`]).
 pub fn window(ctx: &egui::Context, model: &EditorModel, actions: &mut Vec<Action>) {
     if !visible(model) {
@@ -43,6 +51,10 @@ pub fn window(ctx: &egui::Context, model: &EditorModel, actions: &mut Vec<Action
 }
 
 fn body(ui: &mut egui::Ui, model: &EditorModel, sel: Selection, placement: &Placement, actions: &mut Vec<Action>) {
+    // When several are selected, a small banner notes the count; the fields below edit the primary.
+    if let Some(note) = multi_select_header(model) {
+        ui.label(egui::RichText::new(note).small().weak());
+    }
     let prefab = model.prefabs.get(&placement.prefab);
     let generated = outline::generated_label(placement);
 
@@ -213,6 +225,19 @@ mod tests {
         // must not show a panel either.
         model.selection.replace(Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(999) });
         assert!(!visible(&model), "a dangling selection shows nothing");
+    }
+
+    #[test]
+    fn the_inspector_notes_a_multi_selection_count() {
+        let mut model = sample_model();
+        let coord = ChunkCoord::new(0, 0);
+        // One selected: the fields stand alone, no banner.
+        model.selection.replace(Selection { coord, id: InstanceId(0) });
+        assert_eq!(multi_select_header(&model), None, "a single selection shows no count");
+
+        // A second selected: the banner reports the count.
+        model.selection.toggle(Selection { coord, id: InstanceId(2) });
+        assert_eq!(multi_select_header(&model).as_deref(), Some("2 selected"));
     }
 
     // ---- euler round-trip stability ----
