@@ -2,27 +2,26 @@
 //! the model and emitted as [`Action`]s for the frame loop to apply (never written here, so the
 //! loop stays the model's single writer). `crate::input` covers the egui focus-gating these honor.
 
-use glam::{Vec2, Vec3};
+use glam::Vec2;
 use wok_platform::input::InputState;
 use wok_platform::winit::event::MouseButton;
 use wok_platform::winit::keyboard::NamedKey;
-use wok_scene::Transform;
 
 use crate::camera::FlyCamera;
-use crate::drag::{DragMode, PlacementDrag, drag_offset, dragged_translation};
-use crate::model::{EditorModel, chunk_origin};
+use crate::drag::PlacementDrag;
+use crate::model::EditorModel;
 use crate::panels::{Action, UiState};
 use crate::pick;
 
-use super::CLICK_SLOP_PX;
+use super::{CLICK_SLOP_PX, reposition};
 
 /// Hotkeys and viewport clicks, read against the current model and emitted as [`Action`]s for the
 /// frame loop to apply, so this routing reads model state and never writes it. Ctrl+S emits `Save`,
 /// Ctrl+Z and Ctrl+Shift+Z (or Ctrl+Y) emit `Undo` / `Redo`, Delete emits `Delete`, Esc cancels
 /// place mode, then an open context menu, then emits
 /// `Select(None)` to deselect. A left click emits `Place` (in place mode) or `Select` on what it
-/// picks; a left press on the already-selected placement arms a drag that emits `Edit` once it
-/// crosses the slop (Shift moves vertically); a right click (a clean press-release - dragging is
+/// picks; a left press on any selected placement arms a drag that moves the whole selection once
+/// it crosses the slop (Shift moves vertically); a right click (a clean press-release - dragging is
 /// camera look) selects and opens the context menu on what it hit. Presentation state - place mode,
 /// the context menu, the right-drag accumulator, the scroll-to flag - is mutated here in place;
 /// only authored model changes go through actions. Ctrl+S deliberately ignores `keys_free`: saving
@@ -95,10 +94,10 @@ pub fn handle(
             let picked =
                 pick::pick(&model.chunks, &model.prefabs, &model.heightmaps, camera.position, dir, far);
             let ctrl = input.key_held(NamedKey::Control);
-            if let Some(sel) = picked.filter(|&sel| !ctrl && model.selection.is_only(sel)) {
-                // A plain press on the sole selected placement arms a reposition drag instead of
-                // re-picking: past the slop it moves the placement; released under it, nothing
-                // changes. A drag arms only on a single selection - group-move is the marquee brief.
+            if let Some(sel) = picked.filter(|&sel| !ctrl && model.selection.contains(sel)) {
+                // A plain press on any selected placement arms a reposition drag instead of
+                // re-picking: past the slop the whole selection moves rigidly with the grabbed
+                // member; released under it, nothing changes. (Ctrl is toggle, handled below.)
                 ui.drag = Some(PlacementDrag { sel, press_px: cursor, active: false, anchor: None });
             } else if ctrl {
                 // Ctrl+click toggles the picked placement in or out of the set; Ctrl on empty space
@@ -124,7 +123,7 @@ pub fn handle(
         && model.selection.contains(drag.sel)
     {
         if let Some(dir) = ray(camera) {
-            drag_selected(input, camera.position, dir, far, model, &mut drag, cursor, actions);
+            reposition::step(input, camera.position, dir, far, model, &mut drag, cursor, actions);
         }
         ui.drag = Some(drag);
     }
@@ -145,58 +144,18 @@ pub fn handle(
     }
 }
 
-/// One held frame of a placement drag: enforce the slop, pick the mode by Shift (re-anchoring
-/// whenever the mode is entered, so the placement never jumps to the cursor), and emit the frame's
-/// translation as an [`Action::Edit`] - the same authored-form edit the details panel makes, so
-/// dirty tracking and the unsaved indicator follow for free. A frame whose cursor gives nothing to
-/// track (no terrain under it, a degenerate ray) holds the placement still.
-fn drag_selected(
-    input: &InputState,
-    eye: Vec3,
-    dir: Vec3,
-    far: f32,
-    model: &EditorModel,
-    drag: &mut PlacementDrag,
-    cursor: Vec2,
-    actions: &mut Vec<Action>,
-) {
-    if !drag.active {
-        if (cursor - drag.press_px).length() < CLICK_SLOP_PX {
-            return;
-        }
-        drag.active = true;
-    }
-    let Some(placement) = model.placement(drag.sel) else { return };
-    let current = placement.transform;
-    let state = placement.state.clone();
-    let Some(prefab) = model.prefabs.get(&placement.prefab) else { return };
-    let origin = chunk_origin(drag.sel.coord);
-
-    let mode = if input.key_held(NamedKey::Shift) { DragMode::Vertical } else { DragMode::Terrain };
-    if drag.anchor.map(|(m, _)| m) != Some(mode) {
-        drag.anchor = drag_offset(mode, &current, origin, &model.heightmaps, eye, dir, far)
-            .map(|offset| (mode, offset));
-    }
-    let Some((_, offset)) = drag.anchor else { return };
-    let Some(translation) =
-        dragged_translation(mode, offset, &current, origin, prefab, &model.heightmaps, eye, dir, far)
-    else {
-        return;
-    };
-    if translation != current.translation {
-        actions.push(Action::Edit { sel: drag.sel, transform: Transform { translation, ..current }, state });
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec3;
+    use wok_platform::winit::keyboard::Key;
+    use wok_scene::{ChunkCoord, InstanceId, PrefabRef};
+
+    use crate::drag::DragMode;
     use crate::input::test_support::{
         CENTER_CURSOR, aim_at_pillar, any_camera, blank_input, emitted, looking_from_at, sample_model,
     };
     use crate::model::Selection;
-    use wok_platform::winit::keyboard::Key;
-    use wok_scene::{ChunkCoord, InstanceId, PrefabRef};
 
     #[test]
     fn ctrl_s_emits_save() {
@@ -314,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn an_active_drag_emits_edit_when_the_cursor_moves_the_placement() {
+    fn an_active_drag_emits_a_move_when_the_cursor_moves_the_placement() {
         let mut model = sample_model();
         let coord = ChunkCoord::new(0, 0);
         let sel = {
@@ -328,7 +287,7 @@ mod tests {
         model.selection.replace(sel);
         // An already-active drag anchored at a zero grab offset: the dragged spot is the cursor's
         // terrain hit itself. Aiming at the chunk centre puts that hit well away from the boulder's
-        // authored position, so the frame moves it and must emit an Edit.
+        // authored position, so the frame moves it and must emit a group move.
         let drag = PlacementDrag {
             sel,
             press_px: Vec2::ZERO,
@@ -343,11 +302,32 @@ mod tests {
         input.mouse_buttons_held.insert(MouseButton::Left);
 
         let actions = emitted(&input, &cam, &model, &mut ui);
-        assert_eq!(actions.len(), 1, "one moved frame, one edit");
+        assert_eq!(actions.len(), 1, "one moved frame, one move action");
         match &actions[0] {
-            Action::Edit { sel: edited, .. } => assert_eq!(*edited, sel),
-            other => panic!("expected Edit, got {other:?}"),
+            Action::MoveSelection { delta } => assert!(*delta != Vec3::ZERO, "the drag moved the group"),
+            other => panic!("expected MoveSelection, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_press_on_any_selected_member_arms_the_group_drag() {
+        let mut model = sample_model();
+        let (grabbed, cam) = aim_at_pillar(&model);
+        // A two-member selection; the grabbed pillar is one of several, not the sole selection.
+        model.selection.replace(grabbed);
+        model.selection.toggle(Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(0) });
+        let mut ui = UiState::default();
+        let mut input = blank_input();
+        input.mouse_pos = CENTER_CURSOR;
+        // A real press frame holds the button it just pressed; both flags so the arm survives the
+        // same frame's drag-advance pass (which would otherwise take-and-not-restore it).
+        input.mouse_buttons_pressed.insert(MouseButton::Left);
+        input.mouse_buttons_held.insert(MouseButton::Left);
+
+        // Pressing any selected member arms the group drag (no action yet) rather than re-selecting;
+        // the older sole-selection gate would have replace-selected here instead.
+        assert!(emitted(&input, &cam, &model, &mut ui).is_empty(), "arming emits no action");
+        assert_eq!(ui.drag.as_ref().map(|d| d.sel), Some(grabbed), "the pressed member is grabbed");
     }
 
     #[test]

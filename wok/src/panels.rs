@@ -64,6 +64,9 @@ pub enum Action {
     /// Toggle one placement in or out of the selection set, last-in becoming primary. The Ctrl+click.
     ToggleSelect(Selection),
     Edit { sel: Selection, transform: Transform, state: Option<String> },
+    /// Move every selected placement rigidly by a uniform delta - the viewport group-drag, one
+    /// undo step per drag (consecutive moves coalesce in `crate::history`).
+    MoveSelection { delta: Vec3 },
     ArmPlace(PrefabRef),
     DisarmPlace,
     /// Place the armed prefab at a viewport-resolved terrain point; the model selects the result.

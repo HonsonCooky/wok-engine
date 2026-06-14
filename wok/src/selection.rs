@@ -43,12 +43,6 @@ impl SelectionSet {
         self.items.contains(&sel)
     }
 
-    /// Is `sel` the one and only member? The reposition drag arms only on a sole selection, so a
-    /// left-press on one of several selected placements does nothing until group-move (part 2).
-    pub fn is_only(&self, sel: Selection) -> bool {
-        self.items.len() == 1 && self.items[0] == sel
-    }
-
     /// The primary selection - the last-added member - or `None` when the set is empty. What the
     /// inspector edits and the camera frames.
     pub fn primary(&self) -> Option<Selection> {
@@ -180,20 +174,15 @@ mod tests {
     }
 
     #[test]
-    fn is_only_and_len_track_a_sole_member() {
+    fn len_tracks_the_member_count() {
         let mut set = SelectionSet::new();
         assert_eq!(set.len(), 0);
-        assert!(!set.is_only(sel(1)));
-
         set.replace(sel(1));
         assert_eq!(set.len(), 1);
-        assert!(set.is_only(sel(1)), "the sole member");
-        assert!(!set.is_only(sel(2)), "a different placement is not the sole member");
-
         set.toggle(sel(2));
         assert_eq!(set.len(), 2);
-        assert!(!set.is_only(sel(1)), "no member is sole once two are selected");
-        assert!(!set.is_only(sel(2)));
+        set.toggle(sel(2));
+        assert_eq!(set.len(), 1, "toggling a member back out shrinks the count");
     }
 
     #[test]

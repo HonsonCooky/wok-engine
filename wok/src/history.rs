@@ -8,11 +8,11 @@
 //! restore. Undo swaps the authored state back and re-runs the same authored -> runtime transform,
 //! so it costs what the edits it reverses cost and the viewport tracks it for free.
 //!
-//! Coalescing keeps one gesture to one undo step: an unbroken run of `Edit`s to the same selection
-//! (a drag is one such run, frame by frame) checkpoints only once, before the run's first edit.
-//! Any other applied action closes the run. Because undo rides the action layer (the design's
-//! premise), this module reads the `Action` vocabulary directly to classify what mutates; it owns
-//! the stacks and the run state, and the writer owns when to call it.
+//! Coalescing keeps one gesture to one undo step: a run of like mutations - the inspector's edits
+//! to one placement, or a viewport group-drag's per-frame moves - checkpoints only once, before
+//! the run's first action. Any other applied action closes the run. Because undo rides the action
+//! layer (the design's premise), this module reads the `Action` vocabulary directly to classify
+//! what mutates; it owns the stacks and the run state, and the writer owns when to call it.
 
 use std::collections::BTreeMap;
 
@@ -32,17 +32,27 @@ struct Snapshot {
     selection: SelectionSet,
 }
 
-/// The undo and redo stacks plus the open-edit-run marker that drives coalescing. Owned by
+/// The open coalescing run, if any. A gesture made of many small mutations - the inspector's edits
+/// to one placement, or a viewport drag's per-frame moves - records one checkpoint, before its
+/// first action, and stays open while like actions continue; any other applied action closes it.
+/// An `Edit` run is keyed on its selection (a further edit to the same one coalesces); a `Move` run
+/// coalesces any consecutive `MoveSelection` (the moved group has no single key).
+#[derive(Default, PartialEq, Eq)]
+enum OpenRun {
+    #[default]
+    None,
+    Edit(Selection),
+    Move,
+}
+
+/// The undo and redo stacks plus the open-run marker that drives coalescing. Owned by
 /// [`EditorModel`] and mutated only through the model methods below; starts empty, so the initial
 /// loaded state is not itself an undo target.
 #[derive(Default)]
 pub struct History {
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
-    /// The selection of the open `Edit` run, set while the last checkpoint-relevant action was an
-    /// `Edit`. A further `Edit` to this same selection coalesces into the checkpoint already taken;
-    /// any other action clears it and so closes the run.
-    open_edit: Option<Selection>,
+    open: OpenRun,
 }
 
 impl History {
@@ -52,16 +62,23 @@ impl History {
     fn should_checkpoint(&mut self, action: &Action) -> bool {
         match action {
             // A run of edits to one selection is one gesture: only its first edit checkpoints.
-            Action::Edit { sel, .. } if self.open_edit == Some(*sel) => false,
+            Action::Edit { sel, .. } if self.open == OpenRun::Edit(*sel) => false,
             Action::Edit { sel, .. } => {
-                self.open_edit = Some(*sel);
+                self.open = OpenRun::Edit(*sel);
+                true
+            }
+            // A group-move drag is one gesture too: only its first frame checkpoints, the rest
+            // coalesce. Keyed on "a move run is open", not a selection - the group has no one key.
+            Action::MoveSelection { .. } if self.open == OpenRun::Move => false,
+            Action::MoveSelection { .. } => {
+                self.open = OpenRun::Move;
                 true
             }
             // Every other mutating action closes any run and takes its own checkpoint. The set
             // delete/duplicate are one action and so one checkpoint, exactly like their single
             // forms were - the whole group undoes in a single step.
             Action::Place { .. } | Action::Delete | Action::Duplicate | Action::Rename { .. } => {
-                self.open_edit = None;
+                self.open = OpenRun::None;
                 true
             }
             // Non-mutating actions, plus Save (it writes disk; undoing it would desync memory from
@@ -69,7 +86,7 @@ impl History {
             // ToggleSelect changes only the selection, so it records nothing, like Select.
             Action::Select(_) | Action::ToggleSelect(_) | Action::ArmPlace(_) | Action::DisarmPlace
             | Action::Frame(_) | Action::Save | Action::Undo | Action::Redo => {
-                self.open_edit = None;
+                self.open = OpenRun::None;
                 false
             }
         }
@@ -96,7 +113,7 @@ impl EditorModel {
         let Some(snapshot) = self.history.undo.pop() else { return Ok(false) };
         let current = self.snapshot();
         self.history.redo.push(current);
-        self.history.open_edit = None;
+        self.history.open = OpenRun::None;
         self.restore(snapshot)?;
         Ok(true)
     }
@@ -107,7 +124,7 @@ impl EditorModel {
         let Some(snapshot) = self.history.redo.pop() else { return Ok(false) };
         let current = self.snapshot();
         self.history.undo.push(current);
-        self.history.open_edit = None;
+        self.history.open = OpenRun::None;
         self.restore(snapshot)?;
         Ok(true)
     }

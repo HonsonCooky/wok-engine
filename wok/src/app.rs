@@ -138,6 +138,11 @@ impl EditorApp {
                     eprintln!("wok: edit failed: {err}");
                 }
             }
+            Action::MoveSelection { delta } => {
+                if let Err(err) = self.model.move_selection(delta) {
+                    eprintln!("wok: move failed: {err}");
+                }
+            }
             Action::ArmPlace(prefab) => self.ui.placing = Some(prefab),
             Action::DisarmPlace => self.ui.placing = None,
             Action::Place { prefab, point } => {

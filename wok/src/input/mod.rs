@@ -17,6 +17,7 @@
 //! re-exported here so callers address the `input` module, not its parts.
 
 mod camera;
+mod reposition;
 mod viewport;
 
 pub use camera::camera_input;
