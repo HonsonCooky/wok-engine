@@ -6,6 +6,24 @@ Design canon for the wok editor, the GUI that authors content for the engine. Th
 
 The editor is a full content creator. It authors every authored-on-disk form the engine consumes (scenes, prefabs, terrain heightmaps, lighting states) and surfaces content integrity. It is the tool side of the compass "engine creates content; game connects content": it produces the authored data, and the game runs it. It writes only the authored forms (HLD data-flow states 1 and 2); it never holds or writes runtime state, and runtime never flows back into it.
 
+## Workflows
+
+Authoring is not a linear pipeline; it is two tracks that build in parallel, converge at placement, and sit inside an iterate loop, with cross-cutting work running throughout. The journeys:
+
+- Open a project (a root folder for one game) and create a scene. A project holds many scenes; level one is the first of many.
+- Environment track: sculpt the terrain (mountains, hills, ponds), paint its surfaces (grass, stone, and so on), then set lighting, water levels, and fog and lighting zones.
+- Object track: create prefabs, hitboxes built from placeholder primitive shapes with named states and surface tags, standing in for the final mesh that arrives later.
+- Place: the hub where both tracks converge and the scene is assembled. This is the finicky core and the reason the modal manipulator model (see Input) exists; it is the convergence point of every other workflow, so it earns the most care (selection-as-cursor, snapping, grid steps) and is built before the feeder surfaces.
+- Iterate: author, play-test in taste (the Run verb), adjust. Hot reload makes this a loop, not a one-way march, and placement especially lives in it.
+- Cutscenes: a future edit context layered on a finished scene (wok-sequence data plus an authoring UI).
+
+Cross-cutting, running throughout rather than as a final step:
+
+- Content integrity: the scan answers what is still to build (the artist's queue) and what is broken (dead references, orphans, empty slots). It is the asset-decoupled payoff, content and code proceeding in parallel because the project can always be scanned for what is missing.
+- Asset binding: the placeholder-to-final swap. A prefab is hitboxes and placeholder shapes now; when a real mesh arrives it is bound by name. This is the moment content and code merge.
+
+Scaling and boundary: a scene spans many 128m chunks, so terrain and placement scale through multi-chunk authoring, and a project scales through multi-scene management. The editor authors spatial data only; it may author trigger and region volumes (content the game consumes), but the game routes the events, never the editor.
+
 ## Locked decisions
 
 - Full content creator (2026-06-14). The editor owns authoring for all four authored data types plus integrity, not just scene assembly. Revisit only if a surface proves better served by an external tool.
@@ -24,15 +42,17 @@ The shell is Zed's, with wok's verbs.
 
 ## Input
 
-The editor is driven from the left hand on the keyboard and the right hand on the mouse, with the touch-typing home row kept under the fingers so moving between authoring and typing never repositions the hand. Bindings are focus-gated: while a text field holds keyboard focus the keys type, otherwise they drive the viewport. The scheme below is the default; it becomes a rebindable table when the command palette lands, not a hardcoded law.
+The editor is a modal manipulator, not a flight simulator: the selection is the cursor, and most work is acting on it. The hardware sets the grammar, left hand on the keyboard and right hand on the mouse, so unlike two-handed vim the split is by device: the mouse is the motion (which object, where), the left hand is the operators (what, and how much). Bindings are focus-gated (a focused text field types, otherwise keys drive the editor) and become a rebindable table with the command palette.
 
-Camera movement is bare home-row keys, vim-style and all on one row: s strafe-left, d back, f forward, g strafe-right. Holding Ctrl turns that row to vertical and command use: Ctrl+f ascends, Ctrl+d descends, and Ctrl suppresses planar movement so a command chord like Ctrl+S never also strafes. Forward follows the look direction (flying up a slope is look-up-and-go), so the Ctrl vertical is a deliberate world-space elevator. f and g share the index finger, so forward-right has no chord: an accepted cost of the single-row layout.
+Modes. Object mode is the default: the selection is the cursor, the camera auto-locks to it, and the left hand operates on it. Place mode arms a prefab and drops it on click (the insert analog). Free-fly mode is toggled by a thumb or layer key: a first-person fly to get around, where the left hand drives the camera and the mouse looks. The same keys mean different things per mode, which is what lets a one-handed key set cover everything.
 
-Mouse: right-drag orbits the camera, right-click opens the edit menu on what it hits, the scroll wheel sets fly speed. Left-click selects one placement, replacing the selection; Ctrl+left-click toggles a placement in or out of the selection set. Left-drag reads its start: pressed on a selected placement it repositions the whole selection, pressed anywhere else (empty space, or an unselected placement, which it passes over rather than grabs) it is an area marquee that replaces the selection, or adds to it while Ctrl is held.
+Mouse, the motion. Left-click selects one placement (replace); Ctrl+click toggles one in or out; a left-drag from empty or unselected space is a marquee (replace, or Ctrl to extend); a left-drag from a selected member repositions the whole selection; right-click opens the edit menu; right-drag looks (free-fly mode); the scroll wheel sets fly speed. The mouse answers which object and where.
 
-Commands: Ctrl+S save, Ctrl+Z undo, Ctrl+Shift+Z redo, Delete removes the selection, Esc cancels place mode then the context menu then the selection. Duplicate, rename, and frame-on-selection live in the edit menu until they earn hotkeys.
+Left hand, the operators. In object mode the home row acts on the selection: nudge, rotate, and scale, axis-locked and quantified by a count (the 1-5 number row) so motion is in discrete grid steps, plus delete, duplicate, and change-the-prefab. Verb plus count plus axis is the core grammar, the mouse having already supplied the which. These verbs call the same transform-the-selection primitives the inspector's multi-edit uses.
 
-Multi-selection is the set behind Ctrl+click and the marquee: it turns the single selection into a set and touches picking, the inspector, the tree, drag, and delete, so it is built as its own arc rather than bundled with the nav remap.
+Commands. Ctrl+S save, Ctrl+Z undo, Ctrl+Shift+Z redo, Delete deletes the selection, Esc unwinds place mode then the context menu then the selection. The command palette is the typed command line (the vim colon analog): place, select by query, align, go to chunk.
+
+The model commits to the paradigm (modal, selection-as-cursor, mouse-motion and left-operator, a free-fly toggle) and grows the richer grammar (object-to-object motions, repeat-last-op, registers, marks, align and distribute) as authoring demands it, not all at once. Today's input is still the camera-centric keymaps (the home row flies, focus-gated, Ctrl-vertical); the modal rework is the next arc, and it reworks the input layer while the spine (the selection set, the action layer, undo) stands.
 
 ## Edit contexts
 
