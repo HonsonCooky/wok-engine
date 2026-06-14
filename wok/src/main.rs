@@ -40,6 +40,7 @@ mod place;
 mod reload;
 mod sample;
 mod selection;
+mod selection_ops;
 mod status;
 mod sync;
 mod theme;

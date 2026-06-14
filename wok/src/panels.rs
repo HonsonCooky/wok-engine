@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use wok_scene::{ChunkCoord, PrefabRef, Transform};
 
 use crate::details;
@@ -73,9 +73,19 @@ pub enum Action {
     /// so a plain box over empty space clears and a Ctrl box over empty space leaves the set.
     SelectMany { items: Vec<Selection>, add: bool },
     Edit { sel: Selection, transform: Transform, state: Option<String> },
-    /// Move every selected placement rigidly by a uniform delta - the viewport group-drag, one
-    /// undo step per drag (consecutive moves coalesce in `crate::history`).
+    /// Move every selected placement rigidly by a uniform delta - the viewport group-drag and the
+    /// inspector's multi position edit, one undo step per drag (transform verbs coalesce in
+    /// `crate::history`).
     MoveSelection { delta: Vec3 },
+    /// Rotate every selected placement in place by `delta` (rotation = delta * rotation) - the
+    /// inspector's multi rotation edit. Coalesces with the other transform verbs into one undo step.
+    RotateSelection { delta: Quat },
+    /// Scale every selected placement by `factor` (scale *= factor) - the inspector's multi scale
+    /// edit. Coalesces with the other transform verbs into one undo step.
+    ScaleSelection { factor: f32 },
+    /// Set every selected placement's state - the inspector's multi state combo. A discrete mutating
+    /// action: one checkpoint, like a set delete.
+    SetStateSelection { state: Option<String> },
     ArmPlace(PrefabRef),
     DisarmPlace,
     /// Place the armed prefab at a viewport-resolved terrain point; the model selects the result.

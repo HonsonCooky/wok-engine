@@ -7,8 +7,6 @@
 //! name is pure annotation, and the sliced arrays carry no placement identity by design - so a
 //! rename is a dirty flag and nothing else.
 
-use std::collections::BTreeSet;
-
 use glam::Vec3;
 use wok_content::StoreError;
 use wok_scene::Aabb;
@@ -61,28 +59,6 @@ impl EditorModel {
         Ok(())
     }
 
-    /// Move every selected placement rigidly by a uniform delta, re-transforming each affected
-    /// chunk once. The viewport group-drag's per-frame step: the grabbed placement resolves the
-    /// delta and the whole set follows, keeping its relative layout. A rigid translate only - no
-    /// per-item terrain re-rest - so rotation, scale, and the group's shape are untouched.
-    pub fn move_selection(&mut self, delta: Vec3) -> Result<(), StoreError> {
-        let targets: Vec<Selection> = self.selection.iter().collect();
-        let mut affected = BTreeSet::new();
-        for sel in targets {
-            let Some(chunk) = self.chunks.get_mut(&sel.coord) else { continue };
-            let Some(placement) = chunk.placements.iter_mut().find(|p| p.instance_id == sel.id) else {
-                continue;
-            };
-            placement.transform.translation += delta;
-            self.dirty_chunks.insert(sel.coord);
-            affected.insert(sel.coord);
-        }
-        for coord in affected {
-            self.retransform(coord)?;
-        }
-        Ok(())
-    }
-
     /// Set or clear a placement's display name: trimmed, and an empty result clears back to
     /// `None` (the file omits the field again). Returns whether the placement existed. No
     /// re-transform: names never reach the runtime arrays.
@@ -124,7 +100,6 @@ impl EditorModel {
 mod tests {
     use super::*;
     use crate::content::ContentPaths;
-    use crate::panels::Action;
     use crate::sample;
     use crate::sync;
     use std::path::PathBuf;
@@ -204,95 +179,6 @@ mod tests {
         assert_eq!(model.selection.len(), 2, "the copies are selected");
         assert!(!model.selection.contains(a) && !model.selection.contains(b), "the originals are deselected");
         assert!(model.selection.iter().all(|copy| model.placement(copy).is_some()), "each copy resolves");
-    }
-
-    // ---- group move (with the writer's checkpoint, so undo coalescing rides along) ----
-
-    #[test]
-    fn move_selection_shifts_every_member_by_delta_and_undoes_in_one_step() {
-        let mut model = sample_model();
-        let coord = ChunkCoord::new(0, 0);
-        let group = [
-            Selection { coord, id: InstanceId(0) },
-            Selection { coord, id: InstanceId(2) },
-            Selection { coord, id: InstanceId(5) },
-        ];
-        for sel in group {
-            model.selection.toggle(sel);
-        }
-        let before: Vec<Vec3> =
-            group.iter().map(|s| model.placement(*s).unwrap().transform.translation).collect();
-        let delta = Vec3::new(3.0, 1.5, -2.0);
-
-        model.checkpoint(&Action::MoveSelection { delta });
-        model.move_selection(delta).unwrap();
-        for (sel, &was) in group.iter().zip(&before) {
-            assert_eq!(model.placement(*sel).unwrap().transform.translation, was + delta, "moved by delta");
-        }
-
-        assert!(model.undo().unwrap());
-        for (sel, &was) in group.iter().zip(&before) {
-            assert_eq!(model.placement(*sel).unwrap().transform.translation, was, "the whole group restored");
-        }
-        assert!(!model.undo().unwrap(), "the group move was a single undo step");
-    }
-
-    #[test]
-    fn a_single_selection_move_still_shifts_and_undoes() {
-        let mut model = sample_model();
-        let sel = Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(0) };
-        model.selection.replace(sel);
-        let before = model.placement(sel).unwrap().transform.translation;
-        let delta = Vec3::new(2.0, 0.0, 1.0);
-
-        model.checkpoint(&Action::MoveSelection { delta });
-        model.move_selection(delta).unwrap();
-        assert_eq!(model.placement(sel).unwrap().transform.translation, before + delta);
-
-        assert!(model.undo().unwrap());
-        assert_eq!(model.placement(sel).unwrap().transform.translation, before, "a one-member move undoes too");
-    }
-
-    #[test]
-    fn a_move_run_coalesces_across_frames_into_one_undo_step() {
-        let mut model = sample_model();
-        let sel = Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(0) };
-        model.selection.replace(sel);
-        let before = model.placement(sel).unwrap().transform.translation;
-
-        // A drag is many MoveSelection frames, each checkpointed at the writer; the run coalesces,
-        // so only the first keeps a snapshot.
-        for _ in 0..5 {
-            let delta = Vec3::new(1.0, 0.0, 0.0);
-            model.checkpoint(&Action::MoveSelection { delta });
-            model.move_selection(delta).unwrap();
-        }
-        assert_eq!(model.placement(sel).unwrap().transform.translation, before + Vec3::new(5.0, 0.0, 0.0));
-
-        assert!(model.undo().unwrap());
-        assert_eq!(model.placement(sel).unwrap().transform.translation, before, "one undo rewinds the drag");
-        assert!(!model.undo().unwrap(), "the drag was a single recorded step");
-    }
-
-    #[test]
-    fn a_select_between_two_drags_breaks_the_move_run() {
-        let mut model = sample_model();
-        let sel = Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(0) };
-        model.selection.replace(sel);
-        let t0 = model.placement(sel).unwrap().transform.translation;
-        let d = Vec3::new(1.0, 0.0, 0.0);
-
-        model.checkpoint(&Action::MoveSelection { delta: d });
-        model.move_selection(d).unwrap();
-        // A non-mutating Select between the drags closes the run; the second drag is its own step.
-        model.checkpoint(&Action::Select(Some(sel)));
-        model.checkpoint(&Action::MoveSelection { delta: d });
-        model.move_selection(d).unwrap();
-
-        assert!(model.undo().unwrap());
-        assert_eq!(model.placement(sel).unwrap().transform.translation, t0 + d, "first undo: back to one drag");
-        assert!(model.undo().unwrap());
-        assert_eq!(model.placement(sel).unwrap().transform.translation, t0, "second undo: back to the start");
     }
 
     #[test]

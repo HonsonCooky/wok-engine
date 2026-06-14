@@ -144,6 +144,21 @@ impl EditorApp {
                     eprintln!("wok: move failed: {err}");
                 }
             }
+            Action::RotateSelection { delta } => {
+                if let Err(err) = self.model.rotate_selection(delta) {
+                    eprintln!("wok: rotate failed: {err}");
+                }
+            }
+            Action::ScaleSelection { factor } => {
+                if let Err(err) = self.model.scale_selection(factor) {
+                    eprintln!("wok: scale failed: {err}");
+                }
+            }
+            Action::SetStateSelection { state } => {
+                if let Err(err) = self.model.set_state_selection(state.as_deref()) {
+                    eprintln!("wok: set state failed: {err}");
+                }
+            }
             Action::ArmPlace(prefab) => self.ui.placing = Some(prefab),
             Action::DisarmPlace => self.ui.placing = None,
             Action::Place { prefab, point } => {

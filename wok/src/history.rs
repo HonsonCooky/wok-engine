@@ -35,14 +35,15 @@ struct Snapshot {
 /// The open coalescing run, if any. A gesture made of many small mutations - the inspector's edits
 /// to one placement, or a viewport drag's per-frame moves - records one checkpoint, before its
 /// first action, and stays open while like actions continue; any other applied action closes it.
-/// An `Edit` run is keyed on its selection (a further edit to the same one coalesces); a `Move` run
-/// coalesces any consecutive `MoveSelection` (the moved group has no single key).
+/// An `Edit` run is keyed on its selection (a further edit to the same one coalesces); a
+/// `Transform` run coalesces any consecutive `MoveSelection` / `RotateSelection` / `ScaleSelection`
+/// (the moved group has no single key), so a drag across transform fields is one step.
 #[derive(Default, PartialEq, Eq)]
 enum OpenRun {
     #[default]
     None,
     Edit(Selection),
-    Move,
+    Transform,
 }
 
 /// The undo and redo stacks plus the open-run marker that drives coalescing. Owned by
@@ -67,17 +68,23 @@ impl History {
                 self.open = OpenRun::Edit(*sel);
                 true
             }
-            // A group-move drag is one gesture too: only its first frame checkpoints, the rest
-            // coalesce. Keyed on "a move run is open", not a selection - the group has no one key.
-            Action::MoveSelection { .. } if self.open == OpenRun::Move => false,
-            Action::MoveSelection { .. } => {
-                self.open = OpenRun::Move;
+            // A transform drag is one gesture too: move, rotate, and scale share one run, so only
+            // its first frame checkpoints and the rest coalesce - a drag across any transform field
+            // is one undo step. Keyed on "a transform run is open", not a selection - no one key.
+            Action::MoveSelection { .. } | Action::RotateSelection { .. } | Action::ScaleSelection { .. }
+                if self.open == OpenRun::Transform =>
+            {
+                false
+            }
+            Action::MoveSelection { .. } | Action::RotateSelection { .. } | Action::ScaleSelection { .. } => {
+                self.open = OpenRun::Transform;
                 true
             }
             // Every other mutating action closes any run and takes its own checkpoint. The set
-            // delete/duplicate are one action and so one checkpoint, exactly like their single
-            // forms were - the whole group undoes in a single step.
-            Action::Place { .. } | Action::Delete | Action::Duplicate | Action::Rename { .. } => {
+            // delete/duplicate and the multi-state set are one action and so one checkpoint, exactly
+            // like their single forms - the whole group undoes in a single step.
+            Action::Place { .. } | Action::Delete | Action::Duplicate | Action::Rename { .. }
+            | Action::SetStateSelection { .. } => {
                 self.open = OpenRun::None;
                 true
             }
