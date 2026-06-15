@@ -1,97 +1,34 @@
 //! wok: the editor, the engine's reference application.
 //!
-//! v1 is the authoring loop over v0's viewport: see the scene's structure (scene tree), select
-//! (tree click or viewport pick), edit (inspector), place and delete, and save - all against the
-//! authored in-memory forms, re-transformed through wok-content per edit so the viewport always
-//! draws the authored truth. The UI is egui, composed as a final render pass; egui is a
-//! dependency of this application only, never of an engine crate.
+//! Reset to a minimal shell: a window, an egui pass, and an empty viewport with a working menu bar.
+//! The File menu opens a project - a content-root folder - and the editor shows the project's name
+//! in the title bar and status bar. Loading and rendering the project's scene content, and the
+//! authoring surfaces over it, return as later pieces; this is the frame they drop into.
 //!
-//! Run with `cargo run -p wok [content-dir]` (default `./content`). A first run against an empty
-//! directory generates the sample scene through the engine's save paths; every later run loads
-//! what is on disk. Editing the authored JSON or heightmap binaries while the editor runs updates
-//! the viewport live.
-//!
-//! Errors: the application propagates `Box<dyn Error>` to `main`, which prints and exits. Per
-//! canon an application may use `anyhow` instead, but nothing here inspects failures
-//! programmatically, so the standard library's boxed error is the same capability without a new
-//! dependency. There is no tracing subscriber yet for the same reason: no engine crate emits
-//! tracing events today, so a subscriber would observe nothing; it arrives when the first crate
-//! takes the tracing dependency.
+//! egui is a dependency of this application only, never of an engine crate. Run with
+//! `cargo run -p wok [project-dir]`: with a folder argument the editor opens it on startup,
+//! otherwise it starts with no project open (open one from the File menu).
 
-mod actions;
+mod action;
 mod app;
-mod camera;
 mod cli;
-mod content;
-mod details;
-mod edit_ops;
-mod glyphs;
 mod gui;
-mod history;
-mod input;
-mod library;
-mod lines;
-mod mode;
-mod model;
-mod orbit;
-mod outline;
-mod pages;
-mod panels;
-mod pick;
-mod place;
-mod reload;
-mod render;
-mod sample;
-mod selection;
-mod selection_ops;
-mod status;
-mod sync;
+mod menu;
+mod project;
 mod theme;
-mod tree;
-
-use std::error::Error;
 
 use wok_platform::Desc;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match start(&args) {
-        // run() owns the OS event loop and returns when the window closes.
-        Ok(editor) => wok_platform::run(editor, Desc { title: "wok", width: 0, height: 0, vsync: true }),
+    let initial = match cli::parse_args(&args) {
+        Ok(initial) => initial,
         Err(err) => {
             eprintln!("wok: {err}");
             std::process::exit(1);
         }
-    }
-}
-
-/// Everything before the window opens: parse the CLI, generate sample content if the directory
-/// has no scene, load and transform all of it, and build the app.
-fn start(args: &[String]) -> Result<app::EditorApp, Box<dyn Error>> {
-    let root = cli::parse_args(args)?;
-    let paths = content::ContentPaths::new(root);
-
-    if !paths.scene().exists() {
-        println!("wok: no scene at {}; generating sample content", paths.scene().display());
-        sample::generate(&paths)?;
-    }
-
-    // Canonicalize the root after it exists, so the watcher registration and the changed paths it
-    // reports share one base and hot-reload classification can strip it exactly. Without this a
-    // relative root never prefix-matches the absolute paths the OS watcher reports on Windows.
-    let paths = content::ContentPaths::new(paths.root.canonicalize()?);
-
-    let loaded = content::load_all(&paths)?;
-    println!(
-        "wok: scene {:?}: {} chunk(s), {} prefab(s)",
-        loaded.scene.name,
-        loaded.chunks.len(),
-        loaded.prefabs.len()
-    );
-    println!("wok: object mode (default): the camera locks to the selection - right-drag orbits, scroll zooms");
-    println!("wok: backtick toggles free-fly: WASD move, Q/E down/up, hold right mouse to look, scroll for speed");
-    println!("wok: editing: click selects, drag box-selects, the home row nudges the selection, Delete removes");
-    println!("wok: Ctrl+S saves, Esc cancels/deselects");
-
-    app::EditorApp::new(paths, loaded)
+    };
+    let app = app::EditorApp::new(initial);
+    // run() owns the OS event loop and returns when the window closes.
+    wok_platform::run(app, Desc { title: "wok", width: 0, height: 0, vsync: true });
 }

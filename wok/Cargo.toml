@@ -37,15 +37,11 @@ uninlined_format_args             = "allow"
 unnecessary_wraps                 = "allow"
 unused_self                       = "allow"
 
+# Minimal shell: the window/GPU/frame-loop substrate plus the egui integration. The engine
+# libraries (wok-scene, wok-physics, wok-mesh, wok-light, wok-content, wok-render) and glam return
+# as their consuming pieces of the editor do; they are not dependencies of the bare shell.
 [dependencies]
-wok-content = { path = "../wok-content" }
-wok-light = { path = "../wok-light" }
-wok-mesh = { path = "../wok-mesh" }
-wok-physics = { path = "../wok-physics" }
 wok-platform = { path = "../wok-platform" }
-wok-render = { path = "../wok-render" }
-wok-scene = { path = "../wok-scene" }
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
-glam.workspace = true

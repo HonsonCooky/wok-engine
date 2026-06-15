@@ -3698,14 +3698,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
- "glam",
- "wok-content",
- "wok-light",
- "wok-mesh",
- "wok-physics",
  "wok-platform",
- "wok-render",
- "wok-scene",
 ]
 
 [[package]]

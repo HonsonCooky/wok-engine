@@ -8,22 +8,7 @@
 //! egui's default - the point is to remove visual weight (shadows, fat rounding, loud
 //! separators), not to design a palette.
 
-use egui::{Color32, CornerRadius, Margin, Visuals, vec2};
-
-/// The tree's icon gray: the text color pulled partway toward the panel fill. Stated as a blend
-/// rather than an absolute so it lands at "neutral mid-gray" on both built-in themes: dimmer than
-/// the labels (the icons are furniture, not content) but solid enough that a filled 11px glyph
-/// still reads.
-pub fn icon_color(visuals: &Visuals) -> Color32 {
-    visuals.text_color().lerp_to_gamma(visuals.panel_fill, 0.35)
-}
-
-/// The far-right metadata gray: well below the icon gray (Zed's git-letter treatment), present
-/// when looked for and silent otherwise. Same blend construction as [`icon_color`] for the same
-/// both-themes reason.
-pub fn meta_color(visuals: &Visuals) -> Color32 {
-    visuals.text_color().lerp_to_gamma(visuals.panel_fill, 0.6)
-}
+use egui::{CornerRadius, Margin, vec2};
 
 /// Apply the editor look to both built-in themes.
 pub fn apply(ctx: &egui::Context) {
