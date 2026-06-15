@@ -1,5 +1,5 @@
 {
-  "move_speed": 9.8,
+  "move_speed": 5.2,
   "gravity": 30.0,
   "jump_velocity": 9.8,
   "max_jumps": 5,
