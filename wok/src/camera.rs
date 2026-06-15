@@ -13,8 +13,9 @@
 //!
 //! Conventions: right-handed, `+Y` up. `yaw` is radians about `+Y` with `0` facing `-Z`, positive
 //! turning right (toward `+X`); `pitch` is radians with positive looking up, clamped short of the
-//! poles so the view never flips. The camera flies where it looks: forward motion follows the
-//! pitched forward vector, not its horizontal projection.
+//! poles so the view never flips. Free-fly is a ground-plane god-cam, not an FPS fly: forward and
+//! strafe pan along the yaw-only horizontal heading (tilting the view never drags the camera up or
+//! down), and Q/E change altitude along world up.
 
 use glam::{Mat4, Vec2, Vec3};
 
@@ -74,6 +75,15 @@ impl FlyCamera {
         Vec3::new(cos_yaw, 0.0, sin_yaw)
     }
 
+    /// The unit heading the camera pans forward along: the yaw direction on the XZ plane, pitch
+    /// ignored, so a ground-plane pan stays level whatever the view tilt. Derived from yaw directly
+    /// (it is `forward()` at pitch zero), not by flattening `forward`, which collapses to zero
+    /// length when looking straight down.
+    pub fn heading(&self) -> Vec3 {
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        Vec3::new(sin_yaw, 0.0, -cos_yaw)
+    }
+
     /// The combined view-projection matrix for a target with the given aspect ratio, with the far
     /// plane supplied per frame (the editor derives it from the fog distance). `perspective_rh`
     /// maps depth to `0..=1`, which is wgpu's clip-space convention.
@@ -129,15 +139,16 @@ pub fn frame(camera: &FlyCamera, min: Vec3, max: Vec3) -> FlyCamera {
 /// Advance the camera by one frame. Pure: identical inputs give an identical next state.
 ///
 /// Look is applied before movement so a frame's motion follows where the user just turned; speed
-/// is applied before movement for the same reason. Movement direction is the combined wish vector
-/// clamped to unit length, so diagonals are no faster than a single axis.
+/// is applied before movement for the same reason. Forward and strafe pan the horizontal plane (the
+/// yaw-only heading and right), Q/E moves along world up, and the combined wish vector is clamped to
+/// unit length so diagonals are no faster than a single axis.
 pub fn update(camera: &FlyCamera, input: &CameraInput, dt: f32) -> FlyCamera {
     let yaw = camera.yaw + input.look_delta.x;
     let pitch = (camera.pitch + input.look_delta.y).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     let speed = (camera.speed * SPEED_STEP_FACTOR.powf(input.speed_steps)).clamp(SPEED_MIN, SPEED_MAX);
 
     let turned = FlyCamera { yaw, pitch, speed, ..*camera };
-    let wish = (turned.forward() * input.move_forward
+    let wish = (turned.heading() * input.move_forward
         + turned.right() * input.move_right
         + Vec3::Y * input.move_up)
         .clamp_length_max(1.0);
@@ -201,10 +212,32 @@ mod tests {
     // ---- movement ----
 
     #[test]
-    fn forward_motion_follows_the_view_direction() {
-        let cam = FlyCamera { yaw: 1.1, pitch: 0.4, ..camera() };
-        let moved = update(&cam, &CameraInput { move_forward: 1.0, ..Default::default() }, 0.5);
-        assert!(close(moved.position, cam.forward() * cam.speed * 0.5));
+    fn forward_pan_stays_horizontal_while_q_e_alone_changes_height() {
+        // Ground-plane god-cam: tilting the view down to survey must not drag the camera downward.
+        // Forward motion has no Y component whatever the pitch; only Q/E changes height, on world up.
+        let cam = FlyCamera { yaw: 1.1, pitch: -1.3, ..camera() };
+        let panned = update(&cam, &CameraInput { move_forward: 1.0, ..Default::default() }, 0.5);
+        assert!((panned.position.y - cam.position.y).abs() < EPS, "forward stayed level: {:?}", panned.position);
+
+        let lifted = update(&cam, &CameraInput { move_up: 1.0, ..Default::default() }, 0.5);
+        assert!(close(lifted.position, cam.position + Vec3::Y * cam.speed * 0.5), "Q/E raises along world up");
+    }
+
+    #[test]
+    fn pan_tracks_yaw_and_ignores_pitch() {
+        // The pan heading comes from yaw alone: a level camera and a steeply pitched one at the same
+        // yaw move identically, and that shared heading is the yaw direction on the XZ plane. A
+        // forward vector flattened (not derived from yaw) would shrink toward zero at this pitch.
+        let level = FlyCamera { yaw: 1.1, pitch: 0.0, ..camera() };
+        let pitched = FlyCamera { yaw: 1.1, pitch: -PITCH_LIMIT, ..camera() };
+        let input = CameraInput { move_forward: 1.0, ..Default::default() };
+        let a = update(&level, &input, 0.5);
+        let b = update(&pitched, &input, 0.5);
+        assert!(close(a.position, b.position), "pitch changed the pan: {:?} vs {:?}", a.position, b.position);
+
+        let (sin_yaw, cos_yaw) = 1.1_f32.sin_cos();
+        let heading = Vec3::new(sin_yaw, 0.0, -cos_yaw);
+        assert!(close(a.position, heading * level.speed * 0.5), "forward follows the full-length yaw heading");
     }
 
     #[test]
