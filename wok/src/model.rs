@@ -15,8 +15,8 @@
 //!
 //! Undo/redo rides this writer: `crate::history` checkpoints the authored form before each mutating
 //! action and restores it on undo, re-running the same authored -> runtime transform. The first
-//! trips it guards are Delete (the placement is gone outright) and drag-to-move (a slipped drag
-//! overwrites the transform it started from); both are now reversible.
+//! trips it guards are Delete (the placement is gone outright) and the keyboard nudge (a mistaken
+//! step overwrites the transform it started from); both are reversible.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

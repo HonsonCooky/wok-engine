@@ -15,7 +15,6 @@ use glam::{Quat, Vec3};
 use wok_scene::{ChunkCoord, PrefabRef, Transform};
 
 use crate::details;
-use crate::drag::PlacementDrag;
 use crate::input::Marquee;
 use crate::library;
 use crate::mode::Mode;
@@ -48,12 +47,9 @@ pub struct UiState {
     /// Raw mouse motion accumulated while the right button is held, in pixels: how the input
     /// routing tells a look-drag from a context click on release.
     pub right_drag_px: f32,
-    /// A left-button drag on the selected placement in progress, if any; the same 4px rule tells
-    /// it from a click. Lives here because it is interaction state, never authored data.
-    pub drag: Option<PlacementDrag>,
-    /// A left-button area marquee in progress, if any: a press on empty or unselected space that
-    /// becomes a box past the slop. Interaction state like `drag`; the UI draws it, the input
-    /// routing arms and resolves it.
+    /// A left-button area marquee in progress, if any: every left press off place mode arms one,
+    /// and it becomes a box past the slop. Interaction state, never authored data; the UI draws it,
+    /// the input routing arms and resolves it.
     pub marquee: Option<Marquee>,
 }
 

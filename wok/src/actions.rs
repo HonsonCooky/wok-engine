@@ -4,8 +4,8 @@
 //! Both the UI surfaces and the viewport input routing emit [`Action`]s; the frame loop applies
 //! them here, so the model has a single writer and undo/redo can ride it (`crate::history`
 //! checkpoints before each mutating action). Inert actions (selection, place mode, frame, save)
-//! record no checkpoint. Presentation-only state (place mode, the context menu, the drag, the
-//! marquee, the interaction mode) is mutated where it is read, never through an action.
+//! record no checkpoint. Presentation-only state (place mode, the context menu, the marquee, the
+//! interaction mode) is mutated where it is read, never through an action.
 
 use crate::camera;
 use crate::app::EditorApp;

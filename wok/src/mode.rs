@@ -5,12 +5,12 @@
 //! one-handed scheme can cover everything, and the same physical keys mean different things in each:
 //!
 //! - [`Mode::Object`] (the default): the camera locks to and orbits the selection, and the home row
-//!   operates on it (the object verbs are the next slice; the row is inert for now).
+//!   operates on it - the nudge moves the selection by grid steps; rotate and scale follow.
 //! - [`Mode::FreeFly`]: a first-person fly to get around, where WASD flies the camera and the mouse
 //!   looks - today's camera, now gated behind this mode.
 //!
-//! Only the camera and the home-row keys are modal; mouse selection (click, Ctrl+click, marquee,
-//! drag-to-reposition) works the same in both. The mode is interaction state, never authored data:
+//! Only the camera and the home-row keys are modal; mouse selection (click, Ctrl+click, marquee) is
+//! selection-only and works the same in both. The mode is interaction state, never authored data:
 //! it lives in `UiState` and is toggled in place by the input routing, not through the action layer.
 
 /// Which interaction grammar the editor is in. `Object` is the default - selection-centric, the
@@ -18,7 +18,7 @@
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     /// Selection-centric. The camera locks to the selection (frames it, then orbits the centroid),
-    /// and the home row will act on it (next slice). The editor's resting state.
+    /// and the home row acts on it (nudge now; rotate and scale follow). The editor's resting state.
     #[default]
     Object,
     /// Camera-centric free flight. WASD flies and the mouse looks, to get around; toggled back to

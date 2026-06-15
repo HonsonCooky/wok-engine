@@ -1,7 +1,8 @@
-//! Viewport input routing: hotkeys, left-click pick/place, the placement drag, and the area
-//! marquee, read against the model and emitted as [`Action`]s for the frame loop to apply (never
-//! written here, so the loop stays the model's single writer). `crate::input` covers the egui
-//! focus-gating these honor; `super::reposition` and `super::marquee` own the two left-drag gestures.
+//! Viewport input routing: hotkeys, the object-mode keyboard nudge, left-click pick/place, and the
+//! area marquee, read against the model and emitted as [`Action`]s for the frame loop to apply
+//! (never written here, so the loop stays the model's single writer). `crate::input` covers the
+//! egui focus-gating these honor; `super::object` owns the object-mode key verbs and
+//! `super::marquee` the one left-drag gesture (the mouse is selection-only - no reposition drag).
 
 use glam::Vec2;
 use wok_platform::input::InputState;
@@ -9,28 +10,27 @@ use wok_platform::winit::event::MouseButton;
 use wok_platform::winit::keyboard::NamedKey;
 
 use crate::camera::FlyCamera;
-use crate::drag::PlacementDrag;
+use crate::mode::Mode;
 use crate::model::EditorModel;
 use crate::panels::{Action, UiState};
 use crate::pick;
 
-use super::{CLICK_SLOP_PX, marquee, reposition};
+use super::{CLICK_SLOP_PX, marquee, object};
 
-/// Hotkeys and viewport clicks, read against the current model and emitted as [`Action`]s for the
-/// frame loop to apply, so this routing reads model state and never writes it. Ctrl+S emits `Save`,
-/// Ctrl+Z and Ctrl+Shift+Z (or Ctrl+Y) emit `Undo` / `Redo`, Delete emits `Delete`, Esc cancels
-/// place mode, then an open context menu, then emits
-/// `Select(None)` to deselect. In place mode a left click emits `Place`. Otherwise a left press on
-/// any selected placement arms a reposition drag (the whole selection moves once it crosses the
-/// slop, Shift vertically); a left press anywhere else arms a marquee that resolves on release -
-/// past the slop a box `SelectMany` (Ctrl extends, else replaces), under it the click it always
-/// was (`Select` on the pick or empty, `ToggleSelect` under Ctrl). A right click (a clean
-/// press-release - dragging is camera look) selects and opens the context menu on what it hit.
-/// Presentation state - place mode,
-/// the context menu, the right-drag accumulator, the scroll-to flag - is mutated here in place;
-/// only authored model changes go through actions. Ctrl+S deliberately ignores `keys_free`: saving
-/// must work mid-edit in a details field; undo and redo, by contrast, honor it, leaving a focused
-/// field egui's own in-field undo.
+/// Hotkeys, the object-mode keyboard nudge, and viewport clicks, read against the current model and
+/// emitted as [`Action`]s for the frame loop to apply, so this routing reads model state and never
+/// writes it. Ctrl+S emits `Save`, Ctrl+Z and Ctrl+Shift+Z (or Ctrl+Y) emit `Undo` / `Redo`, Delete
+/// emits `Delete`, Esc cancels place mode, then an open context menu, then emits `Select(None)` to
+/// deselect; backtick toggles the mode. In object mode (and only there) the home row nudges the
+/// selection (`super::object`). The mouse is selection-only: in place mode a left click emits
+/// `Place`; otherwise every left press arms a marquee that resolves on release - past the slop a box
+/// `SelectMany` (Ctrl extends, else replaces), under it the click it always was (`Select` on the
+/// pick or empty, `ToggleSelect` under Ctrl). A right click (a clean press-release - dragging is
+/// camera look) selects and opens the context menu on what it hit. Presentation state - place mode,
+/// the context menu, the right-drag accumulator, the scroll-to flag - is mutated here in place; only
+/// authored model changes go through actions. Ctrl+S deliberately ignores `keys_free`: saving must
+/// work mid-edit in a details field; undo, redo, the mode toggle, and the nudge, by contrast, honor
+/// it, leaving a focused field egui's own input.
 pub fn handle(
     input: &InputState,
     pointer_free: bool,
@@ -73,6 +73,12 @@ pub fn handle(
     if keys_free && input.char_pressed('`') {
         ui.mode = ui.mode.toggled();
     }
+    // Object-mode keyboard verbs: the home row nudges the whole selection by grid steps. Mode-gated
+    // (free-fly flies on these same letters, `super::camera`) and keys_free-gated (a focused field
+    // types them instead); `super::object` decides what the keys do, the gate decides when.
+    if keys_free && ui.mode == Mode::Object {
+        object::handle(input, model, actions);
+    }
 
     // Telling a look-drag from a context click: accumulate raw motion across the whole right
     // hold; a release that never really moved is the click.
@@ -92,50 +98,28 @@ pub fn handle(
 
     if pointer_free && input.mouse_pressed(MouseButton::Left) {
         ui.context_menu = None;
-        let Some(dir) = ray(camera) else { return };
         if let Some(prefab) = ui.placing.take() {
+            // Place mode: drop the armed prefab on the terrain under the click.
+            let Some(dir) = ray(camera) else { return };
             match pick::terrain_hit(&model.heightmaps, camera.position, dir, far) {
                 Some(hit) => actions.push(Action::Place { prefab, point: hit.point }),
                 // No terrain under the click: stay armed instead of silently dropping the mode.
                 None => ui.placing = Some(prefab),
             }
         } else {
-            let picked =
-                pick::pick(&model.chunks, &model.prefabs, &model.heightmaps, camera.position, dir, far);
-            let ctrl = input.key_held(NamedKey::Control);
-            if let Some(sel) = picked.filter(|&sel| !ctrl && model.selection.contains(sel)) {
-                // A plain press on any selected placement arms a reposition drag instead of
-                // re-picking: past the slop the whole selection moves rigidly with the grabbed
-                // member; released under it, nothing changes.
-                ui.drag = Some(PlacementDrag { sel, press_px: cursor, active: false, anchor: None });
-            } else {
-                // A press anywhere else - empty space, or an unselected placement it passes over
-                // rather than grabs - arms a marquee. The click-vs-box and plain-vs-Ctrl decisions
-                // are deferred to release (`marquee::step`): at press time we cannot yet tell a
-                // click from the start of a box.
-                ui.marquee = Some(marquee::Marquee::new(cursor));
-            }
+            // The mouse is selection-only: every left press off place mode arms a marquee, wherever
+            // it lands - empty space, an unselected placement, or a selected one alike (no
+            // reposition drag; the keyboard moves the selection). The click-vs-box and plain-vs-Ctrl
+            // decisions defer to release (`marquee::step`): at press time a click and the start of a
+            // box are indistinguishable.
+            ui.marquee = Some(marquee::Marquee::new(cursor));
         }
-    }
-
-    // An armed placement drag advances while the left button stays down and ends with it. The
-    // selection can vanish mid-drag (Esc, Delete, an external reload); the drag dies with it.
-    // Once started, the drag deliberately ignores `pointer_free`: it owns the pointer even when
-    // the cursor crosses a panel, exactly as a panel widget's own drag would over the viewport.
-    if let Some(mut drag) = ui.drag.take()
-        && input.mouse_held(MouseButton::Left)
-        && model.selection.contains(drag.sel)
-    {
-        if let Some(dir) = ray(camera) {
-            reposition::step(input, camera.position, dir, far, model, &mut drag, cursor, actions);
-        }
-        ui.drag = Some(drag);
     }
 
     // An armed marquee advances while the left button stays down and resolves on release - a box
-    // `SelectMany` past the slop, or the deferred single click under it. Like the reposition drag
-    // it owns the pointer once armed (ignores `pointer_free`), so dragging the box over a panel
-    // does not break it. A no-op on frames with no marquee.
+    // `SelectMany` past the slop, or the deferred single click under it. It owns the pointer once
+    // armed (ignores `pointer_free`), so dragging the box over a panel does not break it, exactly as
+    // a panel widget's own drag would over the viewport. A no-op on frames with no marquee.
     marquee::step(input, camera, size, far, model, ui, cursor, actions);
 
     if pointer_free
@@ -161,7 +145,6 @@ mod tests {
     use wok_platform::winit::keyboard::Key;
     use wok_scene::{ChunkCoord, InstanceId, PrefabRef};
 
-    use crate::drag::DragMode;
     use crate::input::test_support::{
         CENTER_CURSOR, aim_at_pillar, any_camera, blank_input, clicked, emitted, looking_from_at,
         sample_model,
@@ -285,61 +268,22 @@ mod tests {
     }
 
     #[test]
-    fn an_active_drag_emits_a_move_when_the_cursor_moves_the_placement() {
+    fn a_left_press_on_a_selected_member_arms_a_marquee_not_a_reposition() {
+        // The mouse is selection-only: a press on a selected placement arms a marquee like any other
+        // left press (the reposition drag is retired), so a drag from here box-selects and a click
+        // re-selects. The old behavior grabbed the member to reposition the group instead.
         let mut model = sample_model();
-        let coord = ChunkCoord::new(0, 0);
-        let sel = {
-            let boulder = model.chunks[&coord]
-                .placements
-                .iter()
-                .find(|p| p.prefab.as_str() == "boulder")
-                .expect("a boulder in the sample");
-            Selection { coord, id: boulder.instance_id }
-        };
-        model.selection.replace(sel);
-        // An already-active drag anchored at a zero grab offset: the dragged spot is the cursor's
-        // terrain hit itself. Aiming at the chunk centre puts that hit well away from the boulder's
-        // authored position, so the frame moves it and must emit a group move.
-        let drag = PlacementDrag {
-            sel,
-            press_px: Vec2::ZERO,
-            active: true,
-            anchor: Some((DragMode::Terrain, Vec3::ZERO)),
-        };
-        let mut ui = UiState { drag: Some(drag), ..UiState::default() };
-        let cam = looking_from_at(Vec3::new(64.0, 40.0, 100.0), Vec3::new(64.0, 0.0, 64.0));
-        let mut input = blank_input();
-        input.mouse_pos = CENTER_CURSOR;
-        // Held, not pressed: the drag branch advances, the press-only re-pick branch does not.
-        input.mouse_buttons_held.insert(MouseButton::Left);
-
-        let actions = emitted(&input, &cam, &model, &mut ui);
-        assert_eq!(actions.len(), 1, "one moved frame, one move action");
-        match &actions[0] {
-            Action::MoveSelection { delta } => assert!(*delta != Vec3::ZERO, "the drag moved the group"),
-            other => panic!("expected MoveSelection, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_press_on_any_selected_member_arms_the_group_drag() {
-        let mut model = sample_model();
-        let (grabbed, cam) = aim_at_pillar(&model);
-        // A two-member selection; the grabbed pillar is one of several, not the sole selection.
-        model.selection.replace(grabbed);
-        model.selection.toggle(Selection { coord: ChunkCoord::new(0, 0), id: InstanceId(0) });
+        let (member, cam) = aim_at_pillar(&model);
+        model.selection.replace(member);
         let mut ui = UiState::default();
         let mut input = blank_input();
         input.mouse_pos = CENTER_CURSOR;
-        // A real press frame holds the button it just pressed; both flags so the arm survives the
-        // same frame's drag-advance pass (which would otherwise take-and-not-restore it).
+        // A real press frame holds the button it just pressed.
         input.mouse_buttons_pressed.insert(MouseButton::Left);
         input.mouse_buttons_held.insert(MouseButton::Left);
 
-        // Pressing any selected member arms the group drag (no action yet) rather than re-selecting;
-        // the older sole-selection gate would have replace-selected here instead.
-        assert!(emitted(&input, &cam, &model, &mut ui).is_empty(), "arming emits no action");
-        assert_eq!(ui.drag.as_ref().map(|d| d.sel), Some(grabbed), "the pressed member is grabbed");
+        assert!(emitted(&input, &cam, &model, &mut ui).is_empty(), "arming a marquee emits no action");
+        assert!(ui.marquee.is_some(), "the press armed a marquee, not a reposition drag");
     }
 
     #[test]

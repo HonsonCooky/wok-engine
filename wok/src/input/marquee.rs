@@ -1,18 +1,18 @@
-//! The viewport marquee: a left-drag begun over empty space or an unselected placement draws a
-//! selection box and selects every placement inside it on release.
+//! The viewport marquee: a left-drag draws a selection box and selects every placement inside it on
+//! release. The mouse is selection-only, so every left press off place mode arms one.
 //!
-//! `crate::input::viewport` owns the press that arms the marquee (a press on a *selected* member
-//! arms the reposition drag instead) and calls [`step`] each later frame. The box resolves on
-//! release, not per frame: dragged past the click slop it is an area select that emits
-//! [`Action::SelectMany`] (replacing the selection, or extending it while Ctrl is held); released
-//! still under the slop it was a click, and keeps the single-click behavior - a plain click
+//! `crate::input::viewport` owns the press that arms the marquee - wherever it lands, since there is
+//! no reposition drag to claim a press on a selected member - and calls [`step`] each later frame.
+//! The box resolves on release, not per frame: dragged past the click slop it is an area select that
+//! emits [`Action::SelectMany`] (replacing the selection, or extending it while Ctrl is held);
+//! released still under the slop it was a click, and keeps the single-click behavior - a plain click
 //! replace-selects what it hit (clearing on empty), Ctrl+click toggles that placement (a no-op on
 //! empty). The rect-vs-world test is `crate::pick::pick_rect`; this module owns only the
 //! press/drag/release lifecycle and which action falls out of it.
 //!
-//! Like the reposition drag, the marquee owns the pointer once armed: [`step`] ignores
-//! `pointer_free`, so dragging the box across a panel does not break it, exactly as a panel
-//! widget's own drag would behave over the viewport.
+//! The marquee owns the pointer once armed: [`step`] ignores `pointer_free`, so dragging the box
+//! across a panel does not break it, exactly as a panel widget's own drag would behave over the
+//! viewport.
 
 use glam::Vec2;
 use wok_platform::input::InputState;
@@ -26,9 +26,9 @@ use crate::pick;
 
 use super::CLICK_SLOP_PX;
 
-/// A left-button area-select drag, from a press on empty or unselected space to release. Owned by
-/// `UiState` (interaction state, like the reposition drag) and advanced by [`step`] each frame the
-/// button stays down; the enclosed set is computed once, on release.
+/// A left-button area-select drag, from a left press to release. Owned by `UiState` (interaction
+/// state) and advanced by [`step`] each frame the button stays down; the enclosed set is computed
+/// once, on release.
 pub struct Marquee {
     /// Cursor at press, physical pixels: one corner of the box and the anchor the slop measures
     /// from.
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn a_marquee_past_the_slop_replace_selects_the_enclosed_placements() {
-        let model = sample_model(); // empty selection: the press arms a marquee, never a reposition
+        let model = sample_model(); // the press arms a marquee (the mouse is selection-only)
         let (_, cam) = aim_at_pillar(&model);
         let mut ui = UiState::default();
         // A box over the whole viewport encloses the placements the camera sees.

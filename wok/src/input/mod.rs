@@ -1,26 +1,27 @@
-//! Input routing: what the camera, hotkeys, and viewport clicks get to see after egui has
-//! claimed its share.
+//! Input routing: what the camera, hotkeys, the object-mode keyboard, and viewport clicks get to
+//! see after egui has claimed its share.
 //!
 //! egui sees every raw window event first (via `App::on_window_event`); these functions then
 //! consult the two focus flags the frame loop reads from egui - `pointer_free` (the cursor is
 //! not over a panel and no widget is being dragged) and `keys_free` (no field has keyboard
 //! focus) - so the same physical input never acts in the UI and the viewport at once. The fly
 //! camera keeps right-mouse-hold to look, which leaves the cursor free for the UI by
-//! construction. The left button picks, places, drags a selected placement to move it
-//! (`crate::drag` owns that drag math), and box-selects with a marquee over empty or unselected
-//! space (`marquee`). Every authored-model change is emitted as an
+//! construction. The mouse is selection-only: the left button picks, places, and box-selects with
+//! a marquee (`marquee`); the selection is moved by the keyboard, not by dragging it. In object
+//! mode the home row nudges the selection (`object`). Every authored-model change is emitted as an
 //! [`Action`](crate::panels::Action) for the frame loop to apply, never written here, so the loop
 //! stays the model's single writer; only presentation state (place mode, the context menu, the
-//! drag, the marquee) is touched in place.
+//! marquee) is touched in place.
 //!
 //! The module is split at the camera-vs-viewport seam: [`camera_input`] maps the raw snapshot to
-//! camera movement and look, [`handle`] routes hotkeys, clicks, and the left-button drags,
-//! delegating the per-frame drag math to the `reposition` and `marquee` submodules. The public
-//! entry points are re-exported here so callers address the `input` module, not its parts.
+//! camera movement and look, [`handle`] routes hotkeys, the mode toggle, clicks, and the marquee,
+//! delegating the object-mode key verbs to `object` and the per-frame marquee lifecycle to
+//! `marquee`. The public entry points are re-exported here so callers address the `input` module,
+//! not its parts.
 
 mod camera;
 mod marquee;
-mod reposition;
+mod object;
 mod viewport;
 
 pub use camera::camera_input;
@@ -141,8 +142,8 @@ pub(crate) mod test_support {
     /// Run a left marquee drag from `from` to `to` (physical pixels), optionally with Ctrl held the
     /// whole gesture: a press at `from`, a held frame at `to`, then a release at `to`. The corners
     /// must be at least the slop apart so the box goes active. Returns the actions the release
-    /// emits. Callers must keep `from` off any selected member, or the press arms a reposition drag
-    /// instead (Ctrl held always arms the marquee).
+    /// emits. Every left press arms a marquee now (the mouse is selection-only), so `from` may land
+    /// anywhere, a selected member included.
     pub(crate) fn marquee_dragged(
         camera: &FlyCamera,
         model: &EditorModel,

@@ -24,7 +24,6 @@ mod camera;
 mod cli;
 mod content;
 mod details;
-mod drag;
 mod edit_ops;
 mod glyphs;
 mod gui;
@@ -91,7 +90,7 @@ fn start(args: &[String]) -> Result<app::EditorApp, Box<dyn Error>> {
     );
     println!("wok: object mode (default): the camera locks to the selection - right-drag orbits, scroll zooms");
     println!("wok: backtick toggles free-fly: WASD move, Q/E down/up, hold right mouse to look, scroll for speed");
-    println!("wok: editing: click selects, drag the selection moves it (Shift: vertical), Delete removes");
+    println!("wok: editing: click selects, drag box-selects, the home row nudges the selection, Delete removes");
     println!("wok: Ctrl+S saves, Esc cancels/deselects");
 
     app::EditorApp::new(paths, loaded)
