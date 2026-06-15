@@ -13,7 +13,7 @@ use wok_platform::{App, FrameCtx, Platform, gfx};
 
 use crate::action::{self, Action};
 use crate::gui::Gui;
-use crate::menu::{self, UiState};
+use crate::menu;
 use crate::project::Project;
 use crate::theme;
 
@@ -24,7 +24,6 @@ const VIEWPORT_CLEAR: (f64, f64, f64) = (0.09, 0.10, 0.12);
 
 pub struct EditorApp {
     project: Project,
-    ui: UiState,
     /// egui integration, built once a GPU device exists (`init`).
     gui: Option<Gui>,
     /// The window title last set, so it is only pushed to the OS when it changes.
@@ -39,7 +38,7 @@ impl EditorApp {
             Some(root) => Project::open(root),
             None => Project::None,
         };
-        EditorApp { project, ui: UiState::default(), gui: None, title: String::new() }
+        EditorApp { project, gui: None, title: String::new() }
     }
 
     /// Keep the window title showing the open project's name, or just the app name when none.
@@ -75,10 +74,9 @@ impl App for EditorApp {
         let mut ui_output = None;
         {
             let project = &self.project;
-            let state = &mut self.ui;
             if let Some(gui) = self.gui.as_mut() {
                 ui_output = Some(gui.run(&ctx.platform.window, |egui_ctx| {
-                    menu::ui(egui_ctx, project, state, &mut actions);
+                    menu::ui(egui_ctx, project, &mut actions);
                 }));
             }
         }

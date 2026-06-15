@@ -45,3 +45,4 @@ wok-platform = { path = "../wok-platform" }
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
+rfd.workspace = true

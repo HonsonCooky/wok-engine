@@ -11,6 +11,10 @@ wgpu = "24"
 egui = "0.31"
 egui-wgpu = "0.31"
 egui-winit = "0.31"
+# Native OS file dialog, for the editor's Open Project. A wok-application dependency only, like the
+# egui trio; its version is standalone (not coupled to the wgpu/winit pins). Only the synchronous
+# picker is used, so no async-runtime feature is enabled.
+rfd = { version = "0.17", default-features = false }
 cpal = "0.15"
 gilrs = "0.11"
 notify = "8"
