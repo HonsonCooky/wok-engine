@@ -20,10 +20,10 @@ Code and text editing are out of scope; that lives in Zed. The editor hands the 
 
 ## The shell
 
-Zed is the reference for the frame: when an opinion on layout or structure is needed, follow Zed and tweak mildly for a 3D content tool. Zed governs the frame; it has no opinion on the 3D viewport, which is ours.
+Zed is the reference for the frame: when an opinion on layout or structure is needed, follow Zed and tweak mildly for a 3D content tool. Zed governs the frame; it has no opinion on the 3D viewport, which is ours. The window keeps native OS decorations - Zed draws its own titlebar, we do not, so the title bar, drag, resize, and window buttons stay the OS's job rather than chrome we own.
 
 Regions:
-- Menu bar. File (project lifecycle), Edit (undo, redo, placement operations), Selection, View (the panel, overlays, camera), Go (jump to chunk, frame selection, go to instance), Run (playtest the open content in taste), Window, Help. Run is a single verb, not a configuration surface.
+- Menu. A hamburger app-menu rather than a horizontal bar (Zed's pattern on Windows and Linux): a single button at the left of the tab bar, always visible regardless of the navigation panel, holding the rare global commands - File (project lifecycle), View (the panel, camera), Run (playtest the open content in taste), Help. Run is a single verb, not a configuration surface. Edit (undo, redo), Selection, and Go are keyboard and context actions, not menu entries, so the menu stays small.
 - Navigation panel. One panel, dockable to the left or the right (the user's choice, which suits a left-hand-keyboard and right-hand-mouse setup) and toggleable to reclaim the full editor width. It hosts the active context's navigation (scene tree, prefab library, lighting states, scan), bound to the active tab. A workflow shows at most two navigation views; if it would need more, simplify the workflow rather than the panel.
 - Tab bar. One tab per open edit context, over the editor area.
 - Editor area. The per-context surface (see Edit contexts); its layout is conditional on the open context.
@@ -77,5 +77,5 @@ Undo and redo (carried by the action layer), gizmos, snapping, multi-select, mul
 
 - Full content creator (2026-06-14). The editor owns authoring for all four authored data types plus integrity. Revisit only if a surface proves better served by an external tool.
 - Zed shell grammar (2026-06-14). The editor borrows Zed's frame - a menu bar, docked navigation, a tabbed editor area, a status bar - and tweaks mildly; Zed governs the frame, the viewport is ours.
-- Shell shape and interaction (2026-06-16). The two governing principles; a single dockable, toggleable navigation panel (no second dock); a floating conditional inspector; no bottom dock and no command palette; the device-split input model with 1m and 5 degree snap defaults and a stamp hotbar; edit contexts split into viewport and data kinds. All captured above.
+- Shell shape and interaction (2026-06-16). The two governing principles; native OS window decorations with the menu as a hamburger app-menu (not a custom titlebar, not a horizontal menu bar); a single dockable, toggleable navigation panel (no second dock); a floating conditional inspector; no bottom dock and no command palette; a dynamic light and dark theme following the OS; the device-split input model with 1m and 5 degree snap defaults and a stamp hotbar; edit contexts split into viewport and data kinds. All captured above.
 - Placement boundary (2026-06-16). The editor authors space, physical properties, and identity only; the game owns behavior and per-instance configuration, bound by id or name. No property bag. Mirrored in the HLD.
