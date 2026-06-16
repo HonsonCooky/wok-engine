@@ -9,16 +9,13 @@
 
 use crate::action::Action;
 use crate::model::{Shell, Side, Tab};
+use crate::theme;
 
-/// Tab-strip height in points: one row of text with a little breathing room.
-const TAB_BAR_HEIGHT: f32 = 28.0;
+/// Tab-strip height in points: enough that the active tab's fill reads as a panel, not a chip.
+const TAB_BAR_HEIGHT: f32 = 34.0;
 
 /// Default navigation-panel width in points.
-const NAV_PANEL_WIDTH: f32 = 200.0;
-
-/// Placeholder text drawn over the dark viewport clear. A fixed light gray rather than theme text,
-/// so it stays legible on the (theme-independent) clear under both light and dark themes.
-const VIEWPORT_TEXT: egui::Color32 = egui::Color32::from_gray(150);
+const NAV_PANEL_WIDTH: f32 = 216.0;
 
 /// Draw the workspace for one frame. Order matters: the side panel first, then the tab bar over the
 /// remaining width, then the editor area; when the panel is hidden the tab bar and editor area take
@@ -36,12 +33,14 @@ pub fn ui(ctx: &egui::Context, shell: &Shell, actions: &mut Vec<Action>) {
 /// sides keeps its resized width when the dock flips.
 fn nav_panel(ctx: &egui::Context, shell: &Shell) {
     let contents = |ui: &mut egui::Ui| {
-        ui.add_space(4.0);
-        ui.heading("Navigation");
+        ui.add_space(6.0);
+        // A small, dim section header in Zed's style, not a loud heading.
+        ui.label(egui::RichText::new("NAVIGATION").color(theme::TEXT_DIM).small().strong());
+        ui.add_space(2.0);
         ui.separator();
         // Stub list, hinting at the views that bind here later.
         for item in ["(scene tree)", "(prefab library)"] {
-            ui.label(egui::RichText::new(item).weak());
+            ui.label(egui::RichText::new(item).color(theme::TEXT_DIM));
         }
     };
     match shell.nav_side() {
@@ -59,33 +58,41 @@ fn nav_panel(ctx: &egui::Context, shell: &Shell) {
 fn tab_bar(ctx: &egui::Context, shell: &Shell, actions: &mut Vec<Action>) {
     egui::TopBottomPanel::top("wok_tab_bar").exact_height(TAB_BAR_HEIGHT).show(ctx, |ui| {
         ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+            // Tabs nearly touch, as in Zed, with the active fill the only thing parting them.
+            ui.spacing_mut().item_spacing.x = 1.0;
             for tab in shell.tabs() {
                 tab_cell(ui, tab, shell.active() == Some(tab.id), actions);
             }
-            if ui.button("+").on_hover_text("New tab").clicked() {
+            if ui.add(egui::Button::new("+").frame(false)).on_hover_text("New tab").clicked() {
                 actions.push(Action::OpenTab);
             }
         });
     });
 }
 
-/// One tab cell: a title that switches to the tab on click and an x that closes it, on a highlight
-/// fill when active.
+/// One tab cell: a title that switches to the tab on click and an x that closes it. The active tab
+/// borrows the editor surface so it reads as continuous with the view below, and carries the one
+/// accent as a top line; inactive tabs sit flat and dim on the strip.
 fn tab_cell(ui: &mut egui::Ui, tab: &Tab, active: bool, actions: &mut Vec<Action>) {
-    let fill = if active { ui.visuals().selection.bg_fill } else { egui::Color32::TRANSPARENT };
-    egui::Frame::NONE.fill(fill).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| {
+    let fill = if active { theme::EDITOR_BG } else { egui::Color32::TRANSPARENT };
+    let inner = egui::Frame::NONE.fill(fill).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
         ui.horizontal(|ui| {
-            let title = egui::RichText::new(&tab.title);
-            let title = if active { title.strong() } else { title.weak() };
-            if ui.add(egui::Label::new(title).sense(egui::Sense::click())).clicked() {
+            let color = if active { theme::TEXT_BRIGHT } else { theme::TEXT_DIM };
+            let title = egui::RichText::new(&tab.title).color(color);
+            let title = if active { title.strong() } else { title };
+            if ui.add(egui::Label::new(title).selectable(false).sense(egui::Sense::click())).clicked() {
                 actions.push(Action::SelectTab(tab.id));
             }
-            if ui.add(egui::Button::new("x").small().frame(false)).on_hover_text("Close tab").clicked() {
+            let x = egui::RichText::new("x").color(theme::TEXT_DIM);
+            if ui.add(egui::Button::new(x).small().frame(false)).on_hover_text("Close tab").clicked() {
                 actions.push(Action::CloseTab(tab.id));
             }
         });
     });
+    if active {
+        let rect = inner.response.rect;
+        ui.painter().hline(rect.x_range(), rect.top(), egui::Stroke::new(2.0, theme::ACCENT));
+    }
 }
 
 /// The editor area: the active tab's content over the viewport clear, or an empty state when no tab
@@ -94,8 +101,8 @@ fn editor_area(ctx: &egui::Context, shell: &Shell) {
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
         ui.centered_and_justified(|ui| match shell.active_tab() {
             // Placeholder content: the tab's title, centered over the cleared viewport.
-            Some(tab) => ui.label(egui::RichText::new(&tab.title).heading().color(VIEWPORT_TEXT)),
-            None => ui.label(egui::RichText::new("No tab open - use + to open one").color(VIEWPORT_TEXT)),
+            Some(tab) => ui.label(egui::RichText::new(&tab.title).heading().color(theme::TEXT_DIM)),
+            None => ui.label(egui::RichText::new("No tab open - use + to open one").color(theme::TEXT_DIM)),
         });
     });
 }

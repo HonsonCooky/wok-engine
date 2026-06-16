@@ -1,12 +1,14 @@
 //! The editor application: the window state and the per-frame loop.
 //!
-//! Shell frame: the chrome (`crate::menu`, the menu and status bars) and the workspace
-//! (`crate::workspace`, the navigation panel, tab bar, and editor area) paint over a flat viewport
-//! clear, each reading the model and emitting actions the loop applies through the one handler
-//! (`crate::action`, the single writer for the model). The frame clears the viewport, runs the egui
-//! pass, applies its actions, then paints the UI; the editor area stays transparent so the clear
-//! shows through where the 3D view lands later. The authoring surfaces - scene model, selection,
-//! camera, render - return as later pieces and slot into this loop.
+//! Shell frame: the chrome (`crate::menu`, the custom header and the status bar) and the workspace
+//! (`crate::workspace`, the navigation panel, tab bar, and editor area) paint over the editor-surface
+//! viewport clear, each reading the model and emitting actions the loop applies through the one
+//! handler (`crate::action`, the single writer for the model). The OS title bar is off; the header's
+//! window controls and drag route back through that same action seam as window effects the loop
+//! carries out. The frame clears the viewport, runs the egui pass, applies its actions and their
+//! window effects, then paints the UI; the editor area stays transparent so the clear shows through
+//! where the 3D view lands later. The authoring surfaces - scene model, selection, camera, render -
+//! return as later pieces and slot into this loop.
 
 use std::path::PathBuf;
 
@@ -19,11 +21,6 @@ use crate::model::Model;
 use crate::project::Project;
 use crate::theme;
 use crate::view;
-
-/// Flat viewport background, shown wherever the chrome does not paint. A neutral dark, so an empty
-/// viewport reads as "nothing here yet" rather than a specific lit scene; not theme-aware, since it
-/// is a GPU clear rather than an egui surface.
-const VIEWPORT_CLEAR: (f64, f64, f64) = (0.09, 0.10, 0.12);
 
 pub struct EditorApp {
     /// The editor state the action layer writes and the view reads: the open project and the shell.
@@ -60,6 +57,9 @@ impl EditorApp {
 
 impl App for EditorApp {
     fn init(&mut self, platform: &Platform) {
+        // Turn off the OS title bar; the header (crate::menu) draws our own, with the window controls
+        // routed back through the action seam. The window keeps its title for the taskbar.
+        platform.window.set_decorations(false);
         let gui = Gui::new(platform);
         theme::apply(&gui.ctx);
         self.gui = Some(gui);
@@ -87,19 +87,33 @@ impl App for EditorApp {
             }
         }
 
-        // Apply the actions through the one handler - the single writer for the model. Quit is the
-        // one effect the pure state cannot perform, so the loop carries it out here.
+        // Apply the actions through the one handler - the single writer for the model - then carry
+        // out the window effects it reports, which the pure state cannot perform itself: closing, and
+        // the custom header's window controls.
         for action in actions {
-            if action::handle(action, &mut self.model).quit {
+            let handled = action::handle(action, &mut self.model);
+            if handled.quit {
                 ctx.should_close = true;
+            }
+            if handled.minimize {
+                ctx.platform.window.set_minimized(true);
+            }
+            if handled.toggle_maximize {
+                let maximized = ctx.platform.window.is_maximized();
+                ctx.platform.window.set_maximized(!maximized);
+            }
+            if handled.start_drag {
+                let _ = ctx.platform.window.drag_window();
             }
         }
 
-        // Clear the viewport to the flat background, then paint the UI over it. The editor area's
-        // panel is transparent, so the clear shows through there as the empty viewport.
+        // Clear the viewport to the editor surface, then paint the UI over it. The editor area's
+        // panel is transparent, so the clear shows through there as the empty viewport, matching the
+        // chrome's dark tone. The surface is sRGB and wgpu reads the clear value as linear, so decode
+        // theme::EDITOR_BG through egui::Rgba; the sRGB surface re-encodes it back to that color.
         if let Some(mut frame) = gfx::begin_frame(ctx.platform) {
-            let (r, g, b) = VIEWPORT_CLEAR;
-            frame.clear(r, g, b);
+            let clear = egui::Rgba::from(theme::EDITOR_BG);
+            frame.clear(clear.r().into(), clear.g().into(), clear.b().into());
             if let (Some(gui), Some(output)) = (self.gui.as_mut(), ui_output) {
                 let size = (ctx.width.max(1), ctx.height.max(1));
                 gui.paint(ctx.platform, &mut frame.encoder, &frame.view, output, size);

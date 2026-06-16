@@ -14,7 +14,7 @@ use crate::workspace;
 /// Render the full editor chrome for one frame. Order is layout order: the top bar and the status bar
 /// claim the edges, then the workspace (navigation panel, tab bar, editor area) fills what is left.
 pub fn chrome(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
-    menu::menu_bar(ctx, &model.shell, actions);
+    menu::header(ctx, model, actions);
     menu::status_bar(ctx, &model.project);
     workspace::ui(ctx, &model.shell, actions);
 }
@@ -25,6 +25,7 @@ mod tests {
     use crate::model::Model;
     use crate::project::Project;
     use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
 
     /// Render the chrome in a representative state - a project open, two tabs with one active, the
     /// navigation panel shown - to `tests/snapshots/chrome.png`. This is both the editor's eyes and a
@@ -43,10 +44,32 @@ mod tests {
 
         let mut harness = Harness::builder().with_size(egui::vec2(1100.0, 700.0)).wgpu().build(|ctx| {
             crate::theme::apply(ctx);
+            // Stand in for the in-app GPU clear: fill the screen with the editor surface so the
+            // transparent editor area reads the same dark tone here as it does live.
+            ctx.layer_painter(egui::LayerId::background())
+                .rect_filled(ctx.screen_rect(), 0.0, crate::theme::EDITOR_BG);
             let mut actions = Vec::new();
             chrome(ctx, &model, &mut actions);
         });
         harness.run();
         harness.snapshot("chrome");
+    }
+
+    /// Open the View menu and snapshot it, confirming menus size to their content: the long "Hide
+    /// Navigation Panel" item and its Ctrl+B hint sit on one line rather than wrapping in a narrow
+    /// menu. A focused canvas - the header and the open menu, not the whole editor.
+    #[test]
+    fn view_menu_open_snapshot() {
+        let model = Model::new(Project::open("wok-engine"));
+
+        let mut harness = Harness::builder().with_size(egui::vec2(520.0, 320.0)).wgpu().build(|ctx| {
+            crate::theme::apply(ctx);
+            let mut actions = Vec::new();
+            chrome(ctx, &model, &mut actions);
+        });
+        harness.run();
+        harness.get_by_label("View").click();
+        harness.run();
+        harness.snapshot("view_menu_open");
     }
 }

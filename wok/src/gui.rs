@@ -6,9 +6,9 @@
 //! pass (color load, no depth - the UI sits over everything). No engine crate sees any of this;
 //! egui is a wok-application dependency only.
 //!
-//! Theme follows the OS: the window's theme at startup seeds egui, and egui-winit feeds winit's
-//! `ThemeChanged` events through as the system theme, which egui's default theme preference
-//! (System) follows live.
+//! Theme: the editor forces dark (`crate::theme`), since the viewport clears to a fixed dark surface
+//! and a light chrome framing it would read as broken. The window's startup theme still seeds egui
+//! here, but `theme::apply` overrides the preference to dark.
 
 use wok_platform::Platform;
 use wok_platform::wgpu;
