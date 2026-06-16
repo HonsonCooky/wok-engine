@@ -63,12 +63,14 @@ fn tab_bar(ctx: &egui::Context, shell: &Shell, actions: &mut Vec<Action>) {
         ui.horizontal_centered(|ui| {
             // The app-menu sits at the left of the row, always visible regardless of nav-panel state.
             menu::hamburger(ui, shell, actions);
-            ui.add_space(4.0);
+            ui.add_space(8.0);
             // Tabs nearly touch, as in Zed, with the active fill the only thing parting them.
             ui.spacing_mut().item_spacing.x = 1.0;
             for tab in shell.tabs() {
                 tab_cell(ui, tab, shell.active() == Some(tab.id), actions);
             }
+            // A little room before the new-tab button so it does not crowd the last tab.
+            ui.add_space(6.0);
             if ui.add(egui::Button::new("+").frame(false)).on_hover_text("New tab").clicked() {
                 actions.push(Action::OpenTab);
             }
@@ -84,6 +86,9 @@ fn tab_cell(ui: &mut egui::Ui, tab: &Tab, active: bool, actions: &mut Vec<Action
     let fill = if active { p.editor_bg } else { egui::Color32::TRANSPARENT };
     let inner = egui::Frame::NONE.fill(fill).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
         ui.horizontal(|ui| {
+            // The strip tightens item spacing to 1px for the tabs; restore a gap inside the cell so
+            // the close button does not crowd the title.
+            ui.spacing_mut().item_spacing.x = 6.0;
             let color = if active { p.text_bright } else { p.text_dim };
             let title = egui::RichText::new(&tab.title).color(color);
             let title = if active { title.strong() } else { title };
