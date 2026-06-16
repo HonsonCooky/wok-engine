@@ -17,6 +17,7 @@ mod menu;
 mod model;
 mod project;
 mod theme;
+mod view;
 mod workspace;
 
 use wok_platform::Desc;

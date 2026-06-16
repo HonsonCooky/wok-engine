@@ -15,11 +15,10 @@ use wok_platform::{App, FrameCtx, Platform, gfx};
 
 use crate::action::{self, Action};
 use crate::gui::Gui;
-use crate::menu;
 use crate::model::Model;
 use crate::project::Project;
 use crate::theme;
-use crate::workspace;
+use crate::view;
 
 /// Flat viewport background, shown wherever the chrome does not paint. A neutral dark, so an empty
 /// viewport reads as "nothing here yet" rather than a specific lit scene; not theme-aware, since it
@@ -83,9 +82,7 @@ impl App for EditorApp {
             let model = &self.model;
             if let Some(gui) = self.gui.as_mut() {
                 ui_output = Some(gui.run(&ctx.platform.window, |egui_ctx| {
-                    menu::menu_bar(egui_ctx, &model.shell, &mut actions);
-                    menu::status_bar(egui_ctx, &model.project);
-                    workspace::ui(egui_ctx, &model.shell, &mut actions);
+                    view::chrome(egui_ctx, model, &mut actions);
                 }));
             }
         }

@@ -46,3 +46,15 @@ egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
 rfd.workspace = true
+
+# Dev-only: renders the chrome through the view functions to a PNG for the snapshot regression test
+# (tests/snapshots). The wgpu feature draws via a headless GPU (the same wgpu 24 the workspace pins);
+# snapshot brings the dify image-diff. Matched to egui 0.31, never a runtime or engine dependency.
+#
+# kittest queries the accessibility tree, so it turns on egui's accesskit feature. Cargo's feature
+# unification then expects egui-winit's matching accesskit path to be compiled too; enabling it here,
+# in dev-dependencies, satisfies the test build without reaching the shipped editor (resolver 3 keeps
+# dev-dependency features out of a normal `cargo build`).
+[dev-dependencies]
+egui_kittest = { version = "0.31", features = ["wgpu", "snapshot"] }
+egui-winit = { workspace = true, features = ["accesskit"] }
