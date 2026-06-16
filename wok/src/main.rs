@@ -14,8 +14,10 @@ mod app;
 mod cli;
 mod gui;
 mod menu;
+mod model;
 mod project;
 mod theme;
+mod workspace;
 
 use wok_platform::Desc;
 

@@ -1,10 +1,12 @@
 //! The editor application: the window state and the per-frame loop.
 //!
-//! Minimal shell: the chrome (`crate::menu`) paints over an empty viewport, emitting actions the
-//! loop applies through the one handler (`crate::action`, the single writer for project state). The
-//! frame clears the viewport to a flat background, runs the egui pass, applies its actions, then
-//! paints the UI over the clear. The authoring surfaces - scene model, selection, camera, render -
-//! return as later pieces and slot into this loop.
+//! Shell frame: the chrome (`crate::menu`, the menu and status bars) and the workspace
+//! (`crate::workspace`, the navigation panel, tab bar, and editor area) paint over a flat viewport
+//! clear, each reading the model and emitting actions the loop applies through the one handler
+//! (`crate::action`, the single writer for the model). The frame clears the viewport, runs the egui
+//! pass, applies its actions, then paints the UI; the editor area stays transparent so the clear
+//! shows through where the 3D view lands later. The authoring surfaces - scene model, selection,
+//! camera, render - return as later pieces and slot into this loop.
 
 use std::path::PathBuf;
 
@@ -14,8 +16,10 @@ use wok_platform::{App, FrameCtx, Platform, gfx};
 use crate::action::{self, Action};
 use crate::gui::Gui;
 use crate::menu;
+use crate::model::Model;
 use crate::project::Project;
 use crate::theme;
+use crate::workspace;
 
 /// Flat viewport background, shown wherever the chrome does not paint. A neutral dark, so an empty
 /// viewport reads as "nothing here yet" rather than a specific lit scene; not theme-aware, since it
@@ -23,7 +27,8 @@ use crate::theme;
 const VIEWPORT_CLEAR: (f64, f64, f64) = (0.09, 0.10, 0.12);
 
 pub struct EditorApp {
-    project: Project,
+    /// The editor state the action layer writes and the view reads: the open project and the shell.
+    model: Model,
     /// egui integration, built once a GPU device exists (`init`).
     gui: Option<Gui>,
     /// The window title last set, so it is only pushed to the OS when it changes.
@@ -38,12 +43,12 @@ impl EditorApp {
             Some(root) => Project::open(root),
             None => Project::None,
         };
-        EditorApp { project, gui: None, title: String::new() }
+        EditorApp { model: Model::new(project), gui: None, title: String::new() }
     }
 
     /// Keep the window title showing the open project's name, or just the app name when none.
     fn refresh_title(&mut self, platform: &Platform) {
-        let title = match self.project.display_name() {
+        let title = match self.model.project.display_name() {
             Some(name) => format!("wok - {name}"),
             None => "wok".to_string(),
         };
@@ -69,28 +74,32 @@ impl App for EditorApp {
     }
 
     fn frame(&mut self, ctx: &mut FrameCtx) {
-        // Run the egui pass: the chrome reads the project and emits actions into the buffer.
+        // Run the egui pass: the regions read the model and emit actions into the buffer. Panel
+        // order is layout order - menu (top) and status (bottom), then the workspace fits the
+        // navigation panel, tab bar, and editor area into what is left.
         let mut actions: Vec<Action> = Vec::new();
         let mut ui_output = None;
         {
-            let project = &self.project;
+            let model = &self.model;
             if let Some(gui) = self.gui.as_mut() {
                 ui_output = Some(gui.run(&ctx.platform.window, |egui_ctx| {
-                    menu::ui(egui_ctx, project, &mut actions);
+                    menu::menu_bar(egui_ctx, &model.shell, &mut actions);
+                    menu::status_bar(egui_ctx, &model.project);
+                    workspace::ui(egui_ctx, &model.shell, &mut actions);
                 }));
             }
         }
 
-        // Apply the actions through the one handler - the single writer for project state. Quit is
-        // the one effect the pure state cannot perform, so the loop carries it out here.
+        // Apply the actions through the one handler - the single writer for the model. Quit is the
+        // one effect the pure state cannot perform, so the loop carries it out here.
         for action in actions {
-            if action::handle(action, &mut self.project).quit {
+            if action::handle(action, &mut self.model).quit {
                 ctx.should_close = true;
             }
         }
 
-        // Clear the viewport to the flat background, then paint the chrome over it. The central
-        // region carries no egui panel, so the clear shows through as the empty viewport.
+        // Clear the viewport to the flat background, then paint the UI over it. The editor area's
+        // panel is transparent, so the clear shows through there as the empty viewport.
         if let Some(mut frame) = gfx::begin_frame(ctx.platform) {
             let (r, g, b) = VIEWPORT_CLEAR;
             frame.clear(r, g, b);
