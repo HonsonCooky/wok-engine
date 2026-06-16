@@ -27,32 +27,46 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
 
+    /// Build a harness that renders the chrome at `size` under `theme`, with the editor surface
+    /// filled behind the transparent editor area (standing in for the in-app GPU clear), so the
+    /// snapshot reads as it does live in that theme. Forcing the theme keeps each snapshot
+    /// deterministic regardless of the host's OS setting.
+    fn chrome_harness(model: &Model, theme: egui::ThemePreference, size: egui::Vec2) -> Harness<'_> {
+        Harness::builder().with_size(size).wgpu().build(move |ctx| {
+            crate::theme::apply(ctx);
+            ctx.set_theme(theme);
+            let editor_bg = crate::theme::palette(ctx).editor_bg;
+            ctx.layer_painter(egui::LayerId::background()).rect_filled(ctx.screen_rect(), 0.0, editor_bg);
+            let mut actions = Vec::new();
+            chrome(ctx, model, &mut actions);
+        })
+    }
+
     /// Render the chrome in a representative state - a project open, two tabs with one active, the
-    /// navigation panel shown - to `tests/snapshots/chrome.png`. This is both the editor's eyes and a
+    /// navigation panel shown - to `tests/snapshots/chrome.png`. Both the editor's eyes and a
     /// regression guard: the same view functions the app calls render here, through `chrome`, so the
-    /// PNG tracks the real chrome. After an intended look change, refresh it with
+    /// PNG tracks the real chrome. Refresh after an intended look change with
     /// `UPDATE_SNAPSHOTS=1 cargo test -p wok` and commit the new PNG.
-    ///
-    /// Renders the egui chrome only - no GPU viewport clear and no 3D - so the editor area shows the
-    /// test renderer's default background rather than the in-app clear. The menu, panels, tabs, and
-    /// theme are what this guards.
     #[test]
     fn chrome_snapshot() {
         let mut model = Model::new(Project::open("wok-engine"));
         model.shell.open_tab();
         model.shell.open_tab();
-
-        let mut harness = Harness::builder().with_size(egui::vec2(1100.0, 700.0)).wgpu().build(|ctx| {
-            crate::theme::apply(ctx);
-            // Stand in for the in-app GPU clear: fill the screen with the editor surface so the
-            // transparent editor area reads the same dark tone here as it does live.
-            ctx.layer_painter(egui::LayerId::background())
-                .rect_filled(ctx.screen_rect(), 0.0, crate::theme::EDITOR_BG);
-            let mut actions = Vec::new();
-            chrome(ctx, &model, &mut actions);
-        });
+        let mut harness = chrome_harness(&model, egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0));
         harness.run();
         harness.snapshot("chrome");
+    }
+
+    /// The same chrome in light mode, guarding that the light palette mirrors the dark one's
+    /// structure and reads cleanly.
+    #[test]
+    fn chrome_light_snapshot() {
+        let mut model = Model::new(Project::open("wok-engine"));
+        model.shell.open_tab();
+        model.shell.open_tab();
+        let mut harness = chrome_harness(&model, egui::ThemePreference::Light, egui::vec2(1100.0, 700.0));
+        harness.run();
+        harness.snapshot("chrome_light");
     }
 
     /// Open the app-menu (the hamburger), then its View submenu, and snapshot it. Confirms the
@@ -63,14 +77,7 @@ mod tests {
     fn view_menu_open_snapshot() {
         let mut model = Model::new(Project::open("wok-engine"));
         model.shell.toggle_nav();
-
-        let mut harness = Harness::builder().with_size(egui::vec2(520.0, 320.0)).wgpu().build(|ctx| {
-            crate::theme::apply(ctx);
-            ctx.layer_painter(egui::LayerId::background())
-                .rect_filled(ctx.screen_rect(), 0.0, crate::theme::EDITOR_BG);
-            let mut actions = Vec::new();
-            chrome(ctx, &model, &mut actions);
-        });
+        let mut harness = chrome_harness(&model, egui::ThemePreference::Dark, egui::vec2(520.0, 320.0));
         harness.run();
         harness.get_by_label("Menu").click();
         harness.run();

@@ -50,7 +50,8 @@ pub fn hamburger(ui: &mut egui::Ui, shell: &Shell, actions: &mut Vec<Action>) {
     })
     .response;
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Menu"));
-    let color = if response.hovered() { theme::TEXT_BRIGHT } else { theme::TEXT_DIM };
+    let p = theme::palette(ui.ctx());
+    let color = if response.hovered() { p.text_bright } else { p.text_dim };
     paint_hamburger(ui.painter(), response.rect, color);
 }
 
@@ -120,9 +121,10 @@ fn view_menu(ui: &mut egui::Ui, shell: &Shell, toggle: egui::KeyboardShortcut, a
 /// confirmation that Open Project took effect (the title bar carries the same).
 pub fn status_bar(ctx: &egui::Context, project: &Project) {
     egui::TopBottomPanel::bottom("wok_status_bar").exact_height(STATUS_BAR_HEIGHT).show(ctx, |ui| {
+        let dim = theme::palette(ui.ctx()).text_dim;
         ui.horizontal_centered(|ui| match project.display_name() {
-            Some(name) => ui.label(egui::RichText::new(name).small().color(theme::TEXT_DIM)),
-            None => ui.label(egui::RichText::new("No project open").small().color(theme::TEXT_DIM)),
+            Some(name) => ui.label(egui::RichText::new(name).small().color(dim)),
+            None => ui.label(egui::RichText::new("No project open").small().color(dim)),
         });
     });
 }

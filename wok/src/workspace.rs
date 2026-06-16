@@ -34,14 +34,15 @@ pub fn ui(ctx: &egui::Context, shell: &Shell, actions: &mut Vec<Action>) {
 /// sides keeps its resized width when the dock flips.
 fn nav_panel(ctx: &egui::Context, shell: &Shell) {
     let contents = |ui: &mut egui::Ui| {
+        let p = theme::palette(ui.ctx());
         ui.add_space(6.0);
         // A small, dim section header in Zed's style, not a loud heading.
-        ui.label(egui::RichText::new("NAVIGATION").color(theme::TEXT_DIM).small().strong());
+        ui.label(egui::RichText::new("NAVIGATION").color(p.text_dim).small().strong());
         ui.add_space(2.0);
         ui.separator();
         // Stub list, hinting at the views that bind here later.
         for item in ["(scene tree)", "(prefab library)"] {
-            ui.label(egui::RichText::new(item).color(theme::TEXT_DIM));
+            ui.label(egui::RichText::new(item).color(p.text_dim));
         }
     };
     match shell.nav_side() {
@@ -79,16 +80,17 @@ fn tab_bar(ctx: &egui::Context, shell: &Shell, actions: &mut Vec<Action>) {
 /// borrows the editor surface so it reads as continuous with the view below, and carries the one
 /// accent as a top line; inactive tabs sit flat and dim on the strip.
 fn tab_cell(ui: &mut egui::Ui, tab: &Tab, active: bool, actions: &mut Vec<Action>) {
-    let fill = if active { theme::EDITOR_BG } else { egui::Color32::TRANSPARENT };
+    let p = theme::palette(ui.ctx());
+    let fill = if active { p.editor_bg } else { egui::Color32::TRANSPARENT };
     let inner = egui::Frame::NONE.fill(fill).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
         ui.horizontal(|ui| {
-            let color = if active { theme::TEXT_BRIGHT } else { theme::TEXT_DIM };
+            let color = if active { p.text_bright } else { p.text_dim };
             let title = egui::RichText::new(&tab.title).color(color);
             let title = if active { title.strong() } else { title };
             if ui.add(egui::Label::new(title).selectable(false).sense(egui::Sense::click())).clicked() {
                 actions.push(Action::SelectTab(tab.id));
             }
-            let x = egui::RichText::new("x").color(theme::TEXT_DIM);
+            let x = egui::RichText::new("x").color(p.text_dim);
             if ui.add(egui::Button::new(x).small().frame(false)).on_hover_text("Close tab").clicked() {
                 actions.push(Action::CloseTab(tab.id));
             }
@@ -96,7 +98,7 @@ fn tab_cell(ui: &mut egui::Ui, tab: &Tab, active: bool, actions: &mut Vec<Action
     });
     if active {
         let rect = inner.response.rect;
-        ui.painter().hline(rect.x_range(), rect.top(), egui::Stroke::new(2.0, theme::ACCENT));
+        ui.painter().hline(rect.x_range(), rect.top(), egui::Stroke::new(2.0, p.accent));
     }
 }
 
@@ -104,10 +106,11 @@ fn tab_cell(ui: &mut egui::Ui, tab: &Tab, active: bool, actions: &mut Vec<Action
 /// is open. A transparent frame lets the GPU clear show through where the 3D viewport will live.
 fn editor_area(ctx: &egui::Context, shell: &Shell) {
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+        let dim = theme::palette(ui.ctx()).text_dim;
         ui.centered_and_justified(|ui| match shell.active_tab() {
             // Placeholder content: the tab's title, centered over the cleared viewport.
-            Some(tab) => ui.label(egui::RichText::new(&tab.title).heading().color(theme::TEXT_DIM)),
-            None => ui.label(egui::RichText::new("No tab open - use + to open one").color(theme::TEXT_DIM)),
+            Some(tab) => ui.label(egui::RichText::new(&tab.title).heading().color(dim)),
+            None => ui.label(egui::RichText::new("No tab open - use + to open one").color(dim)),
         });
     });
 }

@@ -93,12 +93,13 @@ impl App for EditorApp {
             }
         }
 
-        // Clear the viewport to the editor surface, then paint the UI over it. The editor area's
-        // panel is transparent, so the clear shows through there as the empty viewport, matching the
-        // chrome's dark tone. The surface is sRGB and wgpu reads the clear value as linear, so decode
-        // theme::EDITOR_BG through egui::Rgba; the sRGB surface re-encodes it back to that color.
+        // Clear the viewport to the active theme's editor surface, then paint the UI over it. The
+        // editor area's panel is transparent, so the clear shows through as the empty viewport and
+        // follows the OS light/dark with the chrome. The surface is sRGB and wgpu reads the clear
+        // value as linear, so decode the color through egui::Rgba; the sRGB surface re-encodes it.
         if let Some(mut frame) = gfx::begin_frame(ctx.platform) {
-            let clear = egui::Rgba::from(theme::EDITOR_BG);
+            let editor_bg = self.gui.as_ref().map_or(egui::Color32::BLACK, |g| theme::palette(&g.ctx).editor_bg);
+            let clear = egui::Rgba::from(editor_bg);
             frame.clear(clear.r().into(), clear.g().into(), clear.b().into());
             if let (Some(gui), Some(output)) = (self.gui.as_mut(), ui_output) {
                 let size = (ctx.width.max(1), ctx.height.max(1));

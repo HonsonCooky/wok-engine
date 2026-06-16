@@ -1,94 +1,139 @@
-//! The editor's egui styling: a flat, dark, Zed-flavored chrome.
+//! The editor's egui styling: a flat, Zed-flavored chrome that follows the OS light/dark theme.
 //!
-//! The editor is dark by design. The 3D viewport clears to a fixed dark surface ([`EDITOR_BG`], used
-//! by `app.rs`), so the chrome around it is dark to match - a light chrome framing a dark viewport
-//! would read as broken. `apply` therefore forces the dark theme rather than following the OS, and
-//! paints egui's surfaces, text, borders, and one accent from the palette below, read off the Zed
-//! reference. Geometry stays tight and flat: no shadows, small uniform rounding, hairline borders.
+//! `apply` styles both built-in themes from the palettes below and sets egui to follow the OS
+//! (`ThemePreference::System`), so the chrome switches with the desktop. The dark palette is read off
+//! the Zed reference; the light palette mirrors it in Zed's light look. Wherever the view paints its
+//! own colors - the tabs, text, the GPU viewport clear (`app.rs`) - it reads the active palette back
+//! through [`palette`], so those follow the theme too. Geometry stays tight and flat: no shadows,
+//! small uniform rounding, hairline borders.
 
 use egui::{Color32, CornerRadius, Margin, Stroke, Visuals, vec2};
 
-// ---- palette (sRGB), read off the Zed reference ----
+/// One theme's colors. There is one per built-in theme; [`palette`] returns the active one. The
+/// fields the view paints with are public; the rest only feed egui's own surfaces here.
+pub struct Palette {
+    /// The editor/viewport surface - the GPU clear and the active tab borrow it.
+    pub editor_bg: Color32,
+    /// Secondary text: inactive tabs, hints, the idle status line, the hamburger glyph at rest.
+    pub text_dim: Color32,
+    /// Brighter text: the active tab, hovered controls.
+    pub text_bright: Color32,
+    /// The one accent: the active tab's line and selections.
+    pub accent: Color32,
+    /// Panel and header surface, a step off the editor so the chrome frames the viewport.
+    surface: Color32,
+    /// Menus and floating windows, a further step so a popover lifts off the chrome.
+    floating: Color32,
+    /// Hairline borders and separators.
+    border: Color32,
+    /// Hover fill for buttons and menu items.
+    hover: Color32,
+    /// Pressed and open fill.
+    pressed: Color32,
+    /// Primary text.
+    text: Color32,
+}
 
-/// The editor/viewport surface: the darkest tone. The 3D view clears to this (`app.rs`), and the
-/// active tab borrows it so a selected tab reads as continuous with the editor below it.
-pub const EDITOR_BG: Color32 = Color32::from_rgb(0x18, 0x1a, 0x1f);
-/// Panel and header surface: a touch lighter than the editor, so the chrome frames the viewport.
-const SURFACE: Color32 = Color32::from_rgb(0x20, 0x23, 0x2a);
-/// Menus and floating windows: a step lighter again, so a popover lifts off the chrome.
-const FLOATING: Color32 = Color32::from_rgb(0x26, 0x2a, 0x32);
-/// Hairline borders and separators: low contrast, just enough to part two surfaces.
-const BORDER: Color32 = Color32::from_rgb(0x2e, 0x33, 0x3c);
-/// Subtle hover fill for buttons and menu items.
-const HOVER: Color32 = Color32::from_rgb(0x2c, 0x31, 0x3a);
-/// Pressed and open fill, a step up from hover.
-const PRESSED: Color32 = Color32::from_rgb(0x34, 0x3a, 0x45);
-/// Primary text: soft off-white, easy on a dark surface.
-pub const TEXT: Color32 = Color32::from_rgb(0xc6, 0xca, 0xd2);
-/// Secondary text: dimmer, for inactive tabs, hints, and the idle status line.
-pub const TEXT_DIM: Color32 = Color32::from_rgb(0x7d, 0x85, 0x92);
-/// Brighter text, for hovered and active controls.
-pub const TEXT_BRIGHT: Color32 = Color32::from_rgb(0xe4, 0xe7, 0xec);
-/// The one accent: a muted blue marking the active tab and selections.
-pub const ACCENT: Color32 = Color32::from_rgb(0x4a, 0x86, 0xd8);
+/// Dark palette, read off the Zed reference.
+const DARK: Palette = Palette {
+    editor_bg: Color32::from_rgb(0x18, 0x1a, 0x1f),
+    text_dim: Color32::from_rgb(0x7d, 0x85, 0x92),
+    text_bright: Color32::from_rgb(0xe4, 0xe7, 0xec),
+    accent: Color32::from_rgb(0x4a, 0x86, 0xd8),
+    surface: Color32::from_rgb(0x20, 0x23, 0x2a),
+    floating: Color32::from_rgb(0x26, 0x2a, 0x32),
+    border: Color32::from_rgb(0x2e, 0x33, 0x3c),
+    hover: Color32::from_rgb(0x2c, 0x31, 0x3a),
+    pressed: Color32::from_rgb(0x34, 0x3a, 0x45),
+    text: Color32::from_rgb(0xc6, 0xca, 0xd2),
+};
 
-/// Apply the editor look. Forces the dark theme (see module docs) and paints the dark palette over
-/// egui's dark base, leaving untouched fields at their dark defaults.
+/// Light palette, mirroring the dark one in Zed's light look: a near-white editor, panels a touch
+/// darker, dark text, the same blue accent a shade deeper for contrast.
+const LIGHT: Palette = Palette {
+    editor_bg: Color32::from_rgb(0xfc, 0xfc, 0xfd),
+    text_dim: Color32::from_rgb(0x86, 0x8d, 0x9a),
+    text_bright: Color32::from_rgb(0x16, 0x18, 0x1d),
+    accent: Color32::from_rgb(0x3a, 0x6f, 0xd6),
+    surface: Color32::from_rgb(0xf0, 0xf1, 0xf4),
+    floating: Color32::from_rgb(0xff, 0xff, 0xff),
+    border: Color32::from_rgb(0xd6, 0xd9, 0xe0),
+    hover: Color32::from_rgb(0xe7, 0xe9, 0xee),
+    pressed: Color32::from_rgb(0xda, 0xdd, 0xe4),
+    text: Color32::from_rgb(0x2b, 0x2d, 0x34),
+};
+
+/// The active theme's palette - the one the view paints its own colors from, so they follow the OS
+/// light/dark like egui's own surfaces do. Keyed off the resolved theme's `dark_mode`.
+pub fn palette(ctx: &egui::Context) -> &'static Palette {
+    if ctx.style().visuals.dark_mode { &DARK } else { &LIGHT }
+}
+
+/// Apply the editor look. Styles both built-in themes from their palettes and follows the OS
+/// (`System`), so the chrome switches with the desktop.
 pub fn apply(ctx: &egui::Context) {
-    ctx.set_theme(egui::ThemePreference::Dark);
-    ctx.style_mut_of(egui::Theme::Dark, |style| {
+    ctx.set_theme(egui::ThemePreference::System);
+    style_theme(ctx, egui::Theme::Dark, &DARK);
+    style_theme(ctx, egui::Theme::Light, &LIGHT);
+}
+
+/// Style one built-in theme: the shared geometry, then its palette's surfaces, text, borders, and
+/// accent painted over egui's base for that theme.
+fn style_theme(ctx: &egui::Context, theme: egui::Theme, p: &Palette) {
+    ctx.style_mut_of(theme, |style| {
         // Spacing: comfortable and even, so rows read as a list rather than a cramped form.
         style.spacing.item_spacing = vec2(8.0, 6.0);
         style.spacing.button_padding = vec2(8.0, 4.0);
         style.spacing.menu_margin = Margin::same(6);
         style.spacing.window_margin = Margin::same(8);
         style.spacing.indent = 16.0;
-        palette(&mut style.visuals);
+        paint(&mut style.visuals, p);
     });
 }
 
-/// Paint the palette onto a dark `Visuals`: surfaces, the accent, then per-widget-state text, fills,
-/// and borders. Only the fields the chrome shows are set; the rest keep egui's dark defaults.
-fn palette(v: &mut Visuals) {
-    // Surfaces, darkest to lightest: the editor well, the chrome panels, then floating popovers.
-    v.panel_fill = SURFACE;
-    v.window_fill = FLOATING;
-    v.extreme_bg_color = EDITOR_BG;
-    v.code_bg_color = EDITOR_BG;
-    v.faint_bg_color = HOVER;
+/// Paint a palette onto a `Visuals` (already the right light/dark base, so `dark_mode` stays
+/// correct): surfaces, the accent, then per-widget-state text, fills, and borders. Only the fields
+/// the chrome shows are set; the rest keep egui's defaults.
+fn paint(v: &mut Visuals, p: &Palette) {
+    // Surfaces, editor outward: the editor well, the chrome panels, then floating popovers.
+    v.panel_fill = p.surface;
+    v.window_fill = p.floating;
+    v.extreme_bg_color = p.editor_bg;
+    v.code_bg_color = p.editor_bg;
+    v.faint_bg_color = p.hover;
 
     // Flat: no shadows, small uniform rounding, one hairline border for floating windows.
     v.window_shadow = egui::epaint::Shadow::NONE;
     v.popup_shadow = egui::epaint::Shadow::NONE;
     v.window_corner_radius = CornerRadius::same(6);
     v.menu_corner_radius = CornerRadius::same(6);
-    v.window_stroke = Stroke::new(1.0, BORDER);
+    v.window_stroke = Stroke::new(1.0, p.border);
 
     // The single accent: a translucent fill for selections, the accent hue for links.
-    v.selection.bg_fill = Color32::from_rgba_unmultiplied(0x4a, 0x86, 0xd8, 0x4d);
-    v.selection.stroke = Stroke::new(1.0, TEXT_BRIGHT);
-    v.hyperlink_color = ACCENT;
+    v.selection.bg_fill = Color32::from_rgba_unmultiplied(p.accent.r(), p.accent.g(), p.accent.b(), 0x4d);
+    v.selection.stroke = Stroke::new(1.0, p.text_bright);
+    v.hyperlink_color = p.accent;
 
     let w = &mut v.widgets;
     // Noninteractive: labels, headings, separators, and the hairline borders panels draw.
-    w.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
-    w.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    w.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
+    w.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
     // Inactive: buttons and menu items at rest read flat - no fill, no border, primary text.
     w.inactive.weak_bg_fill = Color32::TRANSPARENT;
     w.inactive.bg_fill = Color32::TRANSPARENT;
     w.inactive.bg_stroke = Stroke::NONE;
-    w.inactive.fg_stroke = Stroke::new(1.0, TEXT);
+    w.inactive.fg_stroke = Stroke::new(1.0, p.text);
     // Hovered: a subtle fill and brighter text mark the control under the pointer.
-    w.hovered.weak_bg_fill = HOVER;
-    w.hovered.bg_fill = HOVER;
-    w.hovered.bg_stroke = Stroke::new(1.0, BORDER);
-    w.hovered.fg_stroke = Stroke::new(1.0, TEXT_BRIGHT);
+    w.hovered.weak_bg_fill = p.hover;
+    w.hovered.bg_fill = p.hover;
+    w.hovered.bg_stroke = Stroke::new(1.0, p.border);
+    w.hovered.fg_stroke = Stroke::new(1.0, p.text_bright);
     // Active (pressed) and open (an open menu button): a stronger fill, brightest text.
     for s in [&mut w.active, &mut w.open] {
-        s.weak_bg_fill = PRESSED;
-        s.bg_fill = PRESSED;
-        s.bg_stroke = Stroke::new(1.0, BORDER);
-        s.fg_stroke = Stroke::new(1.0, TEXT_BRIGHT);
+        s.weak_bg_fill = p.pressed;
+        s.bg_fill = p.pressed;
+        s.bg_stroke = Stroke::new(1.0, p.border);
+        s.fg_stroke = Stroke::new(1.0, p.text_bright);
     }
     // One small, uniform rounding across every widget state.
     for s in [&mut w.noninteractive, &mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
