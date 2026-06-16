@@ -86,4 +86,18 @@ mod tests {
         harness.run();
         harness.snapshot("view_menu_open");
     }
+
+    /// Hover the new-tab + and snapshot it, guarding the icon buttons' hover affordance: a hovered
+    /// icon button shows a filled background. (The pointing-hand cursor is the OS's, not in the image.)
+    #[test]
+    fn tab_row_hover_snapshot() {
+        let mut model = Model::new(Project::open("wok-engine"));
+        model.shell.open_tab();
+        model.shell.toggle_nav();
+        let mut harness = chrome_harness(&model, egui::ThemePreference::Dark, egui::vec2(460.0, 180.0));
+        harness.run();
+        harness.get_by_label("+").hover();
+        harness.run();
+        harness.snapshot("tab_row_hover");
+    }
 }

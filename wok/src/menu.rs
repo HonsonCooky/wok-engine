@@ -48,7 +48,8 @@ pub fn hamburger(ui: &mut egui::Ui, shell: &Shell, actions: &mut Vec<Action>) {
         file_menu(ui, actions);
         view_menu(ui, shell, toggle, actions);
     })
-    .response;
+    .response
+    .on_hover_cursor(egui::CursorIcon::PointingHand);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Menu"));
     let p = theme::palette(ui.ctx());
     let color = if response.hovered() { p.text_bright } else { p.text_dim };

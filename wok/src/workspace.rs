@@ -18,6 +18,11 @@ const TAB_BAR_HEIGHT: f32 = 34.0;
 /// Default navigation-panel width in points.
 const NAV_PANEL_WIDTH: f32 = 216.0;
 
+/// Mark a clickable response with a pointing-hand cursor - the affordance that it acts on click.
+fn clickable(response: egui::Response) -> egui::Response {
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Draw the workspace for one frame. Order matters: the side panel first, then the tab bar over the
 /// remaining width, then the editor area; when the panel is hidden the tab bar and editor area take
 /// the full width.
@@ -71,7 +76,7 @@ fn tab_bar(ctx: &egui::Context, shell: &Shell, actions: &mut Vec<Action>) {
             }
             // A little room before the new-tab button so it does not crowd the last tab.
             ui.add_space(6.0);
-            if ui.add(egui::Button::new("+").frame(false)).on_hover_text("New tab").clicked() {
+            if clickable(ui.add(egui::Button::new("+")).on_hover_text("New tab")).clicked() {
                 actions.push(Action::OpenTab);
             }
         });
@@ -92,11 +97,11 @@ fn tab_cell(ui: &mut egui::Ui, tab: &Tab, active: bool, actions: &mut Vec<Action
             let color = if active { p.text_bright } else { p.text_dim };
             let title = egui::RichText::new(&tab.title).color(color);
             let title = if active { title.strong() } else { title };
-            if ui.add(egui::Label::new(title).selectable(false).sense(egui::Sense::click())).clicked() {
+            if clickable(ui.add(egui::Label::new(title).selectable(false).sense(egui::Sense::click()))).clicked() {
                 actions.push(Action::SelectTab(tab.id));
             }
             let x = egui::RichText::new("x").color(p.text_dim);
-            if ui.add(egui::Button::new(x).small().frame(false)).on_hover_text("Close tab").clicked() {
+            if clickable(ui.add(egui::Button::new(x).small()).on_hover_text("Close tab")).clicked() {
                 actions.push(Action::CloseTab(tab.id));
             }
         });
