@@ -43,7 +43,9 @@ impl Project {
 }
 
 /// The display name for a content root: its final component, or the whole path when there is none.
-fn display_name_of(root: &Path) -> String {
+/// Shared by [`Project::display_name`] and the Open Recent menu, so a project reads the same in the
+/// title bar and in the recents list.
+pub fn display_name_of(root: &Path) -> String {
     root.file_name().map_or_else(
         || root.to_string_lossy().into_owned(),
         |name| name.to_string_lossy().into_owned(),

@@ -16,6 +16,7 @@ mod gui;
 mod menu;
 mod model;
 mod project;
+mod recent;
 mod theme;
 mod view;
 mod workspace;

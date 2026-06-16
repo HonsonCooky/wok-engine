@@ -12,8 +12,9 @@
 //! navigation panel (show/hide, dock side), the same actions Ctrl+B dispatches.
 
 use crate::action::Action;
-use crate::model::{Shell, Side};
-use crate::project::Project;
+use crate::model::{Model, Shell, Side};
+use crate::project::{self, Project};
+use crate::recent::Recents;
 use crate::theme;
 
 /// Status-bar height in points: one row of small text plus breathing room.
@@ -36,7 +37,7 @@ fn nav_toggle_shortcut() -> egui::KeyboardShortcut {
 /// button opens a menu with File and View as submenus. Also consumes the global Ctrl+B, so the toggle
 /// works whether or not the menu is open. The painted glyph carries an accessible "Menu" label so
 /// tooling (and the snapshot test) can find it.
-pub fn hamburger(ui: &mut egui::Ui, shell: &Shell, actions: &mut Vec<Action>) {
+pub fn hamburger(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
     let toggle = nav_toggle_shortcut();
     if ui.ctx().input_mut(|i| i.consume_shortcut(&toggle)) {
         actions.push(Action::ToggleNav);
@@ -45,8 +46,8 @@ pub fn hamburger(ui: &mut egui::Ui, shell: &Shell, actions: &mut Vec<Action>) {
     let response = egui::menu::menu_custom_button(ui, button, |ui| {
         // Let items size to their text instead of wrapping in a narrow menu.
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        file_menu(ui, actions);
-        view_menu(ui, shell, toggle, actions);
+        file_menu(ui, &model.recents, &model.project, actions);
+        view_menu(ui, &model.shell, toggle, actions);
     })
     .response
     .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -65,9 +66,10 @@ fn paint_hamburger(painter: &egui::Painter, rect: egui::Rect, color: egui::Color
     }
 }
 
-/// The File menu, trimmed to what exists: New Project (a stub), Open Project, Open Recent (a stub -
-/// no recents tracked yet), and Quit.
-fn file_menu(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+/// The File menu: New Project (a stub until project creation returns), Open Project (the native
+/// folder picker), Open Recent (the persisted MRU list), Close Project, and Quit. Close Project is
+/// disabled with no project open, so the menu never offers an action that would do nothing.
+fn file_menu(ui: &mut egui::Ui, recents: &Recents, project: &Project, actions: &mut Vec<Action>) {
     ui.menu_button("File", |ui| {
         // Let items size to their text instead of wrapping in a narrow menu.
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -83,13 +85,40 @@ fn file_menu(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
                 actions.push(Action::OpenProject(folder));
             }
         }
-        ui.menu_button("Open Recent", |ui| {
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            ui.add_enabled(false, egui::Button::new("(no recent projects)"));
-        });
+        open_recent_menu(ui, recents, actions);
+        if ui.add_enabled(project.root().is_some(), egui::Button::new("Close Project")).clicked() {
+            actions.push(Action::CloseProject);
+            ui.close_menu();
+        }
         ui.separator();
         if ui.button("Quit").clicked() {
             actions.push(Action::Quit);
+            ui.close_menu();
+        }
+    });
+}
+
+/// The Open Recent submenu: the recent projects most-recent first, each reopening through the same
+/// [`Action::OpenProject`] the picker emits, then Clear Recent. A disabled placeholder stands in when
+/// nothing has been opened yet, so the entry still reads as present. Each item shows the folder's own
+/// name, with the full path on hover to tell same-named folders apart.
+fn open_recent_menu(ui: &mut egui::Ui, recents: &Recents, actions: &mut Vec<Action>) {
+    ui.menu_button("Open Recent", |ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        if recents.is_empty() {
+            ui.add_enabled(false, egui::Button::new("(no recent projects)"));
+            return;
+        }
+        for path in recents.paths() {
+            let label = project::display_name_of(path);
+            if ui.button(label).on_hover_text(path.display().to_string()).clicked() {
+                actions.push(Action::OpenProject(path.clone()));
+                ui.close_menu();
+            }
+        }
+        ui.separator();
+        if ui.button("Clear Recent").clicked() {
+            actions.push(Action::ClearRecent);
             ui.close_menu();
         }
     });

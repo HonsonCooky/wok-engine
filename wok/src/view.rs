@@ -16,7 +16,7 @@ use crate::workspace;
 /// the editor area) fills what is left.
 pub fn chrome(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
     menu::status_bar(ctx, &model.project);
-    workspace::ui(ctx, &model.shell, actions);
+    workspace::ui(ctx, model, actions);
 }
 
 #[cfg(test)]
@@ -26,6 +26,20 @@ mod tests {
     use crate::project::Project;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Serializes the wgpu snapshot tests below. egui_kittest builds a fresh headless wgpu device per
+    /// harness, and creating or tearing several down concurrently crashes on some Windows drivers - a
+    /// wgpu teardown race, not a fault in the chrome. Each GPU test holds this lock for its lifetime,
+    /// so only one device is ever alive at a time; the pure-logic tests elsewhere stay parallel. Poison
+    /// is ignored, so a failed snapshot assert does not cascade into the rest.
+    static GPU_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire the GPU-test lock, recovering from a poisoned mutex (a prior test's panic) so the lock
+    /// still serializes rather than failing every later test.
+    fn gpu_guard() -> MutexGuard<'static, ()> {
+        GPU_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// Build a harness that renders the chrome at `size` under `theme`, with the editor surface
     /// filled behind the transparent editor area (standing in for the in-app GPU clear), so the
@@ -49,6 +63,7 @@ mod tests {
     /// `UPDATE_SNAPSHOTS=1 cargo test -p wok` and commit the new PNG.
     #[test]
     fn chrome_snapshot() {
+        let _gpu = gpu_guard();
         let mut model = Model::new(Project::open("wok-engine"));
         model.shell.open_tab();
         model.shell.open_tab();
@@ -61,6 +76,7 @@ mod tests {
     /// structure and reads cleanly.
     #[test]
     fn chrome_light_snapshot() {
+        let _gpu = gpu_guard();
         let mut model = Model::new(Project::open("wok-engine"));
         model.shell.open_tab();
         model.shell.open_tab();
@@ -75,6 +91,7 @@ mod tests {
     /// window's left edge, keeping the canvas focused.
     #[test]
     fn view_menu_open_snapshot() {
+        let _gpu = gpu_guard();
         let mut model = Model::new(Project::open("wok-engine"));
         model.shell.toggle_nav();
         let mut harness = chrome_harness(&model, egui::ThemePreference::Dark, egui::vec2(520.0, 320.0));
@@ -87,10 +104,35 @@ mod tests {
         harness.snapshot("view_menu_open");
     }
 
+    /// Open the app-menu, the File submenu, then the Open Recent submenu, and snapshot the cascade.
+    /// Guards the project-lifecycle surface added with the project model: the recent projects listed
+    /// most-recent first with Clear Recent below them, and (in the File column behind) the new Close
+    /// Project entry, enabled because a project is open. The nav panel is hidden so the cascade has
+    /// room to open rightward from the window's left edge.
+    #[test]
+    fn open_recent_menu_snapshot() {
+        let _gpu = gpu_guard();
+        let mut model = Model::new(Project::open("wok-engine"));
+        model.shell.toggle_nav();
+        model.recents.push("games/unstitched");
+        model.recents.push("demos/taste");
+        let mut harness = chrome_harness(&model, egui::ThemePreference::Dark, egui::vec2(760.0, 380.0));
+        harness.run();
+        harness.get_by_label("Menu").click();
+        harness.run();
+        // egui opens a submenu on pointer hover, not on an accesskit click - so hover to descend.
+        harness.get_by_label("File").hover();
+        harness.run();
+        harness.get_by_label("Open Recent").hover();
+        harness.run();
+        harness.snapshot("open_recent_menu");
+    }
+
     /// Hover the new-tab + and snapshot it, guarding the icon buttons' hover affordance: a hovered
     /// icon button shows a filled background. (The pointing-hand cursor is the OS's, not in the image.)
     #[test]
     fn tab_row_hover_snapshot() {
+        let _gpu = gpu_guard();
         let mut model = Model::new(Project::open("wok-engine"));
         model.shell.open_tab();
         model.shell.toggle_nav();

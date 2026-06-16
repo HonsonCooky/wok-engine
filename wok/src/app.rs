@@ -18,6 +18,7 @@ use crate::action::{self, Action};
 use crate::gui::Gui;
 use crate::model::Model;
 use crate::project::Project;
+use crate::recent;
 use crate::theme;
 use crate::view;
 
@@ -31,14 +32,19 @@ pub struct EditorApp {
 }
 
 impl EditorApp {
-    /// Build the app. An optional startup folder (from the CLI) opens as the initial project; with
-    /// none, the editor starts with no project open.
+    /// Build the app. The recent-projects list is seeded from disk (a missing or malformed file reads
+    /// as empty, so the editor always starts). An optional startup folder (from the CLI) opens as the
+    /// initial project, routed through the one writer so it lands in recents the way a menu open does
+    /// and is persisted at once; with none, the editor starts with no project open.
     pub fn new(initial: Option<PathBuf>) -> EditorApp {
-        let project = match initial {
-            Some(root) => Project::open(root),
-            None => Project::None,
-        };
-        EditorApp { model: Model::new(project), gui: None, title: String::new() }
+        let mut model = Model::new(Project::None);
+        model.recents = recent::load();
+        if let Some(root) = initial {
+            if action::handle(Action::OpenProject(root), &mut model).save_recents {
+                recent::save(&model.recents);
+            }
+        }
+        EditorApp { model, gui: None, title: String::new() }
     }
 
     /// Keep the window title showing the open project's name, or just the app name when none.
@@ -85,11 +91,16 @@ impl App for EditorApp {
             }
         }
 
-        // Apply the actions through the one handler - the single writer for the model. Quit is the
-        // one effect the pure state cannot perform, so the loop carries it out here.
+        // Apply the actions through the one handler - the single writer for the model. The effects the
+        // pure state cannot perform itself are carried out here: quit closes the window, and a recents
+        // change is flushed to disk.
         for action in actions {
-            if action::handle(action, &mut self.model).quit {
+            let handled = action::handle(action, &mut self.model);
+            if handled.quit {
                 ctx.should_close = true;
+            }
+            if handled.save_recents {
+                recent::save(&self.model.recents);
             }
         }
 

@@ -9,7 +9,7 @@
 
 use crate::action::Action;
 use crate::menu;
-use crate::model::{Shell, Side, Tab};
+use crate::model::{Model, Shell, Side, Tab};
 use crate::theme;
 
 /// Tab-strip height in points: enough that the active tab's fill reads as a panel, not a chip.
@@ -26,12 +26,12 @@ fn clickable(response: egui::Response) -> egui::Response {
 /// Draw the workspace for one frame. Order matters: the side panel first, then the tab bar over the
 /// remaining width, then the editor area; when the panel is hidden the tab bar and editor area take
 /// the full width.
-pub fn ui(ctx: &egui::Context, shell: &Shell, actions: &mut Vec<Action>) {
-    if shell.nav_visible() {
-        nav_panel(ctx, shell);
+pub fn ui(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
+    if model.shell.nav_visible() {
+        nav_panel(ctx, &model.shell);
     }
-    tab_bar(ctx, shell, actions);
-    editor_area(ctx, shell);
+    tab_bar(ctx, model, actions);
+    editor_area(ctx, &model.shell);
 }
 
 /// The navigation panel: docked left or right, with placeholder content. Real navigation (scene
@@ -63,16 +63,17 @@ fn nav_panel(ctx: &egui::Context, shell: &Shell) {
 /// The tab bar: the app-menu hamburger at the left, then one cell per open tab, plus a "+" that opens
 /// a new untitled tab. Hand-drawn (egui has no tab widget) so the active-tab highlight and the close
 /// affordance are ours to shape.
-fn tab_bar(ctx: &egui::Context, shell: &Shell, actions: &mut Vec<Action>) {
+fn tab_bar(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
     egui::TopBottomPanel::top("wok_tab_bar").exact_height(TAB_BAR_HEIGHT).show(ctx, |ui| {
         ui.horizontal_centered(|ui| {
             // The app-menu sits at the left of the row, always visible regardless of nav-panel state.
-            menu::hamburger(ui, shell, actions);
+            // It reads the whole model (recents, project) for the File menu.
+            menu::hamburger(ui, model, actions);
             ui.add_space(8.0);
             // Tabs nearly touch, as in Zed, with the active fill the only thing parting them.
             ui.spacing_mut().item_spacing.x = 1.0;
-            for tab in shell.tabs() {
-                tab_cell(ui, tab, shell.active() == Some(tab.id), actions);
+            for tab in model.shell.tabs() {
+                tab_cell(ui, tab, model.shell.active() == Some(tab.id), actions);
             }
             // A little room before the new-tab button so it does not crowd the last tab.
             ui.add_space(6.0);

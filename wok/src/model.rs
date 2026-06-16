@@ -7,6 +7,7 @@
 //! shell logic is unit testable without a window.
 
 use crate::project::Project;
+use crate::recent::Recents;
 
 /// The editor's top-level state: what is open, and how the shell around it is arranged.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -15,13 +16,17 @@ pub struct Model {
     pub project: Project,
     /// The shell layout: the navigation panel and the open tabs.
     pub shell: Shell,
+    /// The recently opened projects (most-recent first), persisted across runs. Seeded from disk at
+    /// startup and written back by the action layer when it changes (`crate::recent`).
+    pub recents: Recents,
 }
 
 impl Model {
     /// Build a model around an initial project, with a default shell (panel shown on the left, no
-    /// tabs open).
+    /// tabs open) and an empty recent-projects list. The startup edge seeds recents from disk after
+    /// construction (`crate::app`).
     pub fn new(project: Project) -> Model {
-        Model { project, shell: Shell::default() }
+        Model { project, shell: Shell::default(), recents: Recents::default() }
     }
 }
 
@@ -120,6 +125,15 @@ impl Shell {
         if self.active == Some(id) {
             self.active = self.tabs.get(idx).or_else(|| self.tabs.last()).map(|t| t.id);
         }
+    }
+
+    /// Close every open tab and clear the active tab. The tabs are project-scoped, so closing the
+    /// project clears them; the nav panel's dock side and visibility are workspace preferences, not
+    /// project content, and are left alone. `next_id` keeps climbing, so a later tab never reuses a
+    /// closed tab's id.
+    pub(crate) fn close_all_tabs(&mut self) {
+        self.tabs.clear();
+        self.active = None;
     }
 
     /// Make the tab with this id active. A no-op when no tab has this id, so the active tab always

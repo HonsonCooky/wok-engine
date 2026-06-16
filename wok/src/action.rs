@@ -21,8 +21,14 @@ pub enum Action {
     /// New Project: create and open a fresh project. A stub until the scene/save piece returns; it
     /// is in the vocabulary now so the menu wiring and the handler seam are exercised and tested.
     NewProject,
-    /// Open Project: set the current project to the folder at this path.
+    /// Open Project: set the current project to the folder at this path, and record it at the front of
+    /// the recent list. The same action both the folder picker and an Open Recent entry emit, so
+    /// reopening a recent is just opening its path - one obvious way, not a parallel code path.
     OpenProject(PathBuf),
+    /// Close Project: return to the no-project state and clear the (project-scoped) open tabs.
+    CloseProject,
+    /// Clear Recent: empty the recent-projects list.
+    ClearRecent,
     /// Quit: request a clean shutdown after this frame.
     Quit,
 
@@ -39,12 +45,15 @@ pub enum Action {
     SetNavSide(Side),
 }
 
-/// What [`handle`] asks the frame loop to carry out - the effect the pure model cannot perform
-/// itself: closing the window. Empty by default; an action sets only the field it needs.
+/// What [`handle`] asks the frame loop to carry out - the effects the pure model cannot perform
+/// itself: closing the window, and persisting the recent-projects list. Empty by default; an action
+/// sets only the field it needs.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Handled {
     /// Close the window and exit after this frame.
     pub quit: bool,
+    /// The recent-projects list changed; the frame loop should write it to disk (`crate::recent`).
+    pub save_recents: bool,
 }
 
 /// Apply one action to the model, returning the frame-loop effects it implies. The single point
@@ -52,10 +61,20 @@ pub struct Handled {
 pub fn handle(action: Action, model: &mut Model) -> Handled {
     match action {
         Action::OpenProject(root) => {
-            model.project = Project::open(root);
+            model.project = Project::open(root.clone());
+            model.recents.push(root);
+            Handled { save_recents: true, ..Handled::default() }
+        }
+        Action::CloseProject => {
+            model.project = Project::None;
+            model.shell.close_all_tabs();
             Handled::default()
         }
-        Action::Quit => Handled { quit: true },
+        Action::ClearRecent => {
+            model.recents.clear();
+            Handled { save_recents: true, ..Handled::default() }
+        }
+        Action::Quit => Handled { quit: true, ..Handled::default() },
         // Stub: New Project has no effect until project creation is built. Kept in the vocabulary so
         // the menu routes through this seam today; the behavior drops in here when it returns.
         Action::NewProject => Handled::default(),
@@ -117,6 +136,70 @@ mod tests {
         let handled = handle(Action::NewProject, &mut model);
         assert_eq!(model.project, Project::None);
         assert!(!handled.quit);
+    }
+
+    // ---- recent projects ----
+
+    #[test]
+    fn open_project_records_it_in_recents_and_asks_to_save() {
+        let mut model = Model::default();
+        let handled = handle(Action::OpenProject(PathBuf::from("games/unstitched")), &mut model);
+        assert_eq!(model.recents.paths(), &[PathBuf::from("games/unstitched")]);
+        assert!(handled.save_recents, "opening a project changes recents, so it should persist");
+    }
+
+    #[test]
+    fn opening_projects_lists_them_most_recent_first() {
+        let mut model = Model::default();
+        handle(Action::OpenProject(PathBuf::from("a")), &mut model);
+        handle(Action::OpenProject(PathBuf::from("b")), &mut model);
+        assert_eq!(model.recents.paths(), &[PathBuf::from("b"), PathBuf::from("a")]);
+    }
+
+    #[test]
+    fn reopening_a_project_dedups_to_a_single_front_entry() {
+        let mut model = Model::default();
+        handle(Action::OpenProject(PathBuf::from("a")), &mut model);
+        handle(Action::OpenProject(PathBuf::from("b")), &mut model);
+        handle(Action::OpenProject(PathBuf::from("a")), &mut model);
+        // Reopening "a" moves it to the front without duplicating it.
+        assert_eq!(model.recents.paths(), &[PathBuf::from("a"), PathBuf::from("b")]);
+    }
+
+    #[test]
+    fn clear_recent_empties_the_list_and_asks_to_save() {
+        let mut model = Model::default();
+        handle(Action::OpenProject(PathBuf::from("a")), &mut model);
+        let handled = handle(Action::ClearRecent, &mut model);
+        assert!(model.recents.paths().is_empty());
+        assert!(handled.save_recents);
+    }
+
+    // ---- close project ----
+
+    #[test]
+    fn close_project_returns_to_no_project_and_clears_tabs() {
+        let mut model = Model::new(Project::open("games/unstitched"));
+        model.shell.open_tab();
+        model.shell.open_tab();
+        let handled = handle(Action::CloseProject, &mut model);
+        assert_eq!(model.project, Project::None);
+        assert!(model.shell.tabs().is_empty(), "tabs are project-scoped and clear with the project");
+        assert_eq!(model.shell.active(), None);
+        assert!(!handled.quit);
+    }
+
+    #[test]
+    fn close_project_keeps_recents_and_the_panel_layout() {
+        let mut model = Model::default();
+        handle(Action::OpenProject(PathBuf::from("games/unstitched")), &mut model);
+        handle(Action::SetNavSide(Side::Right), &mut model);
+        handle(Action::CloseProject, &mut model);
+        assert_eq!(model.project, Project::None);
+        // The closed project stays in recents (it was just opened), and the dock side is a workspace
+        // preference, not project content, so the close leaves it be.
+        assert_eq!(model.recents.paths(), &[PathBuf::from("games/unstitched")]);
+        assert_eq!(model.shell.nav_side(), Side::Right);
     }
 
     // ---- tabs ----
