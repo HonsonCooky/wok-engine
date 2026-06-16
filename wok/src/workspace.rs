@@ -1,13 +1,14 @@
 //! The editor workspace: the navigation panel, the tab bar, and the per-context editor area.
 //!
-//! These three regions fill the space the chrome (`crate::menu`) leaves between the menu bar and the
-//! status bar. They are laid out in order so egui nests them correctly: the navigation panel claims
-//! one side (when shown), then the tab bar caps the remaining width, and the editor area takes what
-//! is left. The editor area paints no background, so the GPU viewport clear shows through as the 3D
-//! surface that lands later. Like the chrome, this layer only reads the model and emits actions; it
-//! never mutates state.
+//! These three regions fill the space above the status bar (`crate::menu`). They are laid out in
+//! order so egui nests them correctly: the navigation panel claims one side (when shown), then the
+//! tab bar caps the remaining width - with the app-menu hamburger at its left - and the editor area
+//! takes what is left. The editor area paints no background, so the GPU viewport clear shows through
+//! as the 3D surface that lands later. Like the chrome, this layer only reads the model and emits
+//! actions; it never mutates state.
 
 use crate::action::Action;
+use crate::menu;
 use crate::model::{Shell, Side, Tab};
 use crate::theme;
 
@@ -53,11 +54,15 @@ fn nav_panel(ctx: &egui::Context, shell: &Shell) {
     }
 }
 
-/// The tab bar: one cell per open tab, plus a "+" that opens a new untitled tab. Hand-drawn (egui
-/// has no tab widget) so the active-tab highlight and the close affordance are ours to shape.
+/// The tab bar: the app-menu hamburger at the left, then one cell per open tab, plus a "+" that opens
+/// a new untitled tab. Hand-drawn (egui has no tab widget) so the active-tab highlight and the close
+/// affordance are ours to shape.
 fn tab_bar(ctx: &egui::Context, shell: &Shell, actions: &mut Vec<Action>) {
     egui::TopBottomPanel::top("wok_tab_bar").exact_height(TAB_BAR_HEIGHT).show(ctx, |ui| {
         ui.horizontal_centered(|ui| {
+            // The app-menu sits at the left of the row, always visible regardless of nav-panel state.
+            menu::hamburger(ui, shell, actions);
+            ui.add_space(4.0);
             // Tabs nearly touch, as in Zed, with the active fill the only thing parting them.
             ui.spacing_mut().item_spacing.x = 1.0;
             for tab in shell.tabs() {

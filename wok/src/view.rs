@@ -11,10 +11,10 @@ use crate::menu;
 use crate::model::Model;
 use crate::workspace;
 
-/// Render the full editor chrome for one frame. Order is layout order: the top bar and the status bar
-/// claim the edges, then the workspace (navigation panel, tab bar, editor area) fills what is left.
+/// Render the full editor chrome for one frame. Order is layout order: the status bar claims the
+/// bottom edge, then the workspace (navigation panel, the tab bar with the app-menu at its left, and
+/// the editor area) fills what is left.
 pub fn chrome(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
-    menu::header(ctx, model, actions);
     menu::status_bar(ctx, &model.project);
     workspace::ui(ctx, &model.shell, actions);
 }
@@ -55,20 +55,27 @@ mod tests {
         harness.snapshot("chrome");
     }
 
-    /// Open the View menu and snapshot it, confirming menus size to their content: the long "Hide
-    /// Navigation Panel" item and its Ctrl+B hint sit on one line rather than wrapping in a narrow
-    /// menu. A focused canvas - the header and the open menu, not the whole editor.
+    /// Open the app-menu (the hamburger), then its View submenu, and snapshot it. Confirms the
+    /// hamburger menu and that items size to content: the long "Show Navigation Panel" item and its
+    /// Ctrl+B hint sit on one line, not wrapped. The nav panel is hidden so the menu opens at the
+    /// window's left edge, keeping the canvas focused.
     #[test]
     fn view_menu_open_snapshot() {
-        let model = Model::new(Project::open("wok-engine"));
+        let mut model = Model::new(Project::open("wok-engine"));
+        model.shell.toggle_nav();
 
         let mut harness = Harness::builder().with_size(egui::vec2(520.0, 320.0)).wgpu().build(|ctx| {
             crate::theme::apply(ctx);
+            ctx.layer_painter(egui::LayerId::background())
+                .rect_filled(ctx.screen_rect(), 0.0, crate::theme::EDITOR_BG);
             let mut actions = Vec::new();
             chrome(ctx, &model, &mut actions);
         });
         harness.run();
-        harness.get_by_label("View").click();
+        harness.get_by_label("Menu").click();
+        harness.run();
+        // egui opens a submenu on pointer hover, not on an accesskit click - so hover View.
+        harness.get_by_label("View").hover();
         harness.run();
         harness.snapshot("view_menu_open");
     }

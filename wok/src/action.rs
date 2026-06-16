@@ -37,32 +37,14 @@ pub enum Action {
     ToggleNav,
     /// Dock the navigation panel to this side.
     SetNavSide(Side),
-
-    // ---- window controls ----
-    // The custom header replaces the OS title bar, so its buttons drive the window through the action
-    // seam. Like Quit, these change no model state - they are effects the frame loop carries out on
-    // the OS window (`Handled`), routed here so the view stays free of the window handle.
-    /// Minimize the window to the taskbar.
-    Minimize,
-    /// Toggle the window between maximized and restored.
-    ToggleMaximize,
-    /// Begin an OS move-drag of the window (the header's empty region is the drag handle).
-    StartDrag,
 }
 
-/// What [`handle`] asks the frame loop to carry out - effects the pure model cannot perform itself
-/// (closing, and the custom header's window controls). Empty by default; an action sets only the
-/// field it needs.
+/// What [`handle`] asks the frame loop to carry out - the effect the pure model cannot perform
+/// itself: closing the window. Empty by default; an action sets only the field it needs.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Handled {
     /// Close the window and exit after this frame.
     pub quit: bool,
-    /// Minimize the window.
-    pub minimize: bool,
-    /// Toggle the window between maximized and restored.
-    pub toggle_maximize: bool,
-    /// Begin an OS move-drag of the window.
-    pub start_drag: bool,
 }
 
 /// Apply one action to the model, returning the frame-loop effects it implies. The single point
@@ -73,7 +55,7 @@ pub fn handle(action: Action, model: &mut Model) -> Handled {
             model.project = Project::open(root);
             Handled::default()
         }
-        Action::Quit => Handled { quit: true, ..Handled::default() },
+        Action::Quit => Handled { quit: true },
         // Stub: New Project has no effect until project creation is built. Kept in the vocabulary so
         // the menu routes through this seam today; the behavior drops in here when it returns.
         Action::NewProject => Handled::default(),
@@ -97,10 +79,6 @@ pub fn handle(action: Action, model: &mut Model) -> Handled {
             model.shell.set_nav_side(side);
             Handled::default()
         }
-        // Window controls: no model change, just an effect for the frame loop to apply to the window.
-        Action::Minimize => Handled { minimize: true, ..Handled::default() },
-        Action::ToggleMaximize => Handled { toggle_maximize: true, ..Handled::default() },
-        Action::StartDrag => Handled { start_drag: true, ..Handled::default() },
     }
 }
 
@@ -242,20 +220,5 @@ mod tests {
         assert_eq!(model.shell.nav_side(), Side::Right);
         handle(Action::SetNavSide(Side::Left), &mut model);
         assert_eq!(model.shell.nav_side(), Side::Left);
-    }
-
-    // ---- window controls ----
-
-    #[test]
-    fn window_controls_request_their_effect_and_leave_the_model_alone() {
-        let mut model = Model::new(Project::open("games/unstitched"));
-        let before = model.clone();
-        assert_eq!(handle(Action::Minimize, &mut model), Handled { minimize: true, ..Default::default() });
-        assert_eq!(
-            handle(Action::ToggleMaximize, &mut model),
-            Handled { toggle_maximize: true, ..Default::default() }
-        );
-        assert_eq!(handle(Action::StartDrag, &mut model), Handled { start_drag: true, ..Default::default() });
-        assert_eq!(model, before, "window controls are window effects, not model changes");
     }
 }
