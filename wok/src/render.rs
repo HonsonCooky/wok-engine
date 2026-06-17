@@ -66,12 +66,16 @@ fn editor_viewport(rect: egui::Rect, pixels_per_point: f32) -> Option<ViewportRe
     if !rect.is_finite() || rect.width() <= 0.0 || rect.height() <= 0.0 {
         return None;
     }
-    Some(ViewportRect {
-        x: rect.min.x * pixels_per_point,
-        y: rect.min.y * pixels_per_point,
-        width: rect.width() * pixels_per_point,
-        height: rect.height() * pixels_per_point,
-    })
+    // Round the pixel rect outward - floor the min corner, ceil the max corner - so the integer
+    // viewport never falls a rounding pixel short of the panel and lets wok-render's clear colour
+    // show as a seam where the 3D meets the chrome. wok-render's scissor floors each edge, so
+    // feeding it whole-pixel edges reproduces exactly this rect, and any sub-pixel overshoot is
+    // painted over by the opaque chrome (the nav panel, tab bar, status bar) drawn after the 3D.
+    let min_x = (rect.min.x * pixels_per_point).floor();
+    let min_y = (rect.min.y * pixels_per_point).floor();
+    let max_x = (rect.max.x * pixels_per_point).ceil();
+    let max_y = (rect.max.y * pixels_per_point).ceil();
+    Some(ViewportRect { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y })
 }
 
 /// GPU residency, created in `init` once a device exists: the renderer sized to the surface, one
@@ -192,5 +196,37 @@ impl EditorApp {
             gui.paint(ctx.platform, &mut frame.encoder, &frame.view, output, size);
         }
         frame.finish(ctx.platform);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::float_cmp)]
+mod tests {
+    use super::editor_viewport;
+
+    #[test]
+    fn a_degenerate_rect_has_no_viewport() {
+        assert!(editor_viewport(egui::Rect::NOTHING, 1.5).is_none());
+        let zero_height = egui::Rect::from_min_max(egui::pos2(0.0, 10.0), egui::pos2(100.0, 10.0));
+        assert!(editor_viewport(zero_height, 1.0).is_none());
+    }
+
+    #[test]
+    fn a_whole_pixel_rect_passes_through_at_unit_scale() {
+        let rect = egui::Rect::from_min_max(egui::pos2(216.0, 34.0), egui::pos2(1100.0, 680.0));
+        let vp = editor_viewport(rect, 1.0).unwrap();
+        assert_eq!((vp.x, vp.y, vp.width, vp.height), (216.0, 34.0, 884.0, 646.0));
+    }
+
+    #[test]
+    fn a_subpixel_rect_rounds_outward_to_cover_the_panel() {
+        // At 1.5x a panel at points (144.3 .. 480.7) x (20.2 .. 360.9) spans pixels
+        // (216.45 .. 721.05) x (30.3 .. 541.35). Outward rounding floors the min corner (216, 30)
+        // and ceils the max corner (722, 542), so the integer viewport fully covers the panel
+        // instead of falling a fraction short and showing a clear-colour seam.
+        let rect = egui::Rect::from_min_max(egui::pos2(144.3, 20.2), egui::pos2(480.7, 360.9));
+        let vp = editor_viewport(rect, 1.5).unwrap();
+        assert_eq!((vp.x, vp.y), (216.0, 30.0));
+        assert_eq!((vp.width, vp.height), (722.0 - 216.0, 542.0 - 30.0));
     }
 }
