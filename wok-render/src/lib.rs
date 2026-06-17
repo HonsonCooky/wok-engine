@@ -17,6 +17,13 @@
 //! policy. This is HLD principle 5 applied to drawing: the game owns the loop and the state, the
 //! engine owns the GPU mechanics.
 //!
+//! By default the frame fills the whole target. A caller may instead confine it to a sub-rect with
+//! [`Renderer::set_viewport`] (a [`ViewportRect`] in physical pixels): the colour passes' viewport
+//! and scissor scope to the rect, the offscreen depth and shadow resources stay sized to the full
+//! target, and the caller supplies an aspect-matched camera so the view stays centred and
+//! undistorted inside it. It is "where on the target", not a second configuration (HLD: one
+//! target). The editor uses it to keep the 3D inside its viewport panel; taste leaves it unset.
+//!
 //! After the frame, a caller may overlay debug lines: [`Renderer::render_lines`] draws a list of
 //! [`LineSegment`]s (world-space endpoints plus a flat color) through the same camera, unlit and
 //! unfogged, outside the shadow pass entirely. The caller's [`DepthMode`] decides whether the
@@ -82,4 +89,6 @@ mod renderer;
 mod shadow;
 mod uniforms;
 
-pub use renderer::{Camera, DEFAULT_SHADOW_MAP_SIZE, DepthMode, LineSegment, RenderItem, Renderer};
+pub use renderer::{
+    Camera, DEFAULT_SHADOW_MAP_SIZE, DepthMode, LineSegment, RenderItem, Renderer, ViewportRect,
+};

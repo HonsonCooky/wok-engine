@@ -5,7 +5,7 @@ use glam::{Mat4, Vec3};
 use wok_light::LightState;
 use wok_mesh::MeshGpu;
 use wok_platform::wgpu;
-use wok_render::{Camera, DepthMode, RenderItem, Renderer};
+use wok_render::{Camera, DepthMode, RenderItem, Renderer, ViewportRect};
 use wok_scene::Aabb;
 
 use crate::{FORMAT, SIZE, assert_no_validation_error, device, render_frame};
@@ -149,4 +149,57 @@ fn opacity_screen_doors_about_half_the_pixels_and_full_opacity_is_inert() {
         (0.4..=0.6).contains(&ratio),
         "opacity 0.5 kept {kept} of {footprint} cube pixels ({ratio}); expected about half"
     );
+}
+
+#[test]
+fn viewport_confines_the_frame_to_its_sub_rect_and_none_restores_full_target() {
+    // The viewport-rect contract, structurally: an explicit rect carries through (the sky and
+    // geometry land only inside it, the rest of the target keeps the clear), and clearing it back to
+    // None restores the full-target frame bitwise (the inertness taste relies on).
+    let (device, queue) = device();
+    let mut renderer = Renderer::new(&device, FORMAT, SIZE, SIZE);
+
+    let eye = Vec3::new(0.0, 0.0, 6.0);
+    let camera = Camera {
+        view_proj: Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 400.0)
+            * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y),
+        eye,
+    };
+    let light = LightState::default();
+    let region = Aabb::new(Vec3::splat(-3.0), Vec3::splat(3.0));
+
+    // Full target: the sky pass covers every pixel, the left half included.
+    let full = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &[], &[], DepthMode::Tested,
+    );
+
+    // Confine to the right half. The forward pass still clears the whole attachment to black (the
+    // load-op clear is not scissored), then the viewport and scissor keep the sky and geometry inside
+    // the right half, so the left half stays at the black clear.
+    let half = SIZE / 2;
+    renderer.set_viewport(Some(ViewportRect { x: half as f32, y: 0.0, width: half as f32, height: SIZE as f32 }));
+    let confined = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &[], &[], DepthMode::Tested,
+    );
+
+    // Clearing it back to the whole target reproduces the first frame bitwise.
+    renderer.set_viewport(None);
+    let full_again = render_frame(
+        &device, &queue, &mut renderer, &camera, &light, region, &[], &[], DepthMode::Tested,
+    );
+    assert_eq!(full, full_again, "clearing the viewport must restore the full-target frame bitwise");
+
+    let is_black = |frame: &[u8], x: u32, y: u32| {
+        let at = ((y * SIZE + x) * 4) as usize;
+        frame[at] == 0 && frame[at + 1] == 0 && frame[at + 2] == 0
+    };
+    // The confined frame left its left half untouched (the black clear) where the full frame painted
+    // the same pixels with sky - so the viewport, not the scene, moved them.
+    for y in (0..SIZE).step_by(7) {
+        for x in (0..half).step_by(7) {
+            assert!(is_black(&confined, x, y), "the viewport leaked a draw into the left half at ({x}, {y})");
+        }
+    }
+    assert!(!is_black(&full, half / 2, SIZE / 2), "the full frame should paint the left half (sky)");
+    assert!(!is_black(&confined, half + half / 2, SIZE / 2), "the viewport drew nothing inside its rect");
 }

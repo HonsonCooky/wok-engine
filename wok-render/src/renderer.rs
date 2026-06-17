@@ -78,6 +78,40 @@ pub enum DepthMode {
     XRay,
 }
 
+/// A sub-rectangle of the render target, in physical pixels (origin at the top-left): where on the
+/// target the frame draws. Set it with [`Renderer::set_viewport`]; the default is the whole target,
+/// so a caller that never sets one renders full-frame exactly as before.
+///
+/// This is "where on the target", not a second configuration (HLD: one target). It scopes only the
+/// wgpu viewport and scissor of the colour passes; the camera, light, sky, fog, shadow region, and
+/// the offscreen resources (depth buffer, shadow map) are unchanged and stay sized to the full
+/// target. A caller confining the view to a sub-rect supplies a camera whose projection already
+/// matches the sub-rect's aspect, so geometry sits centred and undistorted within it; this type
+/// does not touch the camera.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewportRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl ViewportRect {
+    /// The clamped integer pixel rect `(x, y, width, height)` this viewport occupies on a
+    /// `target_w` x `target_h` target. The wgpu viewport and the scissor both use it, so the two
+    /// never disagree by a sub-pixel. The origin floors and the far edges clamp to the target, so a
+    /// rect nudged past an edge by rounding (or a stale rect after a resize) trims to fit instead of
+    /// raising a wgpu out-of-bounds validation error; an origin at or past an edge yields a
+    /// zero-size rect, which the caller draws as nothing.
+    fn scissor(self, target_w: u32, target_h: u32) -> (u32, u32, u32, u32) {
+        let x = (self.x.max(0.0) as u32).min(target_w);
+        let y = (self.y.max(0.0) as u32).min(target_h);
+        let right = ((self.x + self.width).max(0.0) as u32).min(target_w);
+        let bottom = ((self.y + self.height).max(0.0) as u32).min(target_h);
+        (x, y, right.saturating_sub(x), bottom.saturating_sub(y))
+    }
+}
+
 /// The forward renderer: depth buffer, frame uniforms, per-draw storage, and the sky and mesh
 /// pipelines. One per render target size; create with [`Renderer::new`] against the target's
 /// texture format and keep [`Renderer::resize`] in step with the target.
@@ -94,6 +128,13 @@ pub struct Renderer {
     shadow_view: wgpu::TextureView,
     shadow_group: wgpu::BindGroup,
     shadow_map_size: u32,
+    // The current target size (width, height), tracked from `new` and `resize` so the viewport
+    // clamps to it; the colour-pass scissor must stay inside the attachment.
+    target_size: (u32, u32),
+    // The sub-rect the colour passes draw into (physical pixels), or `None` for the whole target.
+    // Renderer state set per frame by the caller, like the target size `resize` tracks; see
+    // `set_viewport` and `ViewportRect`.
+    viewport: Option<ViewportRect>,
     camera_buffer: wgpu::Buffer,
     light_buffer: wgpu::Buffer,
     frame_group: wgpu::BindGroup,
@@ -195,6 +236,8 @@ impl Renderer {
             shadow_view,
             shadow_group,
             shadow_map_size,
+            target_size: (width, height),
+            viewport: None,
             camera_buffer,
             light_buffer,
             frame_group,
@@ -217,6 +260,18 @@ impl Renderer {
     /// error.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.depth_view = pipeline::depth_texture(device, width, height);
+        self.target_size = (width, height);
+    }
+
+    /// Confine subsequent frames to a sub-rect of the target, or pass `None` for the whole target.
+    /// Per-frame render input the caller refreshes as its layout changes (a docked panel, a window
+    /// resize); it is renderer state, like the target size [`Renderer::resize`] tracks, so a caller
+    /// that never calls this renders full-frame and is bit-identical to before. The rect scopes the
+    /// viewport and scissor of the colour passes ([`Renderer::render`] and
+    /// [`Renderer::render_lines`]); everything else, including the offscreen depth and shadow
+    /// resources, is unchanged. See [`ViewportRect`].
+    pub fn set_viewport(&mut self, viewport: Option<ViewportRect>) {
+        self.viewport = viewport;
     }
 
     /// Draw one frame into `target`: the sun's shadow map first (every item in `items` rendered
@@ -232,6 +287,9 @@ impl Renderer {
     ///
     /// `items` is the whole contract: wok-render reads no stores and no pools, and draws exactly
     /// what it is handed, in order, with no culling.
+    ///
+    /// The frame draws into the whole target unless a [`ViewportRect`] is set
+    /// ([`Renderer::set_viewport`]), which scopes the colour pass to a sub-rect of it.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -320,6 +378,10 @@ impl Renderer {
             occlusion_query_set: None,
         });
 
+        // Confine the draw to the viewport sub-rect (default: the whole target). The load-op clear
+        // above is not scissored - it clears the whole attachment - so outside the sub-rect the
+        // target keeps whatever it held; only the sky and geometry are scoped to the rect.
+        apply_viewport(&mut pass, self.viewport, self.target_size);
         pass.set_bind_group(0, &self.frame_group, &[]);
         pass.set_pipeline(&self.sky_pipeline);
         pass.draw(0..3, 0..1);
@@ -389,11 +451,31 @@ impl Renderer {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        // The same sub-rect the frame's geometry drew into: lines project through the same camera,
+        // so an unconfined line pass would scatter overlay lines across the whole target while the
+        // geometry sits in the viewport. Default (no viewport set) is the whole target, as before.
+        apply_viewport(&mut pass, self.viewport, self.target_size);
         pass.set_pipeline(&self.line_pipelines[slot]);
         pass.set_bind_group(0, &self.frame_group, &[]);
         pass.set_vertex_buffer(0, self.line_buffers[slot].slice(..));
         pass.draw(0..lines.len() as u32 * 2, 0..1);
     }
+}
+
+/// Scope `pass` to `viewport` (a sub-rect of a `target`-sized attachment) by setting the wgpu
+/// viewport and scissor together. `None` leaves the pass at its default - the whole target - so the
+/// no-viewport path issues no extra commands and is bit-identical to before. A rect whose clamped
+/// size is empty (its origin sits at or past an edge) sets a zero scissor, so the pass draws
+/// nothing rather than falling back to the full target.
+fn apply_viewport(pass: &mut wgpu::RenderPass, viewport: Option<ViewportRect>, target: (u32, u32)) {
+    let Some(vp) = viewport else { return };
+    let (x, y, w, h) = vp.scissor(target.0, target.1);
+    if w == 0 || h == 0 {
+        pass.set_scissor_rect(0, 0, 0, 0);
+        return;
+    }
+    pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
+    pass.set_scissor_rect(x, y, w, h);
 }
 
 /// The line vertex buffer for `capacity` segments: two [`pipeline::LINE_VERTEX_STRIDE`]-byte
@@ -444,4 +526,41 @@ fn draw_resources(
         }],
     });
     (buffer, group)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ViewportRect;
+
+    #[test]
+    fn scissor_passes_an_in_bounds_rect_through_unchanged() {
+        let vp = ViewportRect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 };
+        assert_eq!(vp.scissor(800, 600), (10, 20, 100, 50));
+    }
+
+    #[test]
+    fn scissor_trims_a_rect_that_spills_past_the_target_edges() {
+        // A rect 100px past the right (x 700 + w 200 vs width 800) and 60px past the bottom (y 560 +
+        // h 100 vs height 600) keeps its origin and shrinks to the target, never reaching past it.
+        let vp = ViewportRect { x: 700.0, y: 560.0, width: 200.0, height: 100.0 };
+        assert_eq!(vp.scissor(800, 600), (700, 560, 100, 40));
+    }
+
+    #[test]
+    fn scissor_origin_at_or_past_an_edge_is_empty() {
+        // Origin past the right edge clamps to the edge with zero width - the caller draws nothing
+        // rather than spilling across the whole target.
+        let vp = ViewportRect { x: 900.0, y: 0.0, width: 50.0, height: 50.0 };
+        assert_eq!(vp.scissor(800, 600), (800, 0, 0, 50));
+    }
+
+    #[test]
+    fn scissor_floors_each_edge_to_whole_pixels() {
+        // egui points times pixels_per_point land on fractional pixels; each edge floors
+        // independently (origin 10.9 -> 10, right 111.6 -> 111), so the box is whole-pixel and the
+        // viewport and scissor agree. Flooring the edges, not the size, keeps adjacent sub-rects
+        // touching without a seam.
+        let vp = ViewportRect { x: 10.9, y: 20.4, width: 100.7, height: 50.5 };
+        assert_eq!(vp.scissor(800, 600), (10, 20, 101, 50));
+    }
 }
