@@ -37,11 +37,20 @@ uninlined_format_args             = "allow"
 unnecessary_wraps                 = "allow"
 unused_self                       = "allow"
 
-# Minimal shell: the window/GPU/frame-loop substrate plus the egui integration. The engine
-# libraries (wok-scene, wok-physics, wok-mesh, wok-light, wok-content, wok-render) and glam return
-# as their consuming pieces of the editor do; they are not dependencies of the bare shell.
+# The window/GPU/frame-loop substrate plus the egui integration, and the engine libraries the Scene
+# view frame consumes: wok-scene (authored data + the hot-reload watcher), wok-content (chunk
+# lifecycle into runtime arrays), wok-mesh (primitive and terrain meshes), wok-render (the forward
+# pass), wok-light (the lighting state), and glam (the camera and chunk-origin math). wok-physics
+# returns with picking and snapping (its conservative AABBs are computed here from wok-scene's
+# unit-primitive convention in the meantime, so the frame needs no physics dependency yet).
 [dependencies]
 wok-platform = { path = "../wok-platform" }
+wok-scene = { path = "../wok-scene" }
+wok-content = { path = "../wok-content" }
+wok-mesh = { path = "../wok-mesh" }
+wok-render = { path = "../wok-render" }
+wok-light = { path = "../wok-light" }
+glam.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true

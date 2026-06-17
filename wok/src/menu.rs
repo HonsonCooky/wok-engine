@@ -12,6 +12,7 @@
 //! navigation panel (show/hide, dock side), the same actions Ctrl+B dispatches.
 
 use crate::action::Action;
+use crate::mode::Mode;
 use crate::model::{Model, Shell, Side};
 use crate::project::{self, Project};
 use crate::recent::Recents;
@@ -147,14 +148,24 @@ fn view_menu(ui: &mut egui::Ui, shell: &Shell, toggle: egui::KeyboardShortcut, a
     });
 }
 
-/// The bottom status bar. Shows the open project's name, or that none is open - the in-window
-/// confirmation that Open Project took effect (the title bar carries the same).
-pub fn status_bar(ctx: &egui::Context, project: &Project) {
+/// The bottom status bar. Shows the open project's name on the left (or that none is open - the
+/// in-window confirmation that Open Project took effect, which the title bar carries too), and the
+/// interaction mode on the right when a project is open, so the backtick toggle is visible. The
+/// richer readouts (snap, counts, framerate, save state, integrity) join as their features land.
+pub fn status_bar(ctx: &egui::Context, project: &Project, mode: Mode) {
     egui::TopBottomPanel::bottom("wok_status_bar").exact_height(STATUS_BAR_HEIGHT).show(ctx, |ui| {
         let dim = theme::palette(ui.ctx()).text_dim;
-        ui.horizontal_centered(|ui| match project.display_name() {
-            Some(name) => ui.label(egui::RichText::new(name).small().color(dim)),
-            None => ui.label(egui::RichText::new("No project open").small().color(dim)),
+        ui.horizontal_centered(|ui| {
+            match project.display_name() {
+                Some(name) => ui.label(egui::RichText::new(name).small().color(dim)),
+                None => ui.label(egui::RichText::new("No project open").small().color(dim)),
+            };
+            // The mode drives the camera, which exists only with a scene open; show it then.
+            if project.root().is_some() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(mode.label()).small().color(dim));
+                });
+            }
         });
     });
 }

@@ -33,8 +33,10 @@ pub enum Action {
     Quit,
 
     // ---- shell layout ----
-    /// Open a new untitled placeholder tab and make it active.
-    OpenTab,
+    /// Open the project's scene as a Scene tab and make it active, or focus the existing one (there
+    /// is one scene per project). Emitted by the content browser's scene entry and by the auto-open
+    /// when a project loads.
+    OpenScene,
     /// Close this tab, activating a sensible neighbour if it was the active one.
     CloseTab(TabId),
     /// Make this tab active.
@@ -78,8 +80,8 @@ pub fn handle(action: Action, model: &mut Model) -> Handled {
         // Stub: New Project has no effect until project creation is built. Kept in the vocabulary so
         // the menu routes through this seam today; the behavior drops in here when it returns.
         Action::NewProject => Handled::default(),
-        Action::OpenTab => {
-            model.shell.open_tab();
+        Action::OpenScene => {
+            model.shell.open_or_focus_scene();
             Handled::default()
         }
         Action::CloseTab(id) => {
@@ -180,8 +182,7 @@ mod tests {
     #[test]
     fn close_project_returns_to_no_project_and_clears_tabs() {
         let mut model = Model::new(Project::open("games/unstitched"));
-        model.shell.open_tab();
-        model.shell.open_tab();
+        handle(Action::OpenScene, &mut model);
         let handled = handle(Action::CloseProject, &mut model);
         assert_eq!(model.project, Project::None);
         assert!(model.shell.tabs().is_empty(), "tabs are project-scoped and clear with the project");
@@ -203,84 +204,43 @@ mod tests {
     }
 
     // ---- tabs ----
-
-    /// The id of the tab at `index`. Panics if absent - a test-only assumption that the tab exists.
-    fn tab_id(model: &Model, index: usize) -> TabId {
-        model.shell.tabs()[index].id
-    }
+    // The tab-strip mechanics (open / close-neighbour / select / close-all) are tested directly
+    // against `Shell` in `crate::model`, where they live. Here we cover only the action seams: the
+    // Scene tab open and the per-tab close/select the chrome emits.
 
     #[test]
-    fn open_tab_adds_and_activates_it() {
-        let mut model = Model::default();
-        handle(Action::OpenTab, &mut model);
+    fn open_scene_opens_the_scene_tab_and_focuses_it_on_a_repeat() {
+        let mut model = Model::new(Project::open("games/unstitched"));
+        handle(Action::OpenScene, &mut model);
         assert_eq!(model.shell.tabs().len(), 1);
-        assert_eq!(model.shell.active(), Some(tab_id(&model, 0)));
+        let scene = model.shell.tabs()[0].id;
+        assert_eq!(model.shell.active(), Some(scene));
+        // A second open-scene (the content browser clicked again) focuses the same tab.
+        handle(Action::OpenScene, &mut model);
+        assert_eq!(model.shell.tabs().len(), 1, "one scene per project, never a duplicate");
+        assert_eq!(model.shell.active(), Some(scene));
     }
 
     #[test]
-    fn opening_a_second_tab_activates_the_new_one() {
-        let mut model = Model::default();
-        handle(Action::OpenTab, &mut model);
-        handle(Action::OpenTab, &mut model);
-        assert_eq!(model.shell.tabs().len(), 2);
-        assert_eq!(model.shell.active(), Some(tab_id(&model, 1)));
-    }
-
-    #[test]
-    fn closing_the_active_tab_activates_its_right_neighbour() {
-        let mut model = Model::default();
-        handle(Action::OpenTab, &mut model); // index 0
-        handle(Action::OpenTab, &mut model); // index 1
-        handle(Action::OpenTab, &mut model); // index 2, active
-        let middle = tab_id(&model, 1);
-        handle(Action::SelectTab(middle), &mut model);
-        handle(Action::CloseTab(middle), &mut model);
-        assert_eq!(model.shell.tabs().len(), 2);
-        // The tab that was to the right (originally index 2) slid into index 1 and is now active.
-        assert_eq!(model.shell.active(), Some(tab_id(&model, 1)));
-    }
-
-    #[test]
-    fn closing_the_active_rightmost_tab_activates_the_new_last() {
-        let mut model = Model::default();
-        handle(Action::OpenTab, &mut model);
-        handle(Action::OpenTab, &mut model); // index 1, active (rightmost)
-        let right = tab_id(&model, 1);
-        handle(Action::CloseTab(right), &mut model);
-        assert_eq!(model.shell.tabs().len(), 1);
-        assert_eq!(model.shell.active(), Some(tab_id(&model, 0)));
-    }
-
-    #[test]
-    fn closing_the_last_remaining_tab_clears_the_active_tab() {
-        let mut model = Model::default();
-        handle(Action::OpenTab, &mut model);
-        let only = tab_id(&model, 0);
-        handle(Action::CloseTab(only), &mut model);
+    fn close_tab_then_open_scene_reopens_it() {
+        let mut model = Model::new(Project::open("games/unstitched"));
+        handle(Action::OpenScene, &mut model);
+        let scene = model.shell.tabs()[0].id;
+        handle(Action::CloseTab(scene), &mut model);
         assert!(model.shell.tabs().is_empty());
-        assert_eq!(model.shell.active(), None);
-    }
-
-    #[test]
-    fn closing_an_inactive_tab_leaves_the_active_tab_alone() {
-        let mut model = Model::default();
-        handle(Action::OpenTab, &mut model); // index 0
-        handle(Action::OpenTab, &mut model); // index 1, active
-        let active = tab_id(&model, 1);
-        let inactive = tab_id(&model, 0);
-        handle(Action::CloseTab(inactive), &mut model);
+        // The content browser can reopen the scene after its tab was closed.
+        handle(Action::OpenScene, &mut model);
         assert_eq!(model.shell.tabs().len(), 1);
-        assert_eq!(model.shell.active(), Some(active));
+        assert_eq!(model.shell.active(), model.shell.tabs().first().map(|t| t.id));
     }
 
     #[test]
-    fn select_tab_switches_the_active_tab() {
-        let mut model = Model::default();
-        handle(Action::OpenTab, &mut model); // index 0
-        handle(Action::OpenTab, &mut model); // index 1, active
-        let first = tab_id(&model, 0);
-        handle(Action::SelectTab(first), &mut model);
-        assert_eq!(model.shell.active(), Some(first));
+    fn select_tab_makes_it_active() {
+        let mut model = Model::new(Project::open("games/unstitched"));
+        handle(Action::OpenScene, &mut model);
+        let scene = model.shell.tabs()[0].id;
+        handle(Action::SelectTab(scene), &mut model);
+        assert_eq!(model.shell.active(), Some(scene));
     }
 
     // ---- navigation panel ----

@@ -3,25 +3,32 @@
 //! what makes the snapshot a real regression guard - the PNG shows exactly what the app draws,
 //! because both go through `chrome`.
 //!
-//! Like the regions it calls, this layer only reads the model and emits actions; the handler
-//! (`crate::action`) is the single writer.
+//! Like the regions it calls, this layer only reads the model (and the open project's content
+//! summary) and emits actions; the handler (`crate::action`) is the single writer. The 3D scene is
+//! drawn behind this chrome by the GPU render pass (`crate::render`), not here; what egui draws is
+//! the frame around the viewport.
 
 use crate::action::Action;
 use crate::menu;
+use crate::mode::Mode;
 use crate::model::Model;
+use crate::scene::ContentView;
 use crate::workspace;
 
 /// Render the full editor chrome for one frame. Order is layout order: the status bar claims the
-/// bottom edge, then the workspace (navigation panel, the tab bar with the app-menu at its left, and
-/// the editor area) fills what is left.
-pub fn chrome(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
-    menu::status_bar(ctx, &model.project);
-    workspace::ui(ctx, model, actions);
+/// bottom edge, then the workspace (navigation panel with the content browser, the tab bar with the
+/// app-menu at its left, and the editor area) fills what is left. `content` is the open project's
+/// content summary (or `None` when no project is open), and `mode` is the interaction mode the status
+/// bar shows.
+pub fn chrome(ctx: &egui::Context, model: &Model, content: Option<ContentView>, mode: Mode, actions: &mut Vec<Action>) {
+    menu::status_bar(ctx, &model.project, mode);
+    workspace::ui(ctx, model, content, actions);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mode::Mode;
     use crate::model::Model;
     use crate::project::Project;
     use egui_kittest::Harness;
@@ -41,33 +48,49 @@ mod tests {
         GPU_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// A stand-in content summary for the snapshots, with a couple of prefabs and one lighting state,
+    /// matching what the sample project lists. Held by the caller so a `ContentView` can borrow it.
+    fn demo_listings() -> (Vec<String>, Vec<String>) {
+        let prefabs = ["boulder", "crate", "marker", "pillar"].iter().map(|s| (*s).to_string()).collect();
+        let lights = vec!["default".to_string()];
+        (prefabs, lights)
+    }
+
     /// Build a harness that renders the chrome at `size` under `theme`, with the editor surface
-    /// filled behind the transparent editor area (standing in for the in-app GPU clear), so the
+    /// filled behind the transparent editor area (standing in for the in-app GPU scene render), so the
     /// snapshot reads as it does live in that theme. Forcing the theme keeps each snapshot
     /// deterministic regardless of the host's OS setting.
-    fn chrome_harness(model: &Model, theme: egui::ThemePreference, size: egui::Vec2) -> Harness<'_> {
+    fn chrome_harness<'a>(
+        model: &'a Model,
+        content: Option<ContentView<'a>>,
+        mode: Mode,
+        theme: egui::ThemePreference,
+        size: egui::Vec2,
+    ) -> Harness<'a> {
         Harness::builder().with_size(size).wgpu().build(move |ctx| {
             crate::theme::apply(ctx);
             ctx.set_theme(theme);
             let editor_bg = crate::theme::palette(ctx).editor_bg;
             ctx.layer_painter(egui::LayerId::background()).rect_filled(ctx.screen_rect(), 0.0, editor_bg);
             let mut actions = Vec::new();
-            chrome(ctx, model, &mut actions);
+            chrome(ctx, model, content, mode, &mut actions);
         })
     }
 
-    /// Render the chrome in a representative state - a project open, two tabs with one active, the
-    /// navigation panel shown - to `tests/snapshots/chrome.png`. Both the editor's eyes and a
-    /// regression guard: the same view functions the app calls render here, through `chrome`, so the
-    /// PNG tracks the real chrome. Refresh after an intended look change with
+    /// Render the chrome in a representative state - a project open with its scene tab, the content
+    /// browser populated, the navigation panel shown - to `tests/snapshots/chrome.png`. Both the
+    /// editor's eyes and a regression guard: the same view functions the app calls render here,
+    /// through `chrome`, so the PNG tracks the real chrome. Refresh after an intended look change with
     /// `UPDATE_SNAPSHOTS=1 cargo test -p wok` and commit the new PNG.
     #[test]
     fn chrome_snapshot() {
         let _gpu = gpu_guard();
+        let (prefabs, lights) = demo_listings();
+        let content = ContentView { scene_name: "sample", prefabs: &prefabs, lights: &lights };
         let mut model = Model::new(Project::open("wok-engine"));
-        model.shell.open_tab();
-        model.shell.open_tab();
-        let mut harness = chrome_harness(&model, egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0));
+        model.shell.open_or_focus_scene();
+        let mut harness =
+            chrome_harness(&model, Some(content), Mode::Object, egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0));
         harness.run();
         harness.snapshot("chrome");
     }
@@ -77,10 +100,12 @@ mod tests {
     #[test]
     fn chrome_light_snapshot() {
         let _gpu = gpu_guard();
+        let (prefabs, lights) = demo_listings();
+        let content = ContentView { scene_name: "sample", prefabs: &prefabs, lights: &lights };
         let mut model = Model::new(Project::open("wok-engine"));
-        model.shell.open_tab();
-        model.shell.open_tab();
-        let mut harness = chrome_harness(&model, egui::ThemePreference::Light, egui::vec2(1100.0, 700.0));
+        model.shell.open_or_focus_scene();
+        let mut harness =
+            chrome_harness(&model, Some(content), Mode::Object, egui::ThemePreference::Light, egui::vec2(1100.0, 700.0));
         harness.run();
         harness.snapshot("chrome_light");
     }
@@ -92,9 +117,12 @@ mod tests {
     #[test]
     fn view_menu_open_snapshot() {
         let _gpu = gpu_guard();
+        let (prefabs, lights) = demo_listings();
+        let content = ContentView { scene_name: "sample", prefabs: &prefabs, lights: &lights };
         let mut model = Model::new(Project::open("wok-engine"));
         model.shell.toggle_nav();
-        let mut harness = chrome_harness(&model, egui::ThemePreference::Dark, egui::vec2(520.0, 320.0));
+        let mut harness =
+            chrome_harness(&model, Some(content), Mode::Object, egui::ThemePreference::Dark, egui::vec2(520.0, 320.0));
         harness.run();
         harness.get_by_label("Menu").click();
         harness.run();
@@ -105,18 +133,21 @@ mod tests {
     }
 
     /// Open the app-menu, the File submenu, then the Open Recent submenu, and snapshot the cascade.
-    /// Guards the project-lifecycle surface added with the project model: the recent projects listed
-    /// most-recent first with Clear Recent below them, and (in the File column behind) the new Close
-    /// Project entry, enabled because a project is open. The nav panel is hidden so the cascade has
-    /// room to open rightward from the window's left edge.
+    /// Guards the project-lifecycle surface: the recent projects listed most-recent first with Clear
+    /// Recent below them, and (in the File column behind) the Close Project entry, enabled because a
+    /// project is open. The nav panel is hidden so the cascade has room to open rightward from the
+    /// window's left edge.
     #[test]
     fn open_recent_menu_snapshot() {
         let _gpu = gpu_guard();
+        let (prefabs, lights) = demo_listings();
+        let content = ContentView { scene_name: "sample", prefabs: &prefabs, lights: &lights };
         let mut model = Model::new(Project::open("wok-engine"));
         model.shell.toggle_nav();
         model.recents.push("games/unstitched");
         model.recents.push("demos/taste");
-        let mut harness = chrome_harness(&model, egui::ThemePreference::Dark, egui::vec2(760.0, 380.0));
+        let mut harness =
+            chrome_harness(&model, Some(content), Mode::Object, egui::ThemePreference::Dark, egui::vec2(760.0, 380.0));
         harness.run();
         harness.get_by_label("Menu").click();
         harness.run();
@@ -128,18 +159,22 @@ mod tests {
         harness.snapshot("open_recent_menu");
     }
 
-    /// Hover the new-tab + and snapshot it, guarding the icon buttons' hover affordance: a hovered
-    /// icon button shows a filled background. (The pointing-hand cursor is the OS's, not in the image.)
+    /// Hover the active tab's close button and snapshot it, guarding the icon buttons' hover
+    /// affordance: a hovered icon button shows a filled background. (The pointing-hand cursor is the
+    /// OS's, not in the image.)
     #[test]
-    fn tab_row_hover_snapshot() {
+    fn tab_close_hover_snapshot() {
         let _gpu = gpu_guard();
+        let (prefabs, lights) = demo_listings();
+        let content = ContentView { scene_name: "sample", prefabs: &prefabs, lights: &lights };
         let mut model = Model::new(Project::open("wok-engine"));
-        model.shell.open_tab();
+        model.shell.open_or_focus_scene();
         model.shell.toggle_nav();
-        let mut harness = chrome_harness(&model, egui::ThemePreference::Dark, egui::vec2(460.0, 180.0));
+        let mut harness =
+            chrome_harness(&model, Some(content), Mode::Object, egui::ThemePreference::Dark, egui::vec2(460.0, 180.0));
         harness.run();
-        harness.get_by_label("+").hover();
+        harness.get_by_label("x").hover();
         harness.run();
-        harness.snapshot("tab_row_hover");
+        harness.snapshot("tab_close_hover");
     }
 }

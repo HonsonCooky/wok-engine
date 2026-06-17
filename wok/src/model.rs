@@ -44,12 +44,20 @@ pub enum Side {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TabId(u64);
 
-/// One open edit context. Minimal for now - a stable id and a title, with placeholder content; real
-/// context kinds (scene, prefab, lighting) and the navigation binding arrive with those surfaces.
+/// Which kind of edit context a tab hosts. Scene is the spatial hub - one per project, bound to the
+/// project's scene; prefab and lighting kinds join as those views are built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabKind {
+    /// The scene viewport: the god-cam over the project's chunk content.
+    Scene,
+}
+
+/// One open edit context: a stable id, a title, and which kind of surface it hosts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tab {
     pub id: TabId,
     pub title: String,
+    pub kind: TabKind,
 }
 
 /// The shell layout state: the navigation panel (docked side and visibility) and the open tabs
@@ -106,14 +114,27 @@ impl Shell {
 
     // ---- mutations (only action::handle calls these) ----
 
-    /// Open a new untitled placeholder tab and make it active. Returns its id.
-    pub(crate) fn open_tab(&mut self) -> TabId {
+    /// Open a new tab with this title and kind, and make it active. Returns its id. The id source
+    /// only ever climbs, so a closed tab's id is never reused by a later one.
+    pub(crate) fn open_tab(&mut self, title: String, kind: TabKind) -> TabId {
         let id = TabId(self.next_id);
-        let title = format!("Untitled {}", self.next_id + 1);
         self.next_id += 1;
-        self.tabs.push(Tab { id, title });
+        self.tabs.push(Tab { id, title, kind });
         self.active = Some(id);
         id
+    }
+
+    /// Open the Scene tab, or focus it when one is already open. There is one scene per project, so
+    /// opening it again - from the content browser, or the auto-open at project load - focuses the
+    /// existing tab rather than duplicating it. Returns its id.
+    pub(crate) fn open_or_focus_scene(&mut self) -> TabId {
+        match self.tabs.iter().find(|t| t.kind == TabKind::Scene).map(|t| t.id) {
+            Some(id) => {
+                self.active = Some(id);
+                id
+            }
+            None => self.open_tab("Scene".to_string(), TabKind::Scene),
+        }
     }
 
     /// Close the tab with this id. If it was active, activate a sensible neighbour: the tab that
@@ -152,5 +173,122 @@ impl Shell {
     /// Dock the navigation panel to `side`.
     pub(crate) fn set_nav_side(&mut self, side: Side) {
         self.nav_side = side;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The id of the tab at `index`. Panics if absent - a test-only assumption that the tab exists.
+    fn tab_id(shell: &Shell, index: usize) -> TabId {
+        shell.tabs()[index].id
+    }
+
+    #[test]
+    fn open_tab_adds_and_activates_it() {
+        let mut shell = Shell::default();
+        shell.open_tab("Scene".to_string(), TabKind::Scene);
+        assert_eq!(shell.tabs().len(), 1);
+        assert_eq!(shell.active(), Some(tab_id(&shell, 0)));
+    }
+
+    #[test]
+    fn opening_a_second_tab_activates_the_new_one() {
+        let mut shell = Shell::default();
+        shell.open_tab("a".to_string(), TabKind::Scene);
+        shell.open_tab("b".to_string(), TabKind::Scene);
+        assert_eq!(shell.tabs().len(), 2);
+        assert_eq!(shell.active(), Some(tab_id(&shell, 1)));
+    }
+
+    #[test]
+    fn closing_the_active_tab_activates_its_right_neighbour() {
+        let mut shell = Shell::default();
+        shell.open_tab("a".to_string(), TabKind::Scene); // index 0
+        shell.open_tab("b".to_string(), TabKind::Scene); // index 1
+        shell.open_tab("c".to_string(), TabKind::Scene); // index 2, active
+        let middle = tab_id(&shell, 1);
+        shell.select_tab(middle);
+        shell.close_tab(middle);
+        assert_eq!(shell.tabs().len(), 2);
+        // The tab that was to the right (originally index 2) slid into index 1 and is now active.
+        assert_eq!(shell.active(), Some(tab_id(&shell, 1)));
+    }
+
+    #[test]
+    fn closing_the_active_rightmost_tab_activates_the_new_last() {
+        let mut shell = Shell::default();
+        shell.open_tab("a".to_string(), TabKind::Scene);
+        shell.open_tab("b".to_string(), TabKind::Scene); // index 1, active (rightmost)
+        let right = tab_id(&shell, 1);
+        shell.close_tab(right);
+        assert_eq!(shell.tabs().len(), 1);
+        assert_eq!(shell.active(), Some(tab_id(&shell, 0)));
+    }
+
+    #[test]
+    fn closing_the_last_remaining_tab_clears_the_active_tab() {
+        let mut shell = Shell::default();
+        shell.open_tab("only".to_string(), TabKind::Scene);
+        let only = tab_id(&shell, 0);
+        shell.close_tab(only);
+        assert!(shell.tabs().is_empty());
+        assert_eq!(shell.active(), None);
+    }
+
+    #[test]
+    fn closing_an_inactive_tab_leaves_the_active_tab_alone() {
+        let mut shell = Shell::default();
+        shell.open_tab("a".to_string(), TabKind::Scene); // index 0
+        shell.open_tab("b".to_string(), TabKind::Scene); // index 1, active
+        let active = tab_id(&shell, 1);
+        let inactive = tab_id(&shell, 0);
+        shell.close_tab(inactive);
+        assert_eq!(shell.tabs().len(), 1);
+        assert_eq!(shell.active(), Some(active));
+    }
+
+    #[test]
+    fn select_tab_switches_the_active_tab() {
+        let mut shell = Shell::default();
+        shell.open_tab("a".to_string(), TabKind::Scene); // index 0
+        shell.open_tab("b".to_string(), TabKind::Scene); // index 1, active
+        let first = tab_id(&shell, 0);
+        shell.select_tab(first);
+        assert_eq!(shell.active(), Some(first));
+    }
+
+    #[test]
+    fn close_all_tabs_clears_the_strip_and_active() {
+        let mut shell = Shell::default();
+        shell.open_tab("a".to_string(), TabKind::Scene);
+        shell.open_tab("b".to_string(), TabKind::Scene);
+        shell.close_all_tabs();
+        assert!(shell.tabs().is_empty());
+        assert_eq!(shell.active(), None);
+    }
+
+    #[test]
+    fn open_or_focus_scene_opens_once_then_focuses_the_same_tab() {
+        let mut shell = Shell::default();
+        let first = shell.open_or_focus_scene();
+        assert_eq!(shell.tabs().len(), 1);
+        // A second open-scene focuses the existing Scene tab rather than duplicating it.
+        let again = shell.open_or_focus_scene();
+        assert_eq!(again, first, "the same Scene tab is focused, not a new one");
+        assert_eq!(shell.tabs().len(), 1, "there is one scene per project");
+        assert_eq!(shell.active(), Some(first));
+    }
+
+    #[test]
+    fn open_or_focus_scene_refocuses_an_unfocused_scene_tab() {
+        let mut shell = Shell::default();
+        let scene = shell.open_or_focus_scene();
+        let other = shell.open_tab("Other".to_string(), TabKind::Scene); // a second tab steals focus
+        assert_eq!(shell.active(), Some(other));
+        // open-scene focuses the FIRST Scene tab (the one bound to the project's scene).
+        assert_eq!(shell.open_or_focus_scene(), scene);
+        assert_eq!(shell.active(), Some(scene));
     }
 }
