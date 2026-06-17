@@ -4,11 +4,12 @@
 //! Composition only, per the HLD's application layer: the authored model flows through wok-content's
 //! store into runtime arrays (`crate::scene`), wok-mesh uploads them, wok-render draws exactly the
 //! list it is handed, and the chunk-origin composition happens here because the render contract makes
-//! it caller policy. The scene is drawn full-window; the egui chrome paints last into the same
-//! encoder, and the editor-area panel is transparent, so the chrome frames the viewport the scene
-//! fills behind it. (Confining the 3D pass to the editor-area rect needs a viewport entry point on
-//! wok-render, a later cross-cutting change.) When no project is open there is no scene, so the frame
-//! clears to the editor surface - the empty viewport.
+//! it caller policy. The scene draws into the editor-area rect: wok-render's viewport is set to that
+//! rect (the egui CentralPanel rect in physical pixels) and the camera's aspect comes from it, so
+//! the 3D sits centred and undistorted inside the panel rather than filling the window and reading
+//! off-centre behind the chrome. The egui chrome then paints last into the same encoder, framing the
+//! viewport. When no project is open there is no scene, so the frame clears to the editor surface -
+//! the empty viewport - full-window (the opaque chrome panels paint over the margins).
 //!
 //! [`Gpu`] is the residency created once a device exists: the renderer, one mesh per unit primitive
 //! (shared by every placement), and one terrain mesh per loaded chunk, rebuilt when content loads or
@@ -20,7 +21,7 @@ use glam::{Mat4, Vec3};
 use wok_content::ChunkStore;
 use wok_mesh::{MeshGpu, primitive_mesh};
 use wok_platform::{FrameCtx, Platform, gfx};
-use wok_render::{Camera, RenderItem, Renderer};
+use wok_render::{Camera, RenderItem, Renderer, ViewportRect};
 use wok_scene::{ChunkCoord, Primitive, SurfaceTag, VisibleItem};
 
 use crate::app::EditorApp;
@@ -54,6 +55,23 @@ fn surface_color(surface: Option<&SurfaceTag>) -> Vec3 {
         Some("metal") => Vec3::new(0.80, 0.45, 0.25),
         _ => Vec3::new(0.70, 0.70, 0.70),
     }
+}
+
+/// The editor-area rect as a wok-render viewport, in physical pixels, or `None` (full target) when
+/// the rect is not a usable positive box. `rect` is in egui points (the CentralPanel rect captured
+/// from the chrome, `EditorApp::editor_rect`); physical pixels are points times `pixels_per_point`.
+/// The point-space rect is the shared source - cursor-to-ray picking (3b) maps the cursor against
+/// the same `editor_rect` - so this is the one place the points-to-pixels scaling lives.
+fn editor_viewport(rect: egui::Rect, pixels_per_point: f32) -> Option<ViewportRect> {
+    if !rect.is_finite() || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return None;
+    }
+    Some(ViewportRect {
+        x: rect.min.x * pixels_per_point,
+        y: rect.min.y * pixels_per_point,
+        width: rect.width() * pixels_per_point,
+        height: rect.height() * pixels_per_point,
+    })
 }
 
 /// GPU residency, created in `init` once a device exists: the renderer sized to the surface, one
@@ -104,13 +122,26 @@ impl EditorApp {
     pub(crate) fn render(&mut self, ctx: &mut FrameCtx, ui_output: Option<egui::FullOutput>) {
         let camera_state = self.camera;
         let size = self.size;
+        let editor_rect = self.editor_rect;
+        // Scale the editor rect (egui points) to physical pixels with the same pixels-per-point egui
+        // paints the chrome with, so the viewport lines up with the panel exactly.
+        let pixels_per_point = ui_output.as_ref().map_or(1.0, |o| o.pixels_per_point);
         let Some(gpu) = self.gpu.as_mut() else { return };
         let Some(mut frame) = gfx::begin_frame(ctx.platform) else { return };
 
         match self.scene.as_ref() {
             Some(scene) => {
                 let Gpu { renderer, primitives, terrain } = gpu;
-                let aspect = size.0 as f32 / size.1.max(1) as f32;
+                // Confine the 3D to the editor-area rect and take the camera's aspect from it, so the
+                // view sits centred and undistorted in the panel instead of stretched to the window.
+                // A degenerate rect (before the first chrome, or a collapsed panel) falls back to the
+                // full window.
+                let viewport = editor_viewport(editor_rect, pixels_per_point);
+                renderer.set_viewport(viewport);
+                let aspect = match viewport {
+                    Some(vp) => vp.width / vp.height,
+                    None => size.0 as f32 / size.1.max(1) as f32,
+                };
                 let camera = Camera {
                     view_proj: camera_state.view_proj(aspect, scene.far_plane()),
                     eye: camera_state.position,

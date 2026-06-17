@@ -20,9 +20,13 @@ use crate::workspace;
 /// app-menu at its left, and the editor area) fills what is left. `content` is the open project's
 /// content summary (or `None` when no project is open), and `mode` is the interaction mode the status
 /// bar shows.
-pub fn chrome(ctx: &egui::Context, model: &Model, content: Option<ContentView>, mode: Mode, actions: &mut Vec<Action>) {
+///
+/// Returns the editor-area rect (egui points) the chrome settled into this frame. The frame loop
+/// keeps it so the GPU pass can confine the 3D to that rect (`crate::render`); it depends on the
+/// live layout (nav-panel dock and visibility, the window size), so it is read fresh each frame.
+pub fn chrome(ctx: &egui::Context, model: &Model, content: Option<ContentView>, mode: Mode, actions: &mut Vec<Action>) -> egui::Rect {
     menu::status_bar(ctx, &model.project, mode);
-    workspace::ui(ctx, model, content, actions);
+    workspace::ui(ctx, model, content, actions)
 }
 
 #[cfg(test)]

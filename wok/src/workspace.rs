@@ -32,12 +32,14 @@ fn clickable(response: egui::Response) -> egui::Response {
 /// Draw the workspace for one frame. Order matters: the side panel first, then the tab bar over the
 /// remaining width, then the editor area; when the panel is hidden the tab bar and editor area take
 /// the full width. `content` is the open project's content summary (none when no project is open).
-pub fn ui(ctx: &egui::Context, model: &Model, content: Option<ContentView>, actions: &mut Vec<Action>) {
+/// Returns the editor-area rect (egui points) the editor area settled into, so the caller can scope
+/// the 3D render to it.
+pub fn ui(ctx: &egui::Context, model: &Model, content: Option<ContentView>, actions: &mut Vec<Action>) -> egui::Rect {
     if model.shell.nav_visible() {
         nav_panel(ctx, &model.shell, content, actions);
     }
     tab_bar(ctx, model, actions);
-    editor_area(ctx, &model.shell, content.is_some());
+    editor_area(ctx, &model.shell, content.is_some())
 }
 
 /// The navigation panel: docked left or right, hosting the content browser. One panel id across both
@@ -160,8 +162,10 @@ fn tab_cell(ui: &mut egui::Ui, tab: &Tab, active: bool, actions: &mut Vec<Action
 
 /// The editor area: the Scene tab's viewport, or an empty state. A transparent frame lets the GPU
 /// scene render show through where a Scene tab is active and a scene is loaded; otherwise it paints a
-/// dim prompt, since there is nothing to draw.
-fn editor_area(ctx: &egui::Context, shell: &Shell, scene_loaded: bool) {
+/// dim prompt, since there is nothing to draw. Returns the panel's rect (egui points), which the GPU
+/// render scopes its viewport to (`crate::render`); with `Frame::NONE` the panel rect is the drawable
+/// area exactly, no margin to subtract.
+fn editor_area(ctx: &egui::Context, shell: &Shell, scene_loaded: bool) -> egui::Rect {
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
         let active_is_scene = matches!(shell.active_tab().map(|t| t.kind), Some(TabKind::Scene));
         if active_is_scene && scene_loaded {
@@ -177,5 +181,5 @@ fn editor_area(ctx: &egui::Context, shell: &Shell, scene_loaded: bool) {
             "No project open - use File to open one"
         };
         ui.centered_and_justified(|ui| ui.label(egui::RichText::new(message).color(dim)));
-    });
+    }).response.rect
 }

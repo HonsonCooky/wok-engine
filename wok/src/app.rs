@@ -54,6 +54,12 @@ pub struct EditorApp {
     /// The interaction mode (`crate::mode`), toggled in place by the viewport input (backtick).
     mode: Mode,
     pub(crate) size: (u32, u32),
+    /// The editor-area rect (egui points) the chrome settled into last frame, captured from
+    /// `view::chrome`. The render scopes the 3D viewport to it (`crate::render`), and it is the one
+    /// rect cursor-to-ray picking will map against (3b) - both read this single source rather than
+    /// recomputing the layout. Updated every frame, so docking or toggling the nav panel and
+    /// resizing the window track automatically.
+    pub(crate) editor_rect: egui::Rect,
     /// The window title last set, so it is only pushed to the OS when it changes.
     title: String,
 }
@@ -80,6 +86,9 @@ impl EditorApp {
             camera: default_camera(),
             mode: Mode::default(),
             size: (0, 0),
+            // Overwritten by the first frame's chrome before any render reads it; NOTHING reads as
+            // "no usable rect", which the render treats as the full target.
+            editor_rect: egui::Rect::NOTHING,
             title: String::new(),
         }
     }
@@ -190,18 +199,21 @@ impl App for EditorApp {
         let mut actions: Vec<Action> = Vec::new();
         let mut ui_output = None;
         let (mut pointer_free, mut keys_free) = (true, true);
+        let mut editor_rect = egui::Rect::NOTHING;
         {
             let model = &self.model;
             let mode = self.mode;
             let content = self.scene.as_ref().map(LoadedScene::content_view);
             if let Some(gui) = self.gui.as_mut() {
                 ui_output = Some(gui.run(&ctx.platform.window, |egui_ctx| {
-                    view::chrome(egui_ctx, model, content, mode, &mut actions);
+                    editor_rect = view::chrome(egui_ctx, model, content, mode, &mut actions);
                 }));
                 pointer_free = !gui.ctx.is_pointer_over_area() && !gui.ctx.wants_pointer_input();
                 keys_free = !gui.ctx.wants_keyboard_input();
             }
         }
+        // The editor-area rect the chrome just settled into; the render confines the 3D to it.
+        self.editor_rect = editor_rect;
 
         // Apply the actions through the one handler - the single writer for the model. The effects
         // the pure state cannot perform are carried out here: quit closes the window, a recents
