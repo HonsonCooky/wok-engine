@@ -31,6 +31,10 @@ pub struct Platform {
     pub audio_device: cpal::Device,
     pub audio_config: cpal::SupportedStreamConfig,
     supported_present_modes: Vec<wgpu::PresentMode>,
+    /// Set by [`crate::gfx::Frame::finish`] the first time a frame actually presents. The runner
+    /// watches it to reveal the window after that first real frame (the window is created hidden),
+    /// so the user never sees the OS's blank client area. Stays true; the runner reveals once.
+    pub(crate) presented: bool,
 }
 
 impl Platform {
@@ -66,7 +70,11 @@ impl Platform {
         };
         let window_attrs = Window::default_attributes()
             .with_title(desc.title)
-            .with_inner_size(winit::dpi::LogicalSize::new(width, height));
+            .with_inner_size(winit::dpi::LogicalSize::new(width, height))
+            // Start hidden so the OS never shows the default (blank) client area before the first
+            // frame is drawn. The runner reveals the window after the first frame presents (see
+            // `resumed` and the redraw handler), so the first thing on screen is a finished frame.
+            .with_visible(false);
 
         let window = Arc::new(
             event_loop
@@ -147,6 +155,7 @@ impl Platform {
             audio_device,
             audio_config,
             supported_present_modes: surface_caps.present_modes,
+            presented: false,
         }
     }
 }
@@ -253,6 +262,9 @@ struct Runner<A: App> {
     /// Active rumble effects, kept alive until their duration elapses. gilrs stops
     /// the effect when the Effect handle is dropped.
     active_effects: Vec<(gilrs::ff::Effect, std::time::Instant)>,
+    /// True once the window has been revealed, after the first frame presented. Guards the
+    /// one-shot reveal so `set_visible(true)` fires exactly once.
+    revealed: bool,
 }
 
 impl<A: App> ApplicationHandler for Runner<A> {
@@ -263,6 +275,10 @@ impl<A: App> ApplicationHandler for Runner<A> {
         let platform = Platform::init(event_loop, &self.desc);
         self.gilrs = gilrs::Gilrs::new().ok();
         self.app.init(&platform);
+        // The window is created hidden, so the OS sends no initial paint to bootstrap the loop.
+        // Request the first redraw ourselves; the frame it draws presents, and the redraw handler
+        // reveals the window once that present lands.
+        platform.window.request_redraw();
         self.platform = Some(platform);
         self.last_frame = Some(std::time::Instant::now());
     }
@@ -373,6 +389,14 @@ impl<A: App> ApplicationHandler for Runner<A> {
                         self.app.cleanup(platform);
                         event_loop.exit();
                     } else {
+                        // Reveal the window once the first real frame has presented (gfx::Frame::finish
+                        // set `presented`), exactly once. A skipped frame - begin_frame returned None
+                        // before the surface was ready - never sets it, so the reveal waits for actual
+                        // pixels and the window's first appearance is a finished frame.
+                        if platform.presented && !self.revealed {
+                            platform.window.set_visible(true);
+                            self.revealed = true;
+                        }
                         platform.window.request_redraw();
                     }
                 }
@@ -397,6 +421,7 @@ pub fn run<A: App + 'static>(app: A, desc: Desc) {
         input_collector: crate::input::InputCollector::new(),
         gilrs: None,
         active_effects: Vec::new(),
+        revealed: false,
     };
     event_loop.run_app(&mut runner).expect("Event loop error");
 }
