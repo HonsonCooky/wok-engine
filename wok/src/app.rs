@@ -208,7 +208,20 @@ impl App for EditorApp {
                 ui_output = Some(gui.run(&ctx.platform.window, |egui_ctx| {
                     editor_rect = view::chrome(egui_ctx, model, content, mode, &mut actions);
                 }));
-                pointer_free = !gui.ctx.is_pointer_over_area() && !gui.ctx.wants_pointer_input();
+                // Look and scroll drive the god-cam only when the cursor is over the editor-area
+                // viewport and egui is not using the pointer for its own UI. The viewport is egui's
+                // background layer, and a CentralPanel marks the whole central region as used, so
+                // is_pointer_over_area() - and thus wants_pointer_input() on a hover with no button
+                // down - is always true over it; neither can tell our viewport from a panel. So gate
+                // on the rect itself, exclude any foreground area sitting over it (an open menu, and
+                // later the floating inspector, which are not the background layer), and exclude an
+                // in-progress egui widget drag (a panel-resize sweep that strays onto the viewport).
+                let pointer = gui.ctx.pointer_latest_pos();
+                let over_viewport = pointer.is_some_and(|p| editor_rect.contains(p));
+                let over_foreground = pointer
+                    .and_then(|p| gui.ctx.layer_id_at(p))
+                    .is_some_and(|layer| layer.order != egui::Order::Background);
+                pointer_free = over_viewport && !over_foreground && !gui.ctx.is_using_pointer();
                 keys_free = !gui.ctx.wants_keyboard_input();
             }
         }
