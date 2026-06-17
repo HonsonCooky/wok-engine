@@ -43,12 +43,20 @@ pub fn ui(ctx: &egui::Context, model: &Model, content: Option<ContentView>, acti
 /// The navigation panel: docked left or right, hosting the content browser. One panel id across both
 /// sides keeps its resized width when the dock flips.
 fn nav_panel(ctx: &egui::Context, shell: &Shell, content: Option<ContentView>, actions: &mut Vec<Action>) {
-    let body = |ui: &mut egui::Ui| match content {
-        Some(content) => content_browser(ui, content, actions),
-        None => {
-            let p = theme::palette(ui.ctx());
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("No project open").color(p.text_dim));
+    let body = |ui: &mut egui::Ui| {
+        // A resizable SidePanel only keeps a dragged width if its content fills that width: egui
+        // stores the content rect, so a body narrower than the drag snaps back to the content on
+        // release (egui's SidePanel docs: a resizable panel needs a width-filling widget). The
+        // content browser fills via its separators; force the fill here so the empty no-project
+        // state resizes too, instead of pinning to the width of its one short label.
+        ui.set_min_width(ui.available_width());
+        match content {
+            Some(content) => content_browser(ui, content, actions),
+            None => {
+                let p = theme::palette(ui.ctx());
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("No project open").color(p.text_dim));
+            }
         }
     };
     match shell.nav_side() {
