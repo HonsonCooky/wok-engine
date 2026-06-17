@@ -21,6 +21,11 @@ use crate::theme;
 /// Status-bar height in points: one row of small text plus breathing room.
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 
+/// Warning text for a surfaced failure (a failed project open). A muted red, fixed rather than
+/// themed: it reads against both the light and dark status-bar surface, and a single transient notice
+/// does not earn a per-theme palette entry.
+const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(0xd0, 0x5a, 0x4a);
+
 /// Size of the hamburger button cell, in points.
 const HAMBURGER_SIZE: egui::Vec2 = egui::vec2(30.0, 22.0);
 
@@ -149,10 +154,12 @@ fn view_menu(ui: &mut egui::Ui, shell: &Shell, toggle: egui::KeyboardShortcut, a
 }
 
 /// The bottom status bar. Shows the open project's name on the left (or that none is open - the
-/// in-window confirmation that Open Project took effect, which the title bar carries too), and the
-/// interaction mode on the right when a project is open, so the backtick toggle is visible. The
-/// richer readouts (snap, counts, framerate, save state, integrity) join as their features land.
-pub fn status_bar(ctx: &egui::Context, project: &Project, mode: Mode) {
+/// in-window confirmation that Open Project took effect, which the title bar carries too), then the
+/// last open failure when there is one (in a warning color, so a folder that was not a wok project
+/// reads as a clear error rather than a silent no-op), and the interaction mode on the right when a
+/// project is open, so the backtick toggle is visible. The richer readouts (snap, counts, framerate,
+/// save state, integrity) join as their features land.
+pub fn status_bar(ctx: &egui::Context, project: &Project, mode: Mode, open_error: Option<&str>) {
     egui::TopBottomPanel::bottom("wok_status_bar").exact_height(STATUS_BAR_HEIGHT).show(ctx, |ui| {
         let dim = theme::palette(ui.ctx()).text_dim;
         ui.horizontal_centered(|ui| {
@@ -160,6 +167,10 @@ pub fn status_bar(ctx: &egui::Context, project: &Project, mode: Mode) {
                 Some(name) => ui.label(egui::RichText::new(name).small().color(dim)),
                 None => ui.label(egui::RichText::new("No project open").small().color(dim)),
             };
+            if let Some(message) = open_error {
+                ui.label(egui::RichText::new("-").small().color(dim));
+                ui.label(egui::RichText::new(message).small().color(WARN_COLOR)).on_hover_text(message);
+            }
             // The mode drives the camera, which exists only with a scene open; show it then.
             if project.root().is_some() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

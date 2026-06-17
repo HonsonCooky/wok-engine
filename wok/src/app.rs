@@ -44,10 +44,14 @@ pub struct EditorApp {
     /// The open project's loaded content - the scene the viewport draws - or none when no project is
     /// open. Reconciled to `model.project` each frame.
     pub(crate) scene: Option<LoadedScene>,
-    /// The project root the scene residency last reconciled to. Keyed here (not derived from
-    /// `scene`) so a load that failed is not retried every frame: reconcile acts only when the
-    /// project's root differs from this.
+    /// The project root the scene residency last reconciled to. Recorded only on a successful open
+    /// (and cleared to `None` on failure or close), so reconcile acts whenever the project's root
+    /// differs from this - and picking a folder that failed to open retries rather than sticking.
     loaded_root: Option<PathBuf>,
+    /// The last open failure's message, surfaced in the status bar until the next successful open.
+    /// `None` when the last open succeeded or no open has failed. App-side, not `Model` state: it
+    /// arises from the device-side reconcile, not a pure action.
+    open_error: Option<String>,
     /// The god-cam the renderer reads. Spawned over the scene when a project loads; advanced in
     /// free-fly, at rest in Object mode.
     pub(crate) camera: FlyCamera,
@@ -83,6 +87,7 @@ impl EditorApp {
             gpu: None,
             scene: None,
             loaded_root: None,
+            open_error: None,
             camera: default_camera(),
             mode: Mode::default(),
             size: (0, 0),
@@ -95,19 +100,22 @@ impl EditorApp {
 
     /// Reconcile the scene residency to the open project. The project is the source of truth: when
     /// its root differs from the one last loaded, this opens that project's content (generating the
-    /// sample first when the folder is empty), spawns the god-cam over it, uploads its terrain, and
-    /// opens the Scene tab - or drops the residency when the project closed. A failed open clears the
-    /// scene and is not retried (the root is recorded either way). Needs a device, so it runs from
-    /// `init` and the frame loop, never the pure action handler.
+    /// starter scene into an empty folder; a non-empty non-wok folder is an error), spawns the god-cam
+    /// over it, uploads its terrain, and opens the Scene tab - or drops the residency when the project
+    /// closed. On a failed open it surfaces the error in the status bar and falls back to no project,
+    /// so the editor stays usable and picking the same (or another) folder retries: `loaded_root` is
+    /// recorded only on success, never poisoned by a failure. Needs a device, so it runs from `init`
+    /// and the frame loop, never the pure action handler.
     fn reconcile_scene(&mut self, platform: &Platform) {
         let want = self.model.project.root().map(Path::to_path_buf);
         if want == self.loaded_root {
             return;
         }
-        self.loaded_root.clone_from(&want);
 
-        match want.map(LoadedScene::open) {
+        match want.as_ref().map(|root| LoadedScene::open(root.clone())) {
             Some(Ok(scene)) => {
+                self.loaded_root = want;
+                self.open_error = None;
                 self.camera = scene.spawn_camera();
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.set_terrain(platform, &scene.store);
@@ -117,10 +125,19 @@ impl EditorApp {
                 action::handle(Action::OpenScene, &mut self.model);
             }
             Some(Err(err)) => {
-                eprintln!("wok: failed to open project: {err}");
+                // Surface the failure and fall back to no project. Closing it (through the one writer)
+                // leaves the project and `loaded_root` agreed at None, so this does not retry every
+                // frame, while re-picking the folder sets the project again and does retry.
+                self.open_error = Some(format!("{err}"));
+                self.drop_scene();
+                action::handle(Action::CloseProject, &mut self.model);
+                self.loaded_root = None;
+            }
+            None => {
+                self.loaded_root = None;
+                self.open_error = None;
                 self.drop_scene();
             }
-            None => self.drop_scene(),
         }
     }
 
@@ -204,9 +221,10 @@ impl App for EditorApp {
             let model = &self.model;
             let mode = self.mode;
             let content = self.scene.as_ref().map(LoadedScene::content_view);
+            let open_error = self.open_error.as_deref();
             if let Some(gui) = self.gui.as_mut() {
                 ui_output = Some(gui.run(&ctx.platform.window, |egui_ctx| {
-                    editor_rect = view::chrome(egui_ctx, model, content, mode, &mut actions);
+                    editor_rect = view::chrome(egui_ctx, model, content, mode, open_error, &mut actions);
                 }));
                 // Look and scroll drive the god-cam only when the cursor is over the editor-area
                 // viewport and egui is not using the pointer for its own UI. The viewport is egui's

@@ -2,9 +2,10 @@
 //! project and dropped when it closes.
 //!
 //! Composition only, per the HLD's application layer. [`LoadedScene::open`] loads a project's
-//! content through `crate::content` (generating the sample scene first when the directory is empty,
-//! so there is always something to draw), transforms every chunk into a [`ChunkStore`] (the
-//! authored-to-runtime data-flow transition), and starts a `wok-scene` watcher on the root. Data
+//! content through `crate::content` (generating the starter scene into a fresh or empty folder, and
+//! refusing a non-empty folder that is not a wok project, so opening never scatters sample files into
+//! an unrelated directory), transforms every chunk into a [`ChunkStore`] (the authored-to-runtime
+//! data-flow transition), and starts a `wok-scene` watcher on the root. Data
 //! flows authored -> runtime only; nothing here writes back to disk (save returns with the editing
 //! brief). The authored chunks are not retained: a hot reload re-reads the changed files from disk,
 //! which is correct while there are no in-memory edits to preserve.
@@ -15,7 +16,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use glam::{Mat4, Vec3};
 use wok_content::{ChunkState, ChunkStore};
@@ -55,13 +56,21 @@ pub struct LoadedScene {
 }
 
 impl LoadedScene {
-    /// Load the project at `root`. Generates the sample scene first when no `scene.json` exists (a
-    /// fresh or empty folder), then loads, transforms every chunk into the store, scans the browser
+    /// Load the project at `root`. An existing `scene.json` loads; a fresh or empty folder gets the
+    /// starter scene generated and loaded; a non-empty folder without `scene.json` is an error (not a
+    /// wok project) and writes nothing. Then transforms every chunk into the store, scans the browser
     /// listings, and starts the hot-reload watcher.
     pub fn open(root: PathBuf) -> Result<LoadedScene, Box<dyn Error>> {
         let paths = ContentPaths::new(root);
         if !paths.scene().exists() {
-            sample::generate(&paths)?;
+            // No scene.json: generate the starter scene only into a fresh place (a path that does not
+            // exist yet, or an existing empty folder). A folder that already holds content is some
+            // directory picked by mistake - report it and write nothing, never scatter sample files.
+            if is_fresh_project_dir(&paths.root) {
+                sample::generate(&paths)?;
+            } else {
+                return Err(Box::new(NotAProject { root: paths.root.clone() }));
+            }
         }
         let loaded = content::load_all(&paths)?;
 
@@ -276,6 +285,33 @@ fn sorted_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
     names
 }
 
+/// Whether `root` is a fresh place to create a project: it does not exist yet, or it exists and is
+/// empty. A folder that already holds content is not fresh, so [`LoadedScene::open`] refuses to
+/// generate into it. A path that cannot be read (e.g. permissions) is treated as fresh, so the open
+/// surfaces generate's own IO error rather than a misleading "not a wok project".
+fn is_fresh_project_dir(root: &Path) -> bool {
+    match std::fs::read_dir(root) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => true,
+    }
+}
+
+/// The picked folder is not a wok project (no `scene.json`) and is not empty, so opening it would
+/// neither load existing content nor safely create new content. Carries the root for the message the
+/// editor surfaces.
+#[derive(Debug)]
+struct NotAProject {
+    root: PathBuf,
+}
+
+impl std::fmt::Display for NotAProject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "not a wok project: no scene.json in {}", self.root.display())
+    }
+}
+
+impl Error for NotAProject {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,11 +332,12 @@ mod tests {
 
     #[test]
     fn open_generates_the_sample_in_an_empty_dir_and_loads_it() {
-        // An empty directory has no scene.json, so open generates the sample and loads it: one chunk
-        // in the store, the prefab and lighting listings populated, and a finite scene-bounds box for
-        // the shadow region.
+        // An existing empty directory has no scene.json, so open generates the sample and loads it:
+        // one chunk in the store, the prefab and lighting listings populated, and a finite
+        // scene-bounds box for the shadow region.
         let dir = unique_temp_dir();
-        let loaded = LoadedScene::open(dir.clone()).expect("a fresh dir generates and loads");
+        std::fs::create_dir_all(&dir).expect("create the empty project dir");
+        let loaded = LoadedScene::open(dir.clone()).expect("an empty dir generates and loads");
         assert_eq!(loaded.store.iter_loaded().count(), 1, "the sample has one chunk");
         assert_eq!(loaded.prefab_names, ["boulder", "crate", "marker", "pillar"]);
         assert_eq!(loaded.light_names, [sample::LIGHT_NAME]);
@@ -324,6 +361,23 @@ mod tests {
         assert_eq!(second.scene.name, scene_name);
         assert_eq!(second.store.iter_loaded().count(), 1);
         drop(second);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_a_non_wok_folder_errors_and_writes_nothing() {
+        // A non-empty folder without scene.json is some directory picked by mistake: open reports it
+        // as not a wok project and writes nothing - it neither loads nor scatters sample content in.
+        let dir = unique_temp_dir();
+        std::fs::create_dir_all(&dir).expect("create the non-wok dir");
+        std::fs::write(dir.join("README.md"), b"not a wok project").expect("seed a stray file");
+        let message = match LoadedScene::open(dir.clone()) {
+            Ok(_) => panic!("a non-wok folder must not open"),
+            Err(err) => format!("{err}"),
+        };
+        assert!(message.contains("no scene.json"), "the error should name the missing scene.json: {message}");
+        assert!(!dir.join("scene.json").exists(), "open must not generate a scene into a non-wok folder");
+        assert!(!dir.join("prefabs").exists(), "open must not scatter sample prefabs into a non-wok folder");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

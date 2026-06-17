@@ -21,11 +21,20 @@ use crate::workspace;
 /// content summary (or `None` when no project is open), and `mode` is the interaction mode the status
 /// bar shows.
 ///
+/// `open_error` is the last project-open failure's message (or `None`), shown in the status bar.
+///
 /// Returns the editor-area rect (egui points) the chrome settled into this frame. The frame loop
 /// keeps it so the GPU pass can confine the 3D to that rect (`crate::render`); it depends on the
 /// live layout (nav-panel dock and visibility, the window size), so it is read fresh each frame.
-pub fn chrome(ctx: &egui::Context, model: &Model, content: Option<ContentView>, mode: Mode, actions: &mut Vec<Action>) -> egui::Rect {
-    menu::status_bar(ctx, &model.project, mode);
+pub fn chrome(
+    ctx: &egui::Context,
+    model: &Model,
+    content: Option<ContentView>,
+    mode: Mode,
+    open_error: Option<&str>,
+    actions: &mut Vec<Action>,
+) -> egui::Rect {
+    menu::status_bar(ctx, &model.project, mode, open_error);
     workspace::ui(ctx, model, content, actions)
 }
 
@@ -77,7 +86,7 @@ mod tests {
             let editor_bg = crate::theme::palette(ctx).editor_bg;
             ctx.layer_painter(egui::LayerId::background()).rect_filled(ctx.screen_rect(), 0.0, editor_bg);
             let mut actions = Vec::new();
-            chrome(ctx, model, content, mode, &mut actions);
+            chrome(ctx, model, content, mode, None, &mut actions);
         })
     }
 
