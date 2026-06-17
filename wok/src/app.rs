@@ -22,6 +22,7 @@ use wok_platform::{App, FrameCtx, Platform};
 
 use crate::action::{self, Action};
 use crate::camera::{self, FlyCamera};
+use crate::content::ContentPaths;
 use crate::gui::Gui;
 use crate::input;
 use crate::mode::Mode;
@@ -70,13 +71,18 @@ pub struct EditorApp {
 
 impl EditorApp {
     /// Build the app. The recent-projects list is seeded from disk (a missing or malformed file reads
-    /// as empty, so the editor always starts). An optional startup folder (from the CLI) opens as the
-    /// initial project, routed through the one writer so it lands in recents the way a menu open does;
-    /// its content loads in `init`, once a GPU device exists.
+    /// as empty, so the editor always starts). The startup project is an explicit CLI folder if given,
+    /// otherwise the most-recent recent that is still a loadable wok project (so a fresh install or a
+    /// cleared list starts empty); either is routed through the one writer so it lands in recents the
+    /// way a menu open does, and its content loads in `init`, once a GPU device exists.
     pub fn new(initial: Option<PathBuf>) -> EditorApp {
         let mut model = Model::new(Project::None);
         model.recents = recent::load();
-        if let Some(root) = initial {
+        // Reopen-last selects only a folder that still holds a scene.json, so it never generates: a
+        // missing or emptied recent is skipped, falling back to no project. Creating a project stays
+        // an explicit act (an empty folder opened from the menu), never a launch side effect.
+        let startup = initial.or_else(|| pick_startup(&model.recents, is_wok_project));
+        if let Some(root) = startup {
             if action::handle(Action::OpenProject(root), &mut model).save_recents {
                 recent::save(&model.recents);
             }
@@ -280,4 +286,40 @@ impl App for EditorApp {
 /// field needs a value; `LoadedScene::spawn_camera` overwrites it when a project opens.
 fn default_camera() -> FlyCamera {
     FlyCamera { position: Vec3::new(64.0, 30.0, 128.0), yaw: 0.0, pitch: -0.2, speed: 16.0 }
+}
+
+/// The most-recent recent project that satisfies `is_project`, most-recent first, or `None`. Pure
+/// over the predicate so the most-recent-first selection is testable without a filesystem; the live
+/// caller passes the on-disk [`is_wok_project`] check.
+fn pick_startup(recents: &recent::Recents, is_project: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    recents.paths().iter().find(|root| is_project(root)).cloned()
+}
+
+/// Whether `root` is a loadable wok project: it holds a `scene.json`. Reopen-last selects only these,
+/// so a recent whose folder was deleted or emptied is skipped rather than regenerated on launch.
+fn is_wok_project(root: &Path) -> bool {
+    ContentPaths::new(root.to_path_buf()).scene().is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pick_startup_takes_the_most_recent_matching_project() {
+        // Most-recent first: c, b, a. Only a and b qualify as projects, so reopen-last picks the more
+        // recent of those (b), skipping the non-project c at the front.
+        let recents = recent::Recents::from_paths(["c", "b", "a"].iter().map(PathBuf::from));
+        let picked = pick_startup(&recents, |p| p == Path::new("a") || p == Path::new("b"));
+        assert_eq!(picked, Some(PathBuf::from("b")));
+    }
+
+    #[test]
+    fn pick_startup_is_none_when_nothing_qualifies() {
+        // A list of recents none of which is still a project (all deleted or emptied) starts empty.
+        let recents = recent::Recents::from_paths(["a", "b"].iter().map(PathBuf::from));
+        assert_eq!(pick_startup(&recents, |_| false), None);
+        // An empty recents list is also none, with no panic on the empty iterator.
+        assert_eq!(pick_startup(&recent::Recents::default(), |_| true), None);
+    }
 }
