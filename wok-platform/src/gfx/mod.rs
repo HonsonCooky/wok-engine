@@ -47,10 +47,17 @@ impl Frame {
     }
 
     /// Submit the frame's commands and present to the screen.
-    pub fn finish(self, platform: &Platform) {
+    ///
+    /// Takes `&mut Platform` to record that a real frame has presented: the window is created
+    /// hidden, and the runner reveals it after the first present so the user never sees the OS's
+    /// blank client area. A skipped frame - `begin_frame` returned `None` - never reaches here,
+    /// so the flag marks actual pixels rather than an attempt. Call sites already pass
+    /// `ctx.platform` (a `&mut Platform`), so they reborrow with no edit.
+    pub fn finish(self, platform: &mut Platform) {
         platform
             .queue
             .submit(std::iter::once(self.encoder.finish()));
         self.output.present();
+        platform.presented = true;
     }
 }

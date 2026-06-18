@@ -2,7 +2,7 @@ use cpal::traits::{DeviceTrait, HostTrait};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 /// Description of the application window.
@@ -31,6 +31,11 @@ pub struct Platform {
     pub audio_device: cpal::Device,
     pub audio_config: cpal::SupportedStreamConfig,
     supported_present_modes: Vec<wgpu::PresentMode>,
+    /// Set by [`crate::gfx::Frame::finish`] the first time a frame actually presents. The runner
+    /// watches it to reveal the window after that first real frame (the window is created hidden),
+    /// so the user never sees the OS's blank client area. Once set it stays true; the runner
+    /// reveals exactly once.
+    pub(crate) presented: bool,
 }
 
 impl Platform {
@@ -53,7 +58,9 @@ impl Platform {
     ///
     /// This is what `wok_platform::run` uses internally. It's exposed so consumers that want to own
     /// their own event loop (e.g. tools that open and close windows on demand) can construct
-    /// a Platform whenever they need one.
+    /// a Platform whenever they need one. The window is created hidden to avoid a blank-frame
+    /// flash; such a consumer must reveal it (`platform.window.set_visible(true)`) after presenting
+    /// its first frame. `wok_platform::run` does this automatically.
     ///
     /// # Panics
     /// Panics on any unrecoverable failure: window creation, GPU adapter discovery, device
@@ -66,7 +73,14 @@ impl Platform {
         };
         let window_attrs = Window::default_attributes()
             .with_title(desc.title)
-            .with_inner_size(winit::dpi::LogicalSize::new(width, height));
+            .with_inner_size(winit::dpi::LogicalSize::new(width, height))
+            // Start hidden so the OS never shows its default (blank) client area before the first
+            // frame is drawn. The runner renders and presents the first frame while the window is
+            // still hidden, then reveals it (see `Runner::about_to_wait` and `reveal_if_ready`), so
+            // the first thing on screen is a finished frame. A consumer driving its own event loop
+            // from `init` must reveal the window itself (`window.set_visible(true)`) once it has
+            // presented a frame, or it will stay hidden.
+            .with_visible(false);
 
         let window = Arc::new(
             event_loop
@@ -147,6 +161,7 @@ impl Platform {
             audio_device,
             audio_config,
             supported_present_modes: surface_caps.present_modes,
+            presented: false,
         }
     }
 }
@@ -243,6 +258,12 @@ pub struct RumbleRequest {
     pub duration_ms: u32,
 }
 
+/// Safety-net bound for the reveal. The first frame normally presents within milliseconds, so the
+/// window appears almost immediately; if no frame has presented by this deadline (e.g. the surface
+/// refuses to hand out a texture), the runner reveals the hidden window anyway. A brief blank flash
+/// is strictly better than an app that is stuck invisible with no error.
+const REVEAL_FALLBACK: std::time::Duration = std::time::Duration::from_millis(500);
+
 struct Runner<A: App> {
     app: A,
     desc: Desc,
@@ -253,6 +274,119 @@ struct Runner<A: App> {
     /// Active rumble effects, kept alive until their duration elapses. gilrs stops
     /// the effect when the Effect handle is dropped.
     active_effects: Vec<(gilrs::ff::Effect, std::time::Instant)>,
+    /// True once the window has been revealed (after the first present, or the fallback deadline).
+    /// Guards the one-shot reveal so `set_visible(true)` fires exactly once and the bootstrap path
+    /// in `about_to_wait` stops running once steady-state redraw takes over.
+    revealed: bool,
+    /// Deadline for the safety-net reveal, set when the platform is created. See [`REVEAL_FALLBACK`].
+    reveal_deadline: Option<std::time::Instant>,
+}
+
+impl<A: App> Runner<A> {
+    /// Run a single frame: compute `dt`, poll gamepads, snapshot input, invoke the app's frame
+    /// callback, then dispatch any rumble it queued. Returns whether the app asked to close.
+    /// Shared by the steady-state redraw handler and the hidden-window bootstrap in
+    /// `about_to_wait`, so the first frame can render without an OS paint event.
+    fn run_frame(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let dt = self
+            .last_frame
+            .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
+        self.last_frame = Some(now);
+
+        if let Some(ref mut gilrs) = self.gilrs {
+            self.input_collector.poll_gamepads(gilrs);
+        }
+        let input_state = self.input_collector.snapshot();
+
+        let Some(platform) = self.platform.as_mut() else {
+            return false;
+        };
+        let size = platform.window.inner_size();
+        let mut ctx = FrameCtx {
+            platform,
+            dt,
+            width: size.width,
+            height: size.height,
+            input: input_state,
+            rumble_requests: Vec::new(),
+            should_close: false,
+        };
+        self.app.frame(&mut ctx);
+        let rumbles = std::mem::take(&mut ctx.rumble_requests);
+        let close = ctx.should_close;
+        self.dispatch_rumble(rumbles);
+        close
+    }
+
+    /// Play the rumble effects the app queued this frame and retire any whose duration has elapsed.
+    fn dispatch_rumble(&mut self, rumbles: Vec<RumbleRequest>) {
+        if let Some(gilrs) = self.gilrs.as_mut()
+            && !rumbles.is_empty()
+        {
+            let ids: Vec<gilrs::GamepadId> = gilrs.gamepads().map(|(id, _)| id).collect();
+            if !ids.is_empty() {
+                for r in rumbles {
+                    let mut builder = gilrs::ff::EffectBuilder::new();
+                    if r.strong > 0 {
+                        builder.add_effect(gilrs::ff::BaseEffect {
+                            kind: gilrs::ff::BaseEffectType::Strong {
+                                magnitude: r.strong,
+                            },
+                            scheduling: gilrs::ff::Replay {
+                                play_for: gilrs::ff::Ticks::from_ms(r.duration_ms),
+                                ..Default::default()
+                            },
+                            envelope: Default::default(),
+                        });
+                    }
+                    if r.weak > 0 {
+                        builder.add_effect(gilrs::ff::BaseEffect {
+                            kind: gilrs::ff::BaseEffectType::Weak { magnitude: r.weak },
+                            scheduling: gilrs::ff::Replay {
+                                play_for: gilrs::ff::Ticks::from_ms(r.duration_ms),
+                                ..Default::default()
+                            },
+                            envelope: Default::default(),
+                        });
+                    }
+                    if let Ok(effect) = builder.gamepads(&ids).finish(gilrs) {
+                        let _ = effect.play();
+                        let expires = std::time::Instant::now()
+                            + std::time::Duration::from_millis(r.duration_ms as u64 + 50);
+                        self.active_effects.push((effect, expires));
+                    }
+                }
+            }
+        }
+        // Drop expired effects so the rumble actually stops.
+        let cutoff = std::time::Instant::now();
+        self.active_effects.retain(|(_, expires)| cutoff < *expires);
+    }
+
+    /// Reveal the hidden window once the first frame has presented, or once the safety-net deadline
+    /// has passed - whichever comes first - and exactly once. After revealing, switch back to
+    /// `ControlFlow::Wait`: the window is visible, so the steady-state redraw chain drives rendering
+    /// and the bootstrap poll is no longer needed.
+    fn reveal_if_ready(&mut self, event_loop: &ActiveEventLoop) {
+        if self.revealed {
+            return;
+        }
+        let past_deadline = self
+            .reveal_deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline);
+        let Some(platform) = self.platform.as_ref() else {
+            return;
+        };
+        if platform.presented || past_deadline {
+            platform.window.set_visible(true);
+            // Kick the steady-state redraw chain now that the window is visible; revealing also
+            // triggers an OS paint, so RedrawRequested is doubly sure to start flowing.
+            platform.window.request_redraw();
+            self.revealed = true;
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+    }
 }
 
 impl<A: App> ApplicationHandler for Runner<A> {
@@ -264,7 +398,16 @@ impl<A: App> ApplicationHandler for Runner<A> {
         self.gilrs = gilrs::Gilrs::new().ok();
         self.app.init(&platform);
         self.platform = Some(platform);
-        self.last_frame = Some(std::time::Instant::now());
+        let now = std::time::Instant::now();
+        self.last_frame = Some(now);
+        self.reveal_deadline = Some(now + REVEAL_FALLBACK);
+        // The window is created hidden. The first frame is driven from `about_to_wait`, which runs
+        // every event-loop iteration regardless of visibility - unlike `RedrawRequested`, which
+        // Windows never delivers to a hidden window. `Poll` keeps `about_to_wait` firing until the
+        // reveal; once revealed, the runner switches back to `Wait` and the steady-state redraw
+        // chain drives rendering. This is why the first present can never deadlock on a paint event
+        // the OS won't send.
+        event_loop.set_control_flow(ControlFlow::Poll);
     }
 
     fn device_event(
@@ -298,87 +441,45 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 }
             }
             WindowEvent::RedrawRequested => {
-                let now = std::time::Instant::now();
-                let dt = self
-                    .last_frame
-                    .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
-                self.last_frame = Some(now);
-
-                if let Some(ref mut gilrs) = self.gilrs {
-                    self.input_collector.poll_gamepads(gilrs);
-                }
-
-                let input_state = self.input_collector.snapshot();
-
-                if let Some(ref mut platform) = self.platform {
-                    let size = platform.window.inner_size();
-                    let mut ctx = FrameCtx {
-                        platform,
-                        dt,
-                        width: size.width,
-                        height: size.height,
-                        input: input_state,
-                        rumble_requests: Vec::new(),
-                        should_close: false,
-                    };
-                    self.app.frame(&mut ctx);
-                    let rumbles = std::mem::take(&mut ctx.rumble_requests);
-                    let close = ctx.should_close;
-                    // Dispatch rumble requests via gilrs.
-                    if let Some(gilrs) = self.gilrs.as_mut()
-                        && !rumbles.is_empty()
-                    {
-                        let ids: Vec<gilrs::GamepadId> =
-                            gilrs.gamepads().map(|(id, _)| id).collect();
-                        if !ids.is_empty() {
-                            for r in rumbles {
-                                let mut builder = gilrs::ff::EffectBuilder::new();
-                                if r.strong > 0 {
-                                    builder.add_effect(gilrs::ff::BaseEffect {
-                                        kind: gilrs::ff::BaseEffectType::Strong {
-                                            magnitude: r.strong,
-                                        },
-                                        scheduling: gilrs::ff::Replay {
-                                            play_for: gilrs::ff::Ticks::from_ms(r.duration_ms),
-                                            ..Default::default()
-                                        },
-                                        envelope: Default::default(),
-                                    });
-                                }
-                                if r.weak > 0 {
-                                    builder.add_effect(gilrs::ff::BaseEffect {
-                                        kind: gilrs::ff::BaseEffectType::Weak { magnitude: r.weak },
-                                        scheduling: gilrs::ff::Replay {
-                                            play_for: gilrs::ff::Ticks::from_ms(r.duration_ms),
-                                            ..Default::default()
-                                        },
-                                        envelope: Default::default(),
-                                    });
-                                }
-                                if let Ok(effect) = builder.gamepads(&ids).finish(gilrs) {
-                                    let _ = effect.play();
-                                    let expires = std::time::Instant::now()
-                                        + std::time::Duration::from_millis(
-                                            r.duration_ms as u64 + 50,
-                                        );
-                                    self.active_effects.push((effect, expires));
-                                }
-                            }
-                        }
-                    }
-                    // Drop expired effects so the rumble actually stops.
-                    let cutoff = std::time::Instant::now();
-                    self.active_effects.retain(|(_, expires)| cutoff < *expires);
-                    if close {
+                // Steady-state render path. The first frame is bootstrapped from `about_to_wait`
+                // while the window is hidden; this handler starts firing once the reveal makes the
+                // window visible, and the `request_redraw` chain below keeps it going.
+                if self.run_frame() {
+                    if let Some(ref platform) = self.platform {
                         self.app.cleanup(platform);
-                        event_loop.exit();
-                    } else {
+                    }
+                    event_loop.exit();
+                } else {
+                    // Belt and suspenders for platforms that do paint a hidden window: if the first
+                    // present landed here rather than in `about_to_wait`, reveal now. A no-op once
+                    // already revealed.
+                    self.reveal_if_ready(event_loop);
+                    if let Some(ref platform) = self.platform {
                         platform.window.request_redraw();
                     }
                 }
             }
             _ => {}
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Bootstrap-only path: drive the first frame here so it renders and presents while the
+        // window is still hidden. Windows delivers no paint - and thus no `RedrawRequested` - to a
+        // hidden window, so the first frame must not depend on one; `about_to_wait` runs on every
+        // event-loop iteration regardless of visibility. Once revealed, the steady-state redraw
+        // chain in `window_event` takes over and this returns immediately.
+        if self.revealed || self.platform.is_none() {
+            return;
+        }
+        if self.run_frame() {
+            if let Some(ref platform) = self.platform {
+                self.app.cleanup(platform);
+            }
+            event_loop.exit();
+            return;
+        }
+        self.reveal_if_ready(event_loop);
     }
 }
 
@@ -397,6 +498,8 @@ pub fn run<A: App + 'static>(app: A, desc: Desc) {
         input_collector: crate::input::InputCollector::new(),
         gilrs: None,
         active_effects: Vec::new(),
+        revealed: false,
+        reveal_deadline: None,
     };
     event_loop.run_app(&mut runner).expect("Event loop error");
 }
