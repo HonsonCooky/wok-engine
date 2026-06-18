@@ -47,16 +47,10 @@ impl Frame {
     }
 
     /// Submit the frame's commands and present to the screen.
-    ///
-    /// Takes `&mut Platform` to record that a frame has actually presented: the runner reveals the
-    /// window after the first present (the window is created hidden so the OS's blank client area is
-    /// never shown). A skipped frame - `begin_frame` returned `None` - never reaches here, so the
-    /// flag marks real pixels, not an attempt.
-    pub fn finish(self, platform: &mut Platform) {
+    pub fn finish(self, platform: &Platform) {
         platform
             .queue
             .submit(std::iter::once(self.encoder.finish()));
         self.output.present();
-        platform.presented = true;
     }
 }
