@@ -18,8 +18,14 @@ use crate::model::{Model, Shell, Side, Tab, TabKind};
 use crate::scene::ContentView;
 use crate::theme;
 
-/// Tab-strip height in points: enough that the active tab's fill reads as a panel, not a chip.
-const TAB_BAR_HEIGHT: f32 = 34.0;
+/// Tab-strip height in points. This must contain the row's content (the hamburger and the tab cells,
+/// with their own margins) plus the panel frame's vertical inner margin, because egui clips a top
+/// panel's fill to its `exact_height` rect while still reserving the larger content-driven height for
+/// the central panel below. If the content overflows, the panel reserves the bigger height (so the
+/// viewport starts there) but paints its fill only to `exact_height`, leaving an unpainted strip that
+/// exposes the renderer's clear colour through the transparent editor area. 38 fits the content with
+/// no overflow, so the painted bottom and the viewport's top coincide and no strip shows.
+const TAB_BAR_HEIGHT: f32 = 38.0;
 
 /// Default navigation-panel width in points.
 const NAV_PANEL_WIDTH: f32 = 216.0;
