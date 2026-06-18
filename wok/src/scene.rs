@@ -103,7 +103,7 @@ impl LoadedScene {
             let ground = runtime.heightmap.as_ref().map_or(0.0, |h| h.height_at(half, south));
             (chunk_origin(coord), ground)
         });
-        FlyCamera { position: origin + Vec3::new(half, ground + 12.0, south), yaw: 0.0, pitch: -0.15, speed: 16.0 }
+        FlyCamera { position: origin + Vec3::new(half, ground + 12.0, south), yaw: 0.0, pitch: -0.15 }
     }
 
     /// Fog distance sets render distance (HLD); the far plane sits past full occlusion.

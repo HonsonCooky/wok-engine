@@ -5,13 +5,14 @@
 //! (`crate::action`, the single writer). The scene the viewport draws is a separate residency
 //! (`crate::scene`, `LoadedScene`) reconciled to the open project: opening a project loads (or first
 //! generates) its content and uploads its GPU meshes, closing it drops them. The camera is modal
-//! (`crate::mode`): free-fly flies the god-cam (`crate::camera`), Object is the resting mode.
+//! (`crate::mode`): free-fly navigates the camera from the mouse (`crate::camera`) - right-drag looks,
+//! scroll dollies, middle-drag pans (`crate::input`) - and Object is the resting mode.
 //!
 //! The frame order is load-bearing: hot reload first (the scene is current before anything reads it),
 //! then the UI (its focus queries decide what input the rest of the frame may use), then the UI's
 //! actions, then the scene reconcile (an open/close just applied takes effect), then the viewport
-//! input (the mode toggle), then the camera advance - last, so it flies on this frame's final mode -
-//! and finally the render with the chrome painted over it.
+//! input (the mode toggle), then the camera advance - last, so it navigates on this frame's final
+//! mode - and finally the render with the chrome painted over it.
 
 use std::path::{Path, PathBuf};
 
@@ -53,8 +54,8 @@ pub struct EditorApp {
     /// `None` when the last open succeeded or no open has failed. App-side, not `Model` state: it
     /// arises from the device-side reconcile, not a pure action.
     open_error: Option<String>,
-    /// The god-cam the renderer reads. Spawned over the scene when a project loads; advanced in
-    /// free-fly, at rest in Object mode.
+    /// The camera the renderer reads. Spawned over the scene when a project loads, then advanced from
+    /// the mouse in free-fly (`crate::camera`, `crate::input`).
     pub(crate) camera: FlyCamera,
     /// The interaction mode (`crate::mode`), toggled in place by the viewport input (backtick).
     mode: Mode,
@@ -155,13 +156,15 @@ impl EditorApp {
         }
     }
 
-    /// Advance the camera one frame, modal on the interaction mode. Free-fly flies (WASD pans, Q/E
-    /// changes altitude, right-drag looks); Object is the resting mode, so the camera holds its pose.
-    /// Runs after input is applied, so it flies on this frame's final mode.
-    fn advance_camera(&mut self, input: &InputState, pointer_free: bool, keys_free: bool, dt: f32) {
+    /// Advance the camera one frame when in free-fly, from the mouse: right-drag looks, scroll dollies
+    /// along the look, middle-drag pans the view plane (`crate::camera`, `crate::input`). Object is the
+    /// resting mode, so the camera holds its pose. Inert unless the cursor is free for the viewport
+    /// (`pointer_free`), so the chrome and an open menu keep their own pointer input. Runs after the
+    /// UI, so it sees this frame's focus state.
+    fn advance_camera(&mut self, input: &InputState, pointer_free: bool) {
         if self.mode == Mode::FreeFly {
-            let nav = input::camera_input(input, pointer_free, keys_free);
-            self.camera = camera::update(&self.camera, &nav, dt);
+            let nav = input::camera_input(input, pointer_free);
+            self.camera = camera::update(&self.camera, &nav);
         }
     }
 
@@ -232,7 +235,7 @@ impl App for EditorApp {
                 ui_output = Some(gui.run(&ctx.platform.window, |egui_ctx| {
                     editor_rect = view::chrome(egui_ctx, model, content, mode, open_error, &mut actions);
                 }));
-                // Look and scroll drive the god-cam only when the cursor is over the editor-area
+                // Look, scroll, and pan drive the camera only when the cursor is over the editor-area
                 // viewport and egui is not using the pointer for its own UI. The viewport is egui's
                 // background layer, and a CentralPanel marks the whole central region as used, so
                 // is_pointer_over_area() - and thus wants_pointer_input() on a hover with no button
@@ -272,7 +275,7 @@ impl App for EditorApp {
         // Viewport input: the backtick mode toggle (picking and the home-row verbs return later),
         // focus-gated so a text field types it. Then advance the camera last, on the final mode.
         self.mode = input::mode_toggle(&ctx.input, keys_free, self.mode);
-        self.advance_camera(&ctx.input, pointer_free, keys_free, ctx.dt);
+        self.advance_camera(&ctx.input, pointer_free);
 
         // Render the scene (or the empty viewport) with the chrome painted over it.
         self.render(ctx, ui_output);
@@ -285,7 +288,7 @@ impl App for EditorApp {
 /// The camera before any scene loads - never rendered (the empty viewport just clears), but the
 /// field needs a value; `LoadedScene::spawn_camera` overwrites it when a project opens.
 fn default_camera() -> FlyCamera {
-    FlyCamera { position: Vec3::new(64.0, 30.0, 128.0), yaw: 0.0, pitch: -0.2, speed: 16.0 }
+    FlyCamera { position: Vec3::new(64.0, 30.0, 128.0), yaw: 0.0, pitch: -0.2 }
 }
 
 /// The most-recent recent project that satisfies `is_project`, most-recent first, or `None`. Pure
