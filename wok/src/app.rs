@@ -4,15 +4,15 @@
 //! open project's content summary and emits actions the loop applies through the one handler
 //! (`crate::action`, the single writer). The scene the viewport draws is a separate residency
 //! (`crate::scene`, `LoadedScene`) reconciled to the open project: opening a project loads (or first
-//! generates) its content and uploads its GPU meshes, closing it drops them. The camera is modal
-//! (`crate::mode`): free-fly navigates the camera from the mouse (`crate::camera`) - right-drag looks,
-//! scroll dollies, middle-drag pans (`crate::input`) - and Object is the resting mode.
+//! generates) its content and uploads its GPU meshes, closing it drops them. The camera
+//! (`crate::camera`) is mouse-only and always live: right-drag looks, scroll dollies, middle-drag pans
+//! (`crate::input`), with no mode to enter.
 //!
 //! The frame order is load-bearing: hot reload first (the scene is current before anything reads it),
 //! then the UI (its focus queries decide what input the rest of the frame may use), then the UI's
-//! actions, then the scene reconcile (an open/close just applied takes effect), then the viewport
-//! input (the mode toggle), then the camera advance - last, so it navigates on this frame's final
-//! mode - and finally the render with the chrome painted over it.
+//! actions, then the scene reconcile (an open/close just applied takes effect), then the camera
+//! advance - last, so it navigates on this frame's focus state - and finally the render with the
+//! chrome painted over it.
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +26,6 @@ use crate::camera::{self, FlyCamera};
 use crate::content::ContentPaths;
 use crate::gui::Gui;
 use crate::input;
-use crate::mode::Mode;
 use crate::model::Model;
 use crate::project::Project;
 use crate::recent;
@@ -55,10 +54,8 @@ pub struct EditorApp {
     /// arises from the device-side reconcile, not a pure action.
     open_error: Option<String>,
     /// The camera the renderer reads. Spawned over the scene when a project loads, then advanced from
-    /// the mouse in free-fly (`crate::camera`, `crate::input`).
+    /// the mouse each frame (`crate::camera`, `crate::input`).
     pub(crate) camera: FlyCamera,
-    /// The interaction mode (`crate::mode`), toggled in place by the viewport input (backtick).
-    mode: Mode,
     pub(crate) size: (u32, u32),
     /// The editor-area rect (egui points) the chrome settled into last frame, captured from
     /// `view::chrome`. The render scopes the 3D viewport to it (`crate::render`), and it is the one
@@ -96,7 +93,6 @@ impl EditorApp {
             loaded_root: None,
             open_error: None,
             camera: default_camera(),
-            mode: Mode::default(),
             size: (0, 0),
             // Overwritten by the first frame's chrome before any render reads it; NOTHING reads as
             // "no usable rect", which the render treats as the full target.
@@ -156,16 +152,14 @@ impl EditorApp {
         }
     }
 
-    /// Advance the camera one frame when in free-fly, from the mouse: right-drag looks, scroll dollies
-    /// along the look, middle-drag pans the view plane (`crate::camera`, `crate::input`). Object is the
-    /// resting mode, so the camera holds its pose. Inert unless the cursor is free for the viewport
-    /// (`pointer_free`), so the chrome and an open menu keep their own pointer input. Runs after the
-    /// UI, so it sees this frame's focus state.
+    /// Advance the camera one frame from the mouse: right-drag looks, scroll dollies along the look,
+    /// middle-drag pans the view plane (`crate::camera`, `crate::input`). Always live - there is no
+    /// camera mode - but inert unless the cursor is free for the viewport (`pointer_free`), so the
+    /// chrome and an open menu keep their own pointer input. Runs after the UI, so it sees this frame's
+    /// focus state.
     fn advance_camera(&mut self, input: &InputState, pointer_free: bool) {
-        if self.mode == Mode::FreeFly {
-            let nav = input::camera_input(input, pointer_free);
-            self.camera = camera::update(&self.camera, &nav);
-        }
+        let nav = input::camera_input(input, pointer_free);
+        self.camera = camera::update(&self.camera, &nav);
     }
 
     /// Keep the window title showing the open project's name, or just the app name when none.
@@ -224,16 +218,15 @@ impl App for EditorApp {
         // claims decide what input the rest of the frame may use.
         let mut actions: Vec<Action> = Vec::new();
         let mut ui_output = None;
-        let (mut pointer_free, mut keys_free) = (true, true);
+        let mut pointer_free = true;
         let mut editor_rect = egui::Rect::NOTHING;
         {
             let model = &self.model;
-            let mode = self.mode;
             let content = self.scene.as_ref().map(LoadedScene::content_view);
             let open_error = self.open_error.as_deref();
             if let Some(gui) = self.gui.as_mut() {
                 ui_output = Some(gui.run(&ctx.platform.window, |egui_ctx| {
-                    editor_rect = view::chrome(egui_ctx, model, content, mode, open_error, &mut actions);
+                    editor_rect = view::chrome(egui_ctx, model, content, open_error, &mut actions);
                 }));
                 // Look, scroll, and pan drive the camera only when the cursor is over the editor-area
                 // viewport and egui is not using the pointer for its own UI. The viewport is egui's
@@ -249,7 +242,6 @@ impl App for EditorApp {
                     .and_then(|p| gui.ctx.layer_id_at(p))
                     .is_some_and(|layer| layer.order != egui::Order::Background);
                 pointer_free = over_viewport && !over_foreground && !gui.ctx.is_using_pointer();
-                keys_free = !gui.ctx.wants_keyboard_input();
             }
         }
         // The editor-area rect the chrome just settled into; the render confines the 3D to it.
@@ -272,9 +264,8 @@ impl App for EditorApp {
         // effect here (it needs the device).
         self.reconcile_scene(ctx.platform);
 
-        // Viewport input: the backtick mode toggle (picking and the home-row verbs return later),
-        // focus-gated so a text field types it. Then advance the camera last, on the final mode.
-        self.mode = input::mode_toggle(&ctx.input, keys_free, self.mode);
+        // Advance the camera from the mouse last, so it sees this frame's focus state. Picking and the
+        // home-row verbs (which will read keyboard focus) return with later surfaces.
         self.advance_camera(&ctx.input, pointer_free);
 
         // Render the scene (or the empty viewport) with the chrome painted over it.

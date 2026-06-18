@@ -1,13 +1,12 @@
-//! Viewport input: the frame's raw input snapshot mapped to the camera, plus the Object/Free-fly mode
-//! toggle.
+//! Viewport input: the frame's raw input snapshot mapped to the mouse-only editor camera.
 //!
 //! egui sees every raw window event first (via `App::on_window_event`); [`camera_input`] then
 //! consults `pointer_free` - the cursor is over the editor viewport and egui is not using the pointer
 //! for its own UI (computed in `crate::app`, the 911a258 gate) - so the same motion never drives a
-//! panel and the camera at once. The camera is now mouse-only (designs/editor-design.md, Input): hold
-//! the right button and move to look, scroll to dolly along the look, hold the middle button and move
-//! to pan the view plane; WASD fly is gone. [`mode_toggle`] still flips Object/Free-fly on backtick,
-//! and the camera advances only in free-fly for now; the mode itself goes away in the follow-up.
+//! panel and the camera at once. The camera is mouse-only and always live (designs/editor-design.md,
+//! Input): hold the right button and move to look, scroll to dolly along the look, hold the middle
+//! button and move to pan the view plane. There is no keyboard movement and no camera mode, so the
+//! left hand is left wholly to operators and precision (which return with picking and place).
 //! Everything here is unit testable with no window.
 
 use glam::Vec2;
@@ -15,7 +14,6 @@ use wok_platform::input::InputState;
 use wok_platform::winit::event::MouseButton;
 
 use crate::camera::CameraInput;
-use crate::mode::Mode;
 
 /// Mouse-look sensitivity, radians per pixel of raw motion. Unchanged from the prior fly camera.
 const LOOK_SENSITIVITY: f32 = 0.0035;
@@ -58,13 +56,6 @@ pub fn camera_input(input: &InputState, pointer_free: bool) -> CameraInput {
         Vec2::ZERO
     };
     CameraInput { look_delta, dolly: input.scroll_delta.1 * DOLLY_PER_NOTCH, pan }
-}
-
-/// Flip Object/Free-fly on backtick, gated on `keys_free` so a focused text field types it instead.
-/// The mode is interaction state, not an authored change, so this returns the next mode rather than
-/// emitting an action. Backtick (not Tab, which fights egui's focus traversal) is the toggle key.
-pub fn mode_toggle(input: &InputState, keys_free: bool, mode: Mode) -> Mode {
-    if keys_free && input.char_pressed('`') { mode.toggled() } else { mode }
 }
 
 #[cfg(test)]
@@ -131,16 +122,5 @@ mod tests {
         // 911a258 gate): no look, no dolly, no pan, even with both buttons held and the wheel turning.
         let busy = mouse(&[MouseButton::Right, MouseButton::Middle], (10.0, 4.0), 2.0);
         assert_eq!(camera_input(&busy, false), CameraInput::default());
-    }
-
-    #[test]
-    fn backtick_toggles_the_mode_unless_a_field_has_focus() {
-        use wok_platform::winit::keyboard::Key;
-        let mut input = mouse(&[], (0.0, 0.0), 0.0);
-        input.keys_pressed.insert(Key::Character("`".into()));
-        assert_eq!(mode_toggle(&input, true, Mode::Object), Mode::FreeFly, "free keys: backtick flips");
-        assert_eq!(mode_toggle(&input, false, Mode::Object), Mode::Object, "a focused field holds the mode");
-        // No backtick this frame: the mode is unchanged either way.
-        assert_eq!(mode_toggle(&mouse(&[], (0.0, 0.0), 0.0), true, Mode::FreeFly), Mode::FreeFly);
     }
 }

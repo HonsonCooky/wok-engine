@@ -10,7 +10,6 @@
 
 use crate::action::Action;
 use crate::menu;
-use crate::mode::Mode;
 use crate::model::Model;
 use crate::scene::ContentView;
 use crate::workspace;
@@ -18,8 +17,7 @@ use crate::workspace;
 /// Render the full editor chrome for one frame. Order is layout order: the status bar claims the
 /// bottom edge, then the workspace (navigation panel with the content browser, the tab bar with the
 /// app-menu at its left, and the editor area) fills what is left. `content` is the open project's
-/// content summary (or `None` when no project is open), and `mode` is the interaction mode the status
-/// bar shows.
+/// content summary (or `None` when no project is open).
 ///
 /// `open_error` is the last project-open failure's message (or `None`), shown in the status bar.
 ///
@@ -30,18 +28,16 @@ pub fn chrome(
     ctx: &egui::Context,
     model: &Model,
     content: Option<ContentView>,
-    mode: Mode,
     open_error: Option<&str>,
     actions: &mut Vec<Action>,
 ) -> egui::Rect {
-    menu::status_bar(ctx, &model.project, mode, open_error);
+    menu::status_bar(ctx, &model.project, open_error);
     workspace::ui(ctx, model, content, actions)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mode::Mode;
     use crate::model::Model;
     use crate::project::Project;
     use egui_kittest::Harness;
@@ -76,7 +72,6 @@ mod tests {
     fn chrome_harness<'a>(
         model: &'a Model,
         content: Option<ContentView<'a>>,
-        mode: Mode,
         theme: egui::ThemePreference,
         size: egui::Vec2,
     ) -> Harness<'a> {
@@ -86,7 +81,7 @@ mod tests {
             let editor_bg = crate::theme::palette(ctx).editor_bg;
             ctx.layer_painter(egui::LayerId::background()).rect_filled(ctx.screen_rect(), 0.0, editor_bg);
             let mut actions = Vec::new();
-            chrome(ctx, model, content, mode, None, &mut actions);
+            chrome(ctx, model, content, None, &mut actions);
         })
     }
 
@@ -103,7 +98,7 @@ mod tests {
         let mut model = Model::new(Project::open("wok-engine"));
         model.shell.open_or_focus_scene();
         let mut harness =
-            chrome_harness(&model, Some(content), Mode::Object, egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0));
+            chrome_harness(&model, Some(content), egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0));
         harness.run();
         harness.snapshot("chrome");
     }
@@ -118,7 +113,7 @@ mod tests {
         let mut model = Model::new(Project::open("wok-engine"));
         model.shell.open_or_focus_scene();
         let mut harness =
-            chrome_harness(&model, Some(content), Mode::Object, egui::ThemePreference::Light, egui::vec2(1100.0, 700.0));
+            chrome_harness(&model, Some(content), egui::ThemePreference::Light, egui::vec2(1100.0, 700.0));
         harness.run();
         harness.snapshot("chrome_light");
     }
@@ -135,7 +130,7 @@ mod tests {
         let mut model = Model::new(Project::open("wok-engine"));
         model.shell.toggle_nav();
         let mut harness =
-            chrome_harness(&model, Some(content), Mode::Object, egui::ThemePreference::Dark, egui::vec2(520.0, 320.0));
+            chrome_harness(&model, Some(content), egui::ThemePreference::Dark, egui::vec2(520.0, 320.0));
         harness.run();
         harness.get_by_label("Menu").click();
         harness.run();
@@ -160,7 +155,7 @@ mod tests {
         model.recents.push("games/unstitched");
         model.recents.push("demos/taste");
         let mut harness =
-            chrome_harness(&model, Some(content), Mode::Object, egui::ThemePreference::Dark, egui::vec2(760.0, 380.0));
+            chrome_harness(&model, Some(content), egui::ThemePreference::Dark, egui::vec2(760.0, 380.0));
         harness.run();
         harness.get_by_label("Menu").click();
         harness.run();
@@ -184,7 +179,7 @@ mod tests {
         model.shell.open_or_focus_scene();
         model.shell.toggle_nav();
         let mut harness =
-            chrome_harness(&model, Some(content), Mode::Object, egui::ThemePreference::Dark, egui::vec2(460.0, 180.0));
+            chrome_harness(&model, Some(content), egui::ThemePreference::Dark, egui::vec2(460.0, 180.0));
         harness.run();
         harness.get_by_label("x").hover();
         harness.run();

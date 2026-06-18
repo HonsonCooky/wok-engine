@@ -1,12 +1,12 @@
 //! wok: the editor, the engine's reference application.
 //!
-//! The Scene view frame: a window, the Zed-style chrome, and a god-cam viewport that renders the
+//! The Scene view frame: a window, the Zed-style chrome, and a mouse-driven viewport that renders the
 //! open project's scene. The File menu opens a project - a content-root folder - which loads (or
 //! first generates) its scene content and draws it through the engine's render path; the content
-//! browser lists the scene, prefabs, and lighting, and opening the scene gives a Scene tab. Backtick
-//! toggles a free-fly god-cam (Object is the resting mode). The authoring surfaces over the
-//! viewport - picking, the inspector, place mode, save - return as later pieces; this is the frame
-//! they drop into.
+//! browser lists the scene, prefabs, and lighting, and opening the scene gives a Scene tab. The camera
+//! is mouse-only and always live: right-drag looks, scroll dollies along the look, middle-drag pans
+//! the view plane. The authoring surfaces over the viewport - picking, the inspector, place mode,
+//! save - return as later pieces; this is the frame they drop into.
 //!
 //! egui is a dependency of this application only, never of an engine crate; the engine libraries
 //! (wok-scene, wok-content, wok-mesh, wok-render, wok-light) are composed here, never the reverse.
@@ -21,7 +21,6 @@ mod content;
 mod gui;
 mod input;
 mod menu;
-mod mode;
 mod model;
 mod place;
 mod project;
