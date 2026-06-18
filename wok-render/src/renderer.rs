@@ -255,10 +255,16 @@ impl Renderer {
         }
     }
 
-    /// Recreate the depth buffer for a resized target. Call whenever the target's size changes;
-    /// rendering into a target whose size disagrees with the depth buffer is a wgpu validation
-    /// error.
+    /// Size the depth buffer to a `width` x `height` target. Rendering into a target whose size
+    /// disagrees with the depth buffer is a wgpu validation error, so the caller drives this from
+    /// the size of the surface texture it just acquired (`Frame::size`), every frame. The call is
+    /// idempotent - it recreates the depth texture only when the size actually changed - so feeding
+    /// it the acquired size each frame costs nothing in steady state and keeps depth and colour in
+    /// lockstep across a resize.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if self.target_size == (width, height) {
+            return;
+        }
         self.depth_view = pipeline::depth_texture(device, width, height);
         self.target_size = (width, height);
     }

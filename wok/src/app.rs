@@ -56,7 +56,6 @@ pub struct EditorApp {
     /// The camera the renderer reads. Spawned over the scene when a project loads, then advanced from
     /// the mouse each frame (`crate::camera`, `crate::input`).
     pub(crate) camera: FlyCamera,
-    pub(crate) size: (u32, u32),
     /// The editor-area rect (egui points) the chrome settled into last frame, captured from
     /// `view::chrome`. The render scopes the 3D viewport to it (`crate::render`), and it is the one
     /// rect cursor-to-ray picking will map against (3b) - both read this single source rather than
@@ -93,7 +92,6 @@ impl EditorApp {
             loaded_root: None,
             open_error: None,
             camera: default_camera(),
-            size: (0, 0),
             // Overwritten by the first frame's chrome before any render reads it; NOTHING reads as
             // "no usable rect", which the render treats as the full target.
             editor_rect: egui::Rect::NOTHING,
@@ -183,8 +181,6 @@ impl App for EditorApp {
         theme::apply(&gui.ctx);
         self.gui = Some(gui);
         self.gpu = Some(Gpu::new(platform));
-        let config = &platform.surface_config;
-        self.size = (config.width, config.height);
         // Load a startup project (from the CLI) now that a device exists.
         self.reconcile_scene(platform);
         self.refresh_title(platform);
@@ -197,14 +193,6 @@ impl App for EditorApp {
     }
 
     fn frame(&mut self, ctx: &mut FrameCtx) {
-        // Keep the renderer's depth buffer sized to the window.
-        if ctx.width > 0 && ctx.height > 0 && (ctx.width, ctx.height) != self.size {
-            if let Some(gpu) = self.gpu.as_mut() {
-                gpu.renderer.resize(&ctx.platform.device, ctx.width, ctx.height);
-            }
-            self.size = (ctx.width, ctx.height);
-        }
-
         // Hot reload first, so the scene is current before anything reads it. A chunk change rebuilds
         // the terrain GPU meshes; prefab, scene, and light changes update the runtime arrays and
         // light state the render reads each frame.

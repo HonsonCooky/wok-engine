@@ -132,7 +132,6 @@ pub struct TasteApp {
     /// Per-prefab-item occlusion fade state (`crate::fade`), advanced each rendered frame.
     fade: OcclusionFade,
     clock: FixedClock,
-    size: (u32, u32),
     /// The hitbox overlay's mode (`crate::debug`), starting off and cycled by F1.
     overlay: OverlayMode,
     gpu: Option<Gpu>,
@@ -168,7 +167,6 @@ impl TasteApp {
             camera,
             fade: OcclusionFade::new(),
             clock: FixedClock::new(SIM_DT, MAX_STEPS_PER_FRAME),
-            size: (0, 0),
             overlay: OverlayMode::default(),
             gpu: None,
         })
@@ -220,7 +218,15 @@ impl TasteApp {
         let Some(gpu) = self.gpu.as_mut() else { return };
         let Gpu { renderer, primitives, player, terrain } = gpu;
 
-        let aspect = self.size.0 as f32 / self.size.1.max(1) as f32;
+        // Acquire the frame first and size the depth buffer from the texture just acquired, not from
+        // a separately tracked window size that can race ahead of the surface mid-resize and leave
+        // the forward pass binding mismatched colour and depth attachments. `resize` is a no-op when
+        // the size is unchanged, so this is free in steady state.
+        let Some(mut frame) = gfx::begin_frame(ctx.platform) else { return };
+        let (fw, fh) = frame.size();
+        renderer.resize(&ctx.platform.device, fw, fh);
+
+        let aspect = fw as f32 / fh.max(1) as f32;
         // Fog distance sets render distance (HLD); the far plane sits past full occlusion.
         let far = (self.light.fog.end * 1.2).max(50.0);
         let camera = Camera {
@@ -291,7 +297,6 @@ impl TasteApp {
             }
         }
 
-        let Some(mut frame) = gfx::begin_frame(ctx.platform) else { return };
         renderer.render(
             &ctx.platform.device,
             &ctx.platform.queue,
@@ -356,7 +361,6 @@ impl App for TasteApp {
         // The overlay's controls are invisible in play until used; the one line documents them.
         println!("taste: F1 cycles the hitbox overlay: off -> faces -> visible -> all");
         let renderer = Renderer::new(&platform.device, config.format, config.width, config.height);
-        self.size = (config.width, config.height);
 
         let primitives = PRIMITIVES
             .iter()
@@ -377,13 +381,6 @@ impl App for TasteApp {
         // Hot reload is applied between frames, before anything reads the tuning this frame, so a
         // save lands cleanly on the next frame's whole simulation rather than mid-step.
         self.reload_tuning_if_changed();
-
-        if ctx.width > 0 && ctx.height > 0 && (ctx.width, ctx.height) != self.size {
-            if let Some(gpu) = self.gpu.as_mut() {
-                gpu.renderer.resize(&ctx.platform.device, ctx.width, ctx.height);
-            }
-            self.size = (ctx.width, ctx.height);
-        }
 
         // The overlay cycle reads the raw input directly: it is a diagnostic, not part of what
         // the player meant, so it stays out of the Intent the simulation consumes.

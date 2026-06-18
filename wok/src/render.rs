@@ -125,13 +125,19 @@ impl EditorApp {
     /// into the same encoder.
     pub(crate) fn render(&mut self, ctx: &mut FrameCtx, ui_output: Option<egui::FullOutput>) {
         let camera_state = self.camera;
-        let size = self.size;
         let editor_rect = self.editor_rect;
         // Scale the editor rect (egui points) to physical pixels with the same pixels-per-point egui
         // paints the chrome with, so the viewport lines up with the panel exactly.
         let pixels_per_point = ui_output.as_ref().map_or(1.0, |o| o.pixels_per_point);
         let Some(gpu) = self.gpu.as_mut() else { return };
         let Some(mut frame) = gfx::begin_frame(ctx.platform) else { return };
+
+        // The frame's colour target, depth buffer, and viewport are one size, taken from the texture
+        // just acquired - never from a separately tracked window size that can race ahead of the
+        // surface mid-resize. Size the depth to match before the forward pass binds them together;
+        // `resize` is a no-op when the size is unchanged, so this costs nothing in steady state.
+        let size = frame.size();
+        gpu.renderer.resize(&ctx.platform.device, size.0, size.1);
 
         match self.scene.as_ref() {
             Some(scene) => {
