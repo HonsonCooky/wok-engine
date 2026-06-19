@@ -1,5 +1,0 @@
-# egui_kittest writes these next to a snapshot on mismatch (and a .old.png backup when updating).
-# The committed *.png references are the regression baseline; these transient artifacts are not.
-*.new.png
-*.diff.png
-*.old.png

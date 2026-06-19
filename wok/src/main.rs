@@ -1,49 +1,35 @@
-//! wok: the editor, the engine's reference application.
+//! wok: the engine's reference editor application.
 //!
-//! The Scene view frame: a window, the Zed-style chrome, and a mouse-driven viewport that renders the
-//! open project's scene. The File menu opens a project - a content-root folder - which loads (or
-//! first generates) its scene content and draws it through the engine's render path; the content
-//! browser lists the scene, prefabs, and lighting, and opening the scene gives a Scene tab. The camera
-//! is mouse-only and always live: right-drag looks, scroll dollies along the look, middle-drag pans
-//! the view plane. The authoring surfaces over the viewport - picking, the inspector, place mode,
-//! save - return as later pieces; this is the frame they drop into.
+//! Cleared to a minimal shell for a redesign rebuild. Read `designs/sharp-edges.md` before adding the
+//! render path, the chrome, or resize handling - it lists the traps this rebuild must not rediscover
+//! (atomic frame sizing from the acquired texture, the Vulkan teardown chain, the egui panel/flush
+//! and full-height-cell patterns, and snapshot-driven visual verification).
 //!
-//! egui is a dependency of this application only, never of an engine crate; the engine libraries
-//! (wok-scene, wok-content, wok-mesh, wok-render, wok-light) are composed here, never the reverse.
-//! Run with `cargo run -p wok [project-dir]`: with a folder argument the editor opens it on startup,
-//! otherwise it starts with no project open (open one from the File menu).
+//! This stub opens a window and clears it each frame through the platform's frame loop:
+//! `gfx::begin_frame` -> draw -> `Frame::finish`. The editor is rebuilt on top from here, re-adding
+//! the engine crates (wok-render, wok-scene, wok-content, wok-mesh, wok-light) and the egui chrome
+//! (egui / egui-wgpu / egui-winit 0.31, plus the egui_kittest + accesskit snapshot dev-dependencies)
+//! to `Cargo.toml` as each is used.
 
-mod action;
-mod app;
-mod camera;
-mod cli;
-mod content;
-mod gui;
-mod input;
-mod menu;
-mod model;
-mod place;
-mod project;
-mod recent;
-mod render;
-mod sample;
-mod scene;
-mod theme;
-mod view;
-mod workspace;
+use wok_platform::{App, Desc, FrameCtx, Platform, gfx};
 
-use wok_platform::Desc;
+struct Editor;
+
+impl App for Editor {
+    fn init(&mut self, _platform: &Platform) {}
+
+    fn frame(&mut self, ctx: &mut FrameCtx) {
+        // Acquire, clear, present. When the 3D view returns, size its depth buffer from `frame.size()`
+        // (the acquired surface texture), never from a separately tracked window size - see
+        // `designs/sharp-edges.md` section 1, the resize-divergence trap.
+        let Some(mut frame) = gfx::begin_frame(ctx.platform) else { return };
+        frame.clear(0.09, 0.10, 0.12);
+        frame.finish(ctx.platform);
+    }
+
+    fn cleanup(&mut self, _platform: &Platform) {}
+}
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let initial = match cli::parse_args(&args) {
-        Ok(initial) => initial,
-        Err(err) => {
-            eprintln!("wok: {err}");
-            std::process::exit(1);
-        }
-    };
-    let app = app::EditorApp::new(initial);
-    // run() owns the OS event loop and returns when the window closes.
-    wok_platform::run(app, Desc { title: "wok", width: 0, height: 0, vsync: true });
+    wok_platform::run(Editor, Desc { title: "wok", width: 0, height: 0, vsync: true });
 }

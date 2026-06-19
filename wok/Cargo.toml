@@ -37,33 +37,10 @@ uninlined_format_args             = "allow"
 unnecessary_wraps                 = "allow"
 unused_self                       = "allow"
 
-# The window/GPU/frame-loop substrate plus the egui integration, and the engine libraries the Scene
-# view frame consumes: wok-scene (authored data + the hot-reload watcher), wok-content (chunk
-# lifecycle into runtime arrays), wok-mesh (primitive and terrain meshes), wok-render (the forward
-# pass), wok-light (the lighting state), and glam (the camera and chunk-origin math). wok-physics
-# returns with picking and snapping (its conservative AABBs are computed here from wok-scene's
-# unit-primitive convention in the meantime, so the frame needs no physics dependency yet).
+# Cleared to a shell for the editor rebuild. Only the window/GPU/frame-loop substrate is depended on
+# now; the editor re-adds the engine libraries it composes (wok-scene, wok-content, wok-mesh,
+# wok-render, wok-light) and the egui chrome (egui / egui-wgpu / egui-winit 0.31, rfd, and the
+# egui_kittest + accesskit snapshot dev-dependencies) as each is used. See designs/sharp-edges.md for
+# the dependency set and the snapshot-harness feature-unification gotcha.
 [dependencies]
 wok-platform = { path = "../wok-platform" }
-wok-scene = { path = "../wok-scene" }
-wok-content = { path = "../wok-content" }
-wok-mesh = { path = "../wok-mesh" }
-wok-render = { path = "../wok-render" }
-wok-light = { path = "../wok-light" }
-glam.workspace = true
-egui.workspace = true
-egui-wgpu.workspace = true
-egui-winit.workspace = true
-rfd.workspace = true
-
-# Dev-only: renders the chrome through the view functions to a PNG for the snapshot regression test
-# (tests/snapshots). The wgpu feature draws via a headless GPU (the same wgpu 24 the workspace pins);
-# snapshot brings the dify image-diff. Matched to egui 0.31, never a runtime or engine dependency.
-#
-# kittest queries the accessibility tree, so it turns on egui's accesskit feature. Cargo's feature
-# unification then expects egui-winit's matching accesskit path to be compiled too; enabling it here,
-# in dev-dependencies, satisfies the test build without reaching the shipped editor (resolver 3 keeps
-# dev-dependency features out of a normal `cargo build`).
-[dev-dependencies]
-egui_kittest = { version = "0.31", features = ["wgpu", "snapshot"] }
-egui-winit = { workspace = true, features = ["accesskit"] }
