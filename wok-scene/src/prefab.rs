@@ -12,7 +12,7 @@
 //! - `is_hitbox = false, is_visible = true` - visual-only placeholder.
 //!
 //! `is_hitbox = false, is_visible = false` is degenerate but not forbidden here; tooling in
-//! `wok-shell` is the place to warn about it.
+//! `wok` is the place to warn about it.
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};

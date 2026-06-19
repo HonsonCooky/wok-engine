@@ -1,7 +1,7 @@
 //! File-level load and save for the three authored types (`Scene`, `Chunk`, `Prefab`).
 //!
 //! Each function operates on a single file. They do not resolve references, scan directories,
-//! or compute paths from names; that is wok-content's and wok-shell's job. Save uses pretty
+//! or compute paths from names; that is wok-content's and wok's job. Save uses pretty
 //! printing so authored files diff cleanly in version control.
 //!
 //! Validation: the only in-file invariant the brief calls out is that a `Prefab`'s

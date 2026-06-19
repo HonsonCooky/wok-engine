@@ -2,7 +2,7 @@
 //!
 //! References here are bare names. The engine does not maintain a registry mapping name to
 //! file path or to a content id; the content folder is the source of truth, and resolution
-//! is done by scanning. `wok-shell` owns the tooling that surfaces dead, missing, or orphan
+//! is done by scanning. `wok` owns the tooling that surfaces dead, missing, or orphan
 //! references; this crate only carries the names.
 //!
 //! Each reference newtype serializes transparently as its underlying string, so authored JSON

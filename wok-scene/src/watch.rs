@@ -8,7 +8,7 @@
 //! The watcher reports paths only. It does not interpret which file changed, classify the change,
 //! or decide what to reload - the game does that each frame after polling (see the HLD hot-reload
 //! data flow). wok-scene neither maps a path back to a chunk nor distinguishes a created file from
-//! a deleted one here; that belongs to wok-content and wok-shell.
+//! a deleted one here; that belongs to wok-content and wok.
 //!
 //! Determinism: the watcher is a dev/authoring hook driven by real filesystem events and wall-
 //! clock event delivery, so it is deliberately OUTSIDE the determinism contract the rest of

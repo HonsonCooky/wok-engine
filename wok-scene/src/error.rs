@@ -3,7 +3,7 @@
 //! `LoadError` is the load-side enum the brief names; it covers I/O failure, JSON parse
 //! failure, and in-file validation failures (e.g. a prefab whose `default_state` does not
 //! match any of its states). Validation here is strictly intra-file - cross-file resolution
-//! is the scanner's job in wok-content/wok-shell, not this crate's.
+//! is the scanner's job in wok-content/wok, not this crate's.
 //!
 //! `SaveError` is the symmetric save-side enum. The two are kept separate because the
 //! canon's preference is one narrow error per failure domain rather than a god-enum; load

@@ -4,7 +4,7 @@
 //! walks a chunk's placements in order, resolves each one's prefab state, and routes every shape
 //! by its `is_visible` / `is_hitbox` flags: solid placeholder (both) -> a visible item AND a
 //! hitbox; trigger volume (hitbox only) -> a trigger tagged with the placement's `InstanceId`;
-//! visual-only (visible only) -> a visible item; neither -> ignored (degenerate, wok-shell warns).
+//! visual-only (visible only) -> a visible item; neither -> ignored (degenerate, wok warns).
 //!
 //! Mesh replacement is at the state level: a resolved state with a `MeshRef` emits one mesh item
 //! at the placement transform in place of all its visible primitives. Hitboxes and triggers still
