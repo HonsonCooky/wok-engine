@@ -12,12 +12,12 @@ use crate::theme;
 const STATUS_BAR_HEIGHT: f32 = 26.0;
 
 /// Size of the hamburger button cell, in points.
-const HAMBURGER_CELL: egui::Vec2 = egui::vec2(30.0, 24.0);
+const HAMBURGER_CELL: egui::Vec2 = egui::vec2(30.0, 22.0);
 
-/// Font size for the hamburger glyph. The `nf-md-menu` ink is more compact than the nav-bar glyphs at
-/// a given font size, so it renders larger here to read as the same visual size as them (the nav icons
-/// use `icons::SIZE`).
-const HAMBURGER_GLYPH: f32 = 22.0;
+/// Font size for the hamburger glyph - its own knob, since the `nf-md-menu` ink fills the em
+/// differently from the nav glyphs. Currently the nav icons' `icons::SIZE` (16px); bump it if the
+/// hamburger should grow to read as the same visual size as them.
+const HAMBURGER_GLYPH: f32 = 16.0;
 
 /// The app-menu hamburger, drawn by the caller into the tab-bar row. A static `nf-md-menu` glyph for
 /// this slice; the menu it opens lands with the project-lifecycle and view actions. Painted dim, the

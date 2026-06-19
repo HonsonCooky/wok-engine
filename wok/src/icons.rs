@@ -16,8 +16,8 @@
 use std::sync::Arc;
 
 /// The standard chrome icon size in points (the small ~16px Zed-scale mark the handoff calls for).
-/// The nav-bar icons paint at this size; the hamburger paints a touch larger so its more compact
-/// glyph reads as the same visual size (see `menu::HAMBURGER_GLYPH`).
+/// The nav-bar icons paint at this size; the hamburger has its own knob (`menu::HAMBURGER_GLYPH`),
+/// since its glyph fills the em differently.
 pub const SIZE: f32 = 16.0;
 
 // The `nf-md-*` codepoints in use (Material Design Icons set). Names map to the Nerd Fonts cheat
