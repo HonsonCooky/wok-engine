@@ -12,15 +12,20 @@ use crate::theme;
 const STATUS_BAR_HEIGHT: f32 = 26.0;
 
 /// Size of the hamburger button cell, in points.
-const HAMBURGER_SIZE: egui::Vec2 = egui::vec2(30.0, 22.0);
+const HAMBURGER_CELL: egui::Vec2 = egui::vec2(30.0, 24.0);
+
+/// Font size for the hamburger glyph. The `nf-md-menu` ink is more compact than the nav-bar glyphs at
+/// a given font size, so it renders larger here to read as the same visual size as them (the nav icons
+/// use `icons::SIZE`).
+const HAMBURGER_GLYPH: f32 = 22.0;
 
 /// The app-menu hamburger, drawn by the caller into the tab-bar row. A static `nf-md-menu` glyph for
 /// this slice; the menu it opens lands with the project-lifecycle and view actions. Painted dim, the
 /// way an idle control reads on the surface.
 pub fn hamburger(ui: &mut egui::Ui) {
-    let (rect, _response) = ui.allocate_exact_size(HAMBURGER_SIZE, egui::Sense::hover());
+    let (rect, _response) = ui.allocate_exact_size(HAMBURGER_CELL, egui::Sense::hover());
     let color = theme::palette(ui.ctx()).text_dim;
-    crate::icons::paint(ui.painter(), rect, crate::icons::MENU, color);
+    crate::icons::paint(ui.painter(), rect, crate::icons::MENU, color, HAMBURGER_GLYPH);
 }
 
 /// The bottom status bar, within the view column only (the composition root shows the navigation
