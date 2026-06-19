@@ -180,7 +180,7 @@ fn icon_cell(ui: &mut egui::Ui, view: NavView, height: f32) {
         ui.painter().hline(rect.x_range(), rect.top(), egui::Stroke::new(2.0, p.accent));
     }
     let color = if active { p.accent } else { p.text_dim };
-    icons::paint(ui.painter(), rect, view.icon(), color, icons::SIZE);
+    icons::paint(ui.painter(), rect, view.icon(), color);
 }
 
 /// The vertical divider between the project group and the this-scene group: a short 1px rule, inset
@@ -226,7 +226,7 @@ fn tab_cell(ui: &mut egui::Ui, title: &str, active: bool) {
             ui.label(title);
             // The close affordance, the same Nerd Font family as the rest of the chrome, sized small
             // so it sits quietly beside the title rather than competing with it.
-            ui.label(egui::RichText::new(icons::CLOSE).size(11.0).color(p.text_dim));
+            ui.label(egui::RichText::new(icons::CLOSE).size(10.0).color(p.text_dim));
         });
     });
     if active {

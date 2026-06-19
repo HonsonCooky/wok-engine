@@ -15,9 +15,8 @@
 
 use std::sync::Arc;
 
-/// The standard chrome icon size in points (the small ~16px Zed-scale mark the handoff calls for).
-/// The nav-bar icons paint at this size; the hamburger has its own knob (`menu::HAMBURGER_GLYPH`),
-/// since its glyph fills the em differently.
+/// The chrome icon size in points (the small ~16px Zed-scale mark the handoff calls for). Every chrome
+/// icon - the hamburger and the nav-bar icons - paints at this one size.
 pub const SIZE: f32 = 16.0;
 
 // The `nf-md-*` codepoints in use (Material Design Icons set). Names map to the Nerd Fonts cheat
@@ -54,12 +53,10 @@ pub fn install_font(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Paint an icon glyph centred in `rect`, in `color`, at `size` points. The position is rounded to
-/// the pixel grid so the mark stays crisp. `size` is per-call because glyphs differ in how much of
-/// the em their ink fills: the compact `menu` glyph needs a larger size to read as the same visual
-/// size as the fuller nav glyphs.
-pub fn paint(painter: &egui::Painter, rect: egui::Rect, glyph: char, color: egui::Color32, size: f32) {
-    let galley = painter.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(size), color);
+/// Paint an icon glyph centred in `rect`, in `color`, at the chrome icon [`SIZE`]. The position is
+/// rounded to the pixel grid so the mark stays crisp.
+pub fn paint(painter: &egui::Painter, rect: egui::Rect, glyph: char, color: egui::Color32) {
+    let galley = painter.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(SIZE), color);
     let pos = (rect.center() - galley.size() * 0.5).round();
     painter.galley(pos, galley, color);
 }
