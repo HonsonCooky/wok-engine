@@ -71,9 +71,12 @@ pub fn palette(ctx: &egui::Context) -> &'static Palette {
     if ctx.style().visuals.dark_mode { &DARK } else { &LIGHT }
 }
 
-/// Apply the editor look. Styles both built-in themes from their palettes and follows the OS
-/// (`System`), so the chrome switches with the desktop.
+/// Apply the editor look. Styles both built-in themes from their palettes, registers the chrome icon
+/// font (so icon codepoints render through it), and follows the OS (`System`), so the chrome switches
+/// with the desktop. The one styling entry point both the live app and the snapshot test call, so the
+/// font lands on every context the chrome renders through.
 pub fn apply(ctx: &egui::Context) {
+    crate::icons::install_font(ctx);
     ctx.set_theme(egui::ThemePreference::System);
     style_theme(ctx, egui::Theme::Dark, &DARK);
     style_theme(ctx, egui::Theme::Light, &LIGHT);

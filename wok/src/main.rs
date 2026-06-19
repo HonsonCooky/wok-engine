@@ -15,6 +15,7 @@
 //! tracked window size - see designs/sharp-edges.md section 1.
 
 mod gui;
+mod icons;
 mod menu;
 mod theme;
 mod view;

@@ -14,6 +14,7 @@
 //! through `theme::palette`, so the chrome follows the OS light/dark.
 
 use crate::menu;
+use crate::icons;
 use crate::theme;
 
 /// Navigation-panel width in points (README shell layout: ~240px on the left).
@@ -37,14 +38,6 @@ const TAB_BAR_HEIGHT: f32 = 38.0;
 /// so the text is not jammed against the edge.
 const ROW_PAD: f32 = 10.0;
 
-/// Half-extent of an icon glyph's bounding box, in points (so a glyph spans ~12px): a small
-/// Zed-scale mark that sits centred in its cell with clear margin, rather than filling it.
-const GLYPH: f32 = 6.0;
-
-/// Stroke width for the hand-painted icon glyphs - light, so a 12px mark reads as a small icon
-/// rather than a heavy blob.
-const GLYPH_STROKE: f32 = 1.25;
-
 /// The navigation views, one per icon in the bottom bar, split into the two scope groups the divider
 /// separates: the project group (Scenes, Prefabs) is the same whichever scene is open; the this-scene
 /// group (Instances, Lighting) is bound to the open scene. Static for this slice - `ACTIVE` is fixed
@@ -66,6 +59,16 @@ impl NavView {
             NavView::Prefabs => "Prefabs",
             NavView::Instances => "Instances",
             NavView::Lighting => "Lighting",
+        }
+    }
+
+    /// The Nerd Font icon for this view's bottom-bar cell.
+    fn icon(self) -> char {
+        match self {
+            NavView::Scenes => icons::LAYERS,
+            NavView::Prefabs => icons::CUBE_OUTLINE,
+            NavView::Instances => icons::LIST_BULLETED,
+            NavView::Lighting => icons::WEATHER_SUNNY,
         }
     }
 }
@@ -164,8 +167,9 @@ fn icon_bar(ui: &mut egui::Ui) {
         });
 }
 
-/// One icon cell: a glyph centred in a full-height cell. The active view's cell gets an accent tint
-/// behind it and a 2px accent top-line at the bar's top edge; the rest paint their glyph dim.
+/// One icon cell: the view's Nerd Font glyph centred in a full-height cell. The active view's cell
+/// gets an accent tint behind it and a 2px accent top-line at the bar's top edge, and its glyph is the
+/// accent colour; the rest sit dim.
 fn icon_cell(ui: &mut egui::Ui, view: NavView, height: f32) {
     let p = theme::palette(ui.ctx());
     let active = view == ACTIVE;
@@ -176,7 +180,7 @@ fn icon_cell(ui: &mut egui::Ui, view: NavView, height: f32) {
         ui.painter().hline(rect.x_range(), rect.top(), egui::Stroke::new(2.0, p.accent));
     }
     let color = if active { p.accent } else { p.text_dim };
-    paint_glyph(ui.painter(), rect.center(), color, view);
+    icons::paint(ui.painter(), rect, view.icon(), color);
 }
 
 /// The vertical divider between the project group and the this-scene group: a short 1px rule, inset
@@ -186,42 +190,6 @@ fn divider(ui: &mut egui::Ui, height: f32) {
     let (rect, _response) = ui.allocate_exact_size(egui::vec2(9.0, height), egui::Sense::hover());
     let inset = height * 0.28;
     ui.painter().vline(rect.center().x, rect.top() + inset..=rect.bottom() - inset, egui::Stroke::new(1.0, border));
-}
-
-/// Paint a view's placeholder glyph centred at `c` in `color`. Simple hand-drawn marks - layers, box,
-/// list, sun - distinct enough to read the four views apart; final iconography is a later slice.
-fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, color: egui::Color32, view: NavView) {
-    let s = egui::Stroke::new(GLYPH_STROKE, color);
-    let g = GLYPH;
-    match view {
-        // Scenes: two offset square outlines, a stack of layers.
-        NavView::Scenes => {
-            painter.rect_stroke(square(egui::pos2(c.x + 1.5, c.y - 1.5), g - 1.5), 1.0, s, egui::StrokeKind::Middle);
-            painter.rect_stroke(square(egui::pos2(c.x - 1.5, c.y + 1.5), g - 1.5), 1.0, s, egui::StrokeKind::Middle);
-        }
-        // Prefabs: one square outline, a box.
-        NavView::Prefabs => {
-            painter.rect_stroke(square(c, g), 1.0, s, egui::StrokeKind::Middle);
-        }
-        // Instances: three horizontal lines, a list.
-        NavView::Instances => {
-            for dy in [-(g - 1.0), 0.0, g - 1.0] {
-                painter.hline(c.x - g..=c.x + g, c.y + dy, s);
-            }
-        }
-        // Lighting: a small circle with cardinal rays, a sun.
-        NavView::Lighting => {
-            painter.circle_stroke(c, g - 3.0, s);
-            for dir in [egui::vec2(0.0, -1.0), egui::vec2(0.0, 1.0), egui::vec2(-1.0, 0.0), egui::vec2(1.0, 0.0)] {
-                painter.line_segment([c + dir * (g - 2.0), c + dir * g], s);
-            }
-        }
-    }
-}
-
-/// A square `Rect` of half-extent `r` centred at `c`.
-fn square(c: egui::Pos2, r: f32) -> egui::Rect {
-    egui::Rect::from_center_size(c, egui::vec2(r * 2.0, r * 2.0))
 }
 
 /// The tab bar over the view column: the app-menu hamburger at the left, then one placeholder tab.
@@ -256,7 +224,9 @@ fn tab_cell(ui: &mut egui::Ui, title: &str, active: bool) {
             let title = egui::RichText::new(title).color(color);
             let title = if active { title.strong() } else { title };
             ui.label(title);
-            ui.label(egui::RichText::new("x").color(p.text_dim).small());
+            // The close affordance, the same Nerd Font family as the rest of the chrome, sized to sit
+            // with the title rather than at the full icon size.
+            ui.label(egui::RichText::new(icons::CLOSE).size(13.0).color(p.text_dim));
         });
     });
     if active {

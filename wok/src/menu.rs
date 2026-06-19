@@ -14,26 +14,13 @@ const STATUS_BAR_HEIGHT: f32 = 26.0;
 /// Size of the hamburger button cell, in points.
 const HAMBURGER_SIZE: egui::Vec2 = egui::vec2(30.0, 22.0);
 
-/// Half-width of the painted hamburger bars, and the vertical gap between them.
-const HAMBURGER_HALF: f32 = 7.0;
-const HAMBURGER_GAP: f32 = 4.0;
-
-/// The app-menu hamburger, drawn by the caller into the tab-bar row. A static three-bar glyph for
+/// The app-menu hamburger, drawn by the caller into the tab-bar row. A static `nf-md-menu` glyph for
 /// this slice; the menu it opens lands with the project-lifecycle and view actions. Painted dim, the
 /// way an idle control reads on the surface.
 pub fn hamburger(ui: &mut egui::Ui) {
     let (rect, _response) = ui.allocate_exact_size(HAMBURGER_SIZE, egui::Sense::hover());
     let color = theme::palette(ui.ctx()).text_dim;
-    paint_hamburger(ui.painter(), rect, color);
-}
-
-/// Paint the three-bar hamburger glyph centred in `rect`.
-fn paint_hamburger(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
-    let c = rect.center();
-    let stroke = egui::Stroke::new(1.5, color);
-    for dy in [-HAMBURGER_GAP, 0.0, HAMBURGER_GAP] {
-        painter.hline(c.x - HAMBURGER_HALF..=c.x + HAMBURGER_HALF, c.y + dy, stroke);
-    }
+    crate::icons::paint(ui.painter(), rect, crate::icons::MENU, color);
 }
 
 /// The bottom status bar, within the view column only (the composition root shows the navigation
