@@ -37,8 +37,13 @@ const TAB_BAR_HEIGHT: f32 = 38.0;
 /// so the text is not jammed against the edge.
 const ROW_PAD: f32 = 10.0;
 
-/// Half-extent of an icon glyph's bounding box, in points (so a glyph spans ~14px).
-const GLYPH: f32 = 7.0;
+/// Half-extent of an icon glyph's bounding box, in points (so a glyph spans ~12px): a small
+/// Zed-scale mark that sits centred in its cell with clear margin, rather than filling it.
+const GLYPH: f32 = 6.0;
+
+/// Stroke width for the hand-painted icon glyphs - light, so a 12px mark reads as a small icon
+/// rather than a heavy blob.
+const GLYPH_STROKE: f32 = 1.25;
 
 /// The navigation views, one per icon in the bottom bar, split into the two scope groups the divider
 /// separates: the project group (Scenes, Prefabs) is the same whichever scene is open; the this-scene
@@ -86,32 +91,40 @@ pub fn nav_panel(ctx: &egui::Context) {
         .exact_width(NAV_PANEL_WIDTH)
         .frame(flush_panel(ctx))
         .show(ctx, |ui| {
-            // The icon bar pins to the foot first (a nested bottom panel claims the bottom of the side
-            // panel); the header and body then fill what remains above it.
-            icon_bar(ui);
+            // The header (top) and icon bar (foot) are nested panels claiming opposite edges; the body
+            // then fills what remains between them. The header claims the top first so it sits at the
+            // same y as the tab bar (see nav_header).
             nav_header(ui);
+            icon_bar(ui);
             nav_body(ui);
         });
 }
 
 /// The panel header: a single row naming the active view (the handoff's text_bright, weight-600
 /// title) with the view's one contextual control on the right - a dim placeholder here, inert until
-/// the views are built. A full-bleed hairline beneath separates it from the body.
+/// the views are built. Its height is exactly the tab-bar height (driven off `TAB_BAR_HEIGHT`, not a
+/// separate value), so the header and the tab bar read as one band across the top with flush bottom
+/// edges; a bottom hairline at the header's foot lands on that shared edge.
 fn nav_header(ui: &mut egui::Ui) {
-    let p = theme::palette(ui.ctx());
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.add_space(ROW_PAD);
-        ui.label(egui::RichText::new(ACTIVE.title()).color(p.text_bright).strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(ROW_PAD);
-            // The contextual-control slot (for Instances, a group-by / sort toggle). A dim placeholder
-            // for now; the real control lands with the view.
-            ui.label(egui::RichText::new("A-Z").color(p.text_dim).small());
+    egui::TopBottomPanel::top("wok_nav_header")
+        .exact_height(TAB_BAR_HEIGHT)
+        .frame(flush_panel(ui.ctx()))
+        .show_inside(ui, |ui| {
+            let p = theme::palette(ui.ctx());
+            // Bottom hairline at the header's foot, on the same y as the tab bar's bottom edge.
+            let bottom = ui.max_rect().bottom();
+            ui.painter().hline(ui.max_rect().x_range(), bottom, egui::Stroke::new(1.0, p.border));
+            ui.horizontal_centered(|ui| {
+                ui.add_space(ROW_PAD);
+                ui.label(egui::RichText::new(ACTIVE.title()).color(p.text_bright).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(ROW_PAD);
+                    // The contextual-control slot (for Instances, a group-by / sort toggle). A dim
+                    // placeholder for now; the real control lands with the view.
+                    ui.label(egui::RichText::new("A-Z").color(p.text_dim).small());
+                });
+            });
         });
-    });
-    ui.add_space(8.0);
-    full_bleed_hairline(ui);
 }
 
 /// The panel body: wholly the active view in a built editor (the Instances tree, etc.); a dim
@@ -178,13 +191,13 @@ fn divider(ui: &mut egui::Ui, height: f32) {
 /// Paint a view's placeholder glyph centred at `c` in `color`. Simple hand-drawn marks - layers, box,
 /// list, sun - distinct enough to read the four views apart; final iconography is a later slice.
 fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, color: egui::Color32, view: NavView) {
-    let s = egui::Stroke::new(1.5, color);
+    let s = egui::Stroke::new(GLYPH_STROKE, color);
     let g = GLYPH;
     match view {
         // Scenes: two offset square outlines, a stack of layers.
         NavView::Scenes => {
-            painter.rect_stroke(square(egui::pos2(c.x + 2.0, c.y - 2.0), g - 2.0), 1.0, s, egui::StrokeKind::Middle);
-            painter.rect_stroke(square(egui::pos2(c.x - 2.0, c.y + 2.0), g - 2.0), 1.0, s, egui::StrokeKind::Middle);
+            painter.rect_stroke(square(egui::pos2(c.x + 1.5, c.y - 1.5), g - 1.5), 1.0, s, egui::StrokeKind::Middle);
+            painter.rect_stroke(square(egui::pos2(c.x - 1.5, c.y + 1.5), g - 1.5), 1.0, s, egui::StrokeKind::Middle);
         }
         // Prefabs: one square outline, a box.
         NavView::Prefabs => {
@@ -200,7 +213,7 @@ fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, color: egui::Color32, vie
         NavView::Lighting => {
             painter.circle_stroke(c, g - 3.0, s);
             for dir in [egui::vec2(0.0, -1.0), egui::vec2(0.0, 1.0), egui::vec2(-1.0, 0.0), egui::vec2(1.0, 0.0)] {
-                painter.line_segment([c + dir * (g - 2.0), c + dir * (g + 1.0)], s);
+                painter.line_segment([c + dir * (g - 2.0), c + dir * g], s);
             }
         }
     }
@@ -209,12 +222,6 @@ fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, color: egui::Color32, vie
 /// A square `Rect` of half-extent `r` centred at `c`.
 fn square(c: egui::Pos2, r: f32) -> egui::Rect {
     egui::Rect::from_center_size(c, egui::vec2(r * 2.0, r * 2.0))
-}
-
-/// Paint a 1px hairline in the border colour across the panel's full width at the current cursor.
-fn full_bleed_hairline(ui: &mut egui::Ui) {
-    let border = theme::palette(ui.ctx()).border;
-    ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), egui::Stroke::new(1.0, border));
 }
 
 /// The tab bar over the view column: the app-menu hamburger at the left, then one placeholder tab.
