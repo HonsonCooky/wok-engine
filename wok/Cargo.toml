@@ -37,10 +37,26 @@ uninlined_format_args             = "allow"
 unnecessary_wraps                 = "allow"
 unused_self                       = "allow"
 
-# Cleared to a shell for the editor rebuild. Only the window/GPU/frame-loop substrate is depended on
-# now; the editor re-adds the engine libraries it composes (wok-scene, wok-content, wok-mesh,
-# wok-render, wok-light) and the egui chrome (egui / egui-wgpu / egui-winit 0.31, rfd, and the
-# egui_kittest + accesskit snapshot dev-dependencies) as each is used. See designs/sharp-edges.md for
-# the dependency set and the snapshot-harness feature-unification gotcha.
+# The window/GPU/frame-loop substrate plus the egui chrome (egui / egui-wgpu / egui-winit 0.31, the
+# line built against the wgpu 24 and winit 0.30 wok-platform pins). egui is a wok-application
+# dependency only; no engine crate may depend on it. The engine libraries the editor composes
+# (wok-scene, wok-content, wok-mesh, wok-render, wok-light) and rfd return as each authoring surface
+# is rebuilt; this slice is the static shell framing, so it needs only the substrate and egui.
 [dependencies]
 wok-platform = { path = "../wok-platform" }
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+
+# Dev-only: renders the chrome through the view functions to a PNG for the snapshot regression test
+# (tests/snapshots). The wgpu feature draws via a headless GPU (the same wgpu 24 the workspace pins);
+# snapshot brings the dify image-diff. Matched to egui 0.31, never a runtime or engine dependency.
+#
+# kittest queries the accessibility tree, so it turns on egui's accesskit feature. Cargo's feature
+# unification then expects egui-winit's matching accesskit path to be compiled too; enabling it here,
+# in dev-dependencies, satisfies the test build without reaching the shipped editor (resolver 3 keeps
+# dev-dependency features out of a normal `cargo build`). Do not remove it, or the snapshot build
+# breaks with an obscure feature-unification error (see designs/sharp-edges.md section 3).
+[dev-dependencies]
+egui_kittest = { version = "0.31", features = ["wgpu", "snapshot"] }
+egui-winit = { workspace = true, features = ["accesskit"] }
