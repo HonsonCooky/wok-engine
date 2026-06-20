@@ -15,9 +15,11 @@
 
 use std::sync::Arc;
 
-/// The chrome icon size in points (the small ~16px Zed-scale mark the handoff calls for). Every chrome
-/// icon - the hamburger and the nav-bar icons - paints at this one size.
-pub const SIZE: f32 = 16.0;
+/// The chrome icon font size in points. Nerd Font glyphs fill the full em (unlike text, which fills
+/// ~70%), so this reads visually larger than text of the same nominal size; keep it small so the icons
+/// sit at the weight of the surrounding UI text rather than towering over it. Every chrome icon - the
+/// hamburger and the nav-bar icons - paints at this one size.
+pub const SIZE: f32 = 12.0;
 
 // The `nf-md-*` codepoints in use (Material Design Icons set). Names map to the Nerd Fonts cheat
 // sheet; keep this list to only the glyphs the chrome actually draws.
