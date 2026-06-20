@@ -1,11 +1,13 @@
 //! wok: the engine's reference editor application.
 //!
-//! This is the static shell framing of the editor rebuild (see designs/editor-design.md "The shell"
-//! and designs/design_handoff_editor_surfaces): the egui chrome over the platform frame loop, with the
-//! five regions - the full-height navigation panel and its bottom icon bar, the tab bar with the
-//! app-menu hamburger, the editor well, and the status bar - drawn as themed placeholders through one
-//! composition root (`view::chrome`). No interactivity and no model: the region behaviors, the
-//! model + action seam, the menu entries, and the per-view content are later slices.
+//! This is the editor shell over the platform frame loop (see designs/editor-design.md "The shell"
+//! and designs/design_handoff_editor_surfaces): the egui chrome's five regions - the full-height
+//! navigation panel and its bottom icon bar, the tab bar with the app-menu hamburger, the editor well,
+//! and the status bar - drawn through one composition root (`view::chrome`). The chrome reads a
+//! [`Model`] and emits [`Action`](action::Action)s; this frame loop drains them through the single
+//! writer, `action::handle` (see `crate::action`), so the model has exactly one mutation point. This
+//! slice wires that seam for one action - the icon bar switching the active navigation view; the
+//! tab/dock/menu behaviors and the per-view content are later slices.
 //!
 //! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish`. Each frame runs the
 //! egui pass (building the chrome), clears the surface to the editor background, then paints the chrome
@@ -14,25 +16,30 @@
 //! snapshot. Sizing comes from `Frame::size()` (the acquired surface texture), never a separately
 //! tracked window size - see designs/sharp-edges.md section 1.
 
+mod action;
 mod gui;
 mod icons;
 mod menu;
+mod model;
 mod theme;
 mod view;
 mod workspace;
 
 use gui::Gui;
+use model::Model;
 use wok_platform::winit::event::WindowEvent;
 use wok_platform::{App, Desc, FrameCtx, Platform, gfx};
 
 struct Editor {
     /// egui integration, built once a GPU device exists (`init`).
     gui: Option<Gui>,
+    /// The editor state the chrome reads and the action layer writes - the single writer's model.
+    model: Model,
 }
 
 impl Editor {
     fn new() -> Editor {
-        Editor { gui: None }
+        Editor { gui: None, model: Model::default() }
     }
 }
 
@@ -54,9 +61,17 @@ impl App for Editor {
 
     fn frame(&mut self, ctx: &mut FrameCtx) {
         let Some(gui) = self.gui.as_mut() else { return };
+        let model = &mut self.model;
 
-        // Build the chrome for this frame. Static: the regions take no input and emit no actions yet.
-        let output = gui.run(&ctx.platform.window, view::chrome);
+        // Build the chrome for this frame, reading the model. The regions emit actions into a buffer
+        // rather than mutating the model inside their egui closures.
+        let mut actions = Vec::new();
+        let output = gui.run(&ctx.platform.window, |egui_ctx| actions.extend(view::chrome(egui_ctx, model)));
+        // Drain the buffer through the single writer: click -> Action -> handle, and the next frame
+        // re-renders the new state. This is the one path the model changes by.
+        for action in actions {
+            action::handle(model, action);
+        }
         // The editor well is a transparent egui panel, so the surface clear behind it is the well's
         // colour: clear to the active theme's editor background. The surface is sRGB and wgpu reads the
         // clear value as linear, so decode through Rgba.

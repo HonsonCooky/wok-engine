@@ -8,13 +8,17 @@
 //! in the test) shows through it as the empty well; the per-context surface lands there in later
 //! slices.
 //!
-//! Static framing only: the views, the tab, and the icon bar take no input and emit no actions. The
-//! region behaviors (switching the nav view, opening and closing tabs, docking and toggling the
-//! panel) and the model + action seam they would drive are the next slices. Every colour is read
-//! through `theme::palette`, so the chrome follows the OS light/dark.
+//! The icon bar reads the active navigation view from the model and emits `Action::SelectNavView` on a
+//! click, switching the view through the action seam (`crate::action::handle`); the header label and
+//! the placeholder body track the active view too. The rest is still static framing - the tab does not
+//! switch or close, and the panel does not dock or toggle; those behaviors and the actions they need
+//! are later slices. Every colour is read through `theme::palette`, so the chrome follows the OS
+//! light/dark.
 
-use crate::menu;
+use crate::action::Action;
 use crate::icons;
+use crate::menu;
+use crate::model::{Model, NavView};
 use crate::theme;
 
 /// Navigation-panel width in points (README shell layout: ~240px on the left).
@@ -38,44 +42,18 @@ const TAB_BAR_HEIGHT: f32 = 38.0;
 /// so the text is not jammed against the edge.
 const ROW_PAD: f32 = 10.0;
 
-/// The navigation views, one per icon in the bottom bar, split into the two scope groups the divider
-/// separates: the project group (Scenes, Prefabs) is the same whichever scene is open; the this-scene
-/// group (Instances, Lighting) is bound to the open scene. Static for this slice - `ACTIVE` is fixed
-/// and the header names it; clicking an icon does not switch the view yet (the next slice adds that
-/// and the `Action::SelectNavView` seam).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum NavView {
-    Scenes,
-    Prefabs,
-    Instances,
-    Lighting,
-}
-
-impl NavView {
-    /// The header title for this view.
-    fn title(self) -> &'static str {
-        match self {
-            NavView::Scenes => "Scenes",
-            NavView::Prefabs => "Prefabs",
-            NavView::Instances => "Instances",
-            NavView::Lighting => "Lighting",
-        }
-    }
-
-    /// The Nerd Font icon for this view's bottom-bar cell.
-    fn icon(self) -> char {
-        match self {
-            NavView::Scenes => icons::LAYERS,
-            NavView::Prefabs => icons::CUBE_OUTLINE,
-            NavView::Instances => icons::LIST_BULLETED,
-            NavView::Lighting => icons::WEATHER_SUNNY,
-        }
+/// The Nerd Font glyph for a navigation view's bottom-bar cell. Which icon-font codepoint a view draws
+/// is a chrome concern, so the mapping lives here with the view rather than on `NavView` in the model
+/// (whose `title` carries the view's canonical name). The grouping into project (Scenes, Prefabs) and
+/// this-scene (Instances, Lighting) is the bar's layout, in `icon_bar`.
+fn nav_icon(view: NavView) -> char {
+    match view {
+        NavView::Scenes => icons::LAYERS,
+        NavView::Prefabs => icons::CUBE_OUTLINE,
+        NavView::Instances => icons::LIST_BULLETED,
+        NavView::Lighting => icons::WEATHER_SUNNY,
     }
 }
-
-/// The view shown active in this static slice: Instances, the open scene's placements, the design's
-/// default landing view.
-const ACTIVE: NavView = NavView::Instances;
 
 /// A themed panel frame with no inner margin: the fill still reaches the panel edge (keeping the
 /// surface colour, unlike `Frame::NONE` which would drop the fill and expose the backdrop), but
@@ -88,7 +66,7 @@ fn flush_panel(ctx: &egui::Context) -> egui::Frame {
 /// The full-height navigation panel on the left: a header naming the active view, a placeholder body,
 /// and the bottom icon bar at the foot. Shown before the central panel (by the composition root) so
 /// it claims the full-height left strip; the view column fills what remains.
-pub fn nav_panel(ctx: &egui::Context) {
+pub fn nav_panel(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
     egui::SidePanel::left("wok_nav_panel")
         .resizable(false)
         .exact_width(NAV_PANEL_WIDTH)
@@ -96,10 +74,11 @@ pub fn nav_panel(ctx: &egui::Context) {
         .show(ctx, |ui| {
             // The header (top) and icon bar (foot) are nested panels claiming opposite edges; the body
             // then fills what remains between them. The header claims the top first so it sits at the
-            // same y as the tab bar (see nav_header).
-            nav_header(ui);
-            icon_bar(ui);
-            nav_body(ui);
+            // same y as the tab bar (see nav_header). The icon bar is the only region that emits
+            // actions this slice; the header and body read the active view to label themselves.
+            nav_header(ui, model);
+            icon_bar(ui, model, actions);
+            nav_body(ui, model);
         });
 }
 
@@ -108,7 +87,7 @@ pub fn nav_panel(ctx: &egui::Context) {
 /// the views are built. Its height is exactly the tab-bar height (driven off `TAB_BAR_HEIGHT`, not a
 /// separate value), so the header and the tab bar read as one band across the top with flush bottom
 /// edges; a bottom hairline at the header's foot lands on that shared edge.
-fn nav_header(ui: &mut egui::Ui) {
+fn nav_header(ui: &mut egui::Ui, model: &Model) {
     egui::TopBottomPanel::top("wok_nav_header")
         .exact_height(TAB_BAR_HEIGHT)
         .frame(flush_panel(ui.ctx()))
@@ -119,7 +98,7 @@ fn nav_header(ui: &mut egui::Ui) {
             ui.painter().hline(ui.max_rect().x_range(), bottom, egui::Stroke::new(1.0, p.border));
             ui.horizontal_centered(|ui| {
                 ui.add_space(ROW_PAD);
-                ui.label(egui::RichText::new(ACTIVE.title()).color(p.text_bright).strong());
+                ui.label(egui::RichText::new(model.shell.active_nav().title()).color(p.text_bright).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(ROW_PAD);
                     // The contextual-control slot (for Instances, a group-by / sort toggle). A dim
@@ -131,21 +110,24 @@ fn nav_header(ui: &mut egui::Ui) {
 }
 
 /// The panel body: wholly the active view in a built editor (the Instances tree, etc.); a dim
-/// placeholder here, since those views are later slices.
-fn nav_body(ui: &mut egui::Ui) {
+/// placeholder here, since those views are later slices. It names the active view so switching is
+/// visible in the body as well as the header and the icon accent.
+fn nav_body(ui: &mut egui::Ui, model: &Model) {
     let dim = theme::palette(ui.ctx()).text_dim;
+    let title = model.shell.active_nav().title();
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.add_space(ROW_PAD);
-        ui.label(egui::RichText::new("(view content lands here)").color(dim).italics());
+        ui.label(egui::RichText::new(format!("{title} - view content lands here")).color(dim).italics());
     });
 }
 
 /// The bottom icon bar at the panel foot (handoff view 2): a Zed-style row of view icons, split by a
 /// vertical divider into the project group (Scenes, Prefabs) and the this-scene group (Instances,
 /// Lighting). The active view's icon carries a 2px accent top-line and an accent tint; the rest sit
-/// dim. A top hairline separates the bar from the body above. Static - clicking does not switch views.
-fn icon_bar(ui: &mut egui::Ui) {
+/// dim. A top hairline separates the bar from the body above. A click on a cell emits
+/// `Action::SelectNavView`, switching the active view through the action seam.
+fn icon_bar(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
     let border = theme::palette(ui.ctx()).border;
     egui::TopBottomPanel::bottom("wok_nav_icon_bar")
         .exact_height(ICON_BAR_HEIGHT)
@@ -158,29 +140,34 @@ fn icon_bar(ui: &mut egui::Ui) {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 ui.add_space(8.0);
-                icon_cell(ui, NavView::Scenes, height);
-                icon_cell(ui, NavView::Prefabs, height);
+                icon_cell(ui, model, NavView::Scenes, height, actions);
+                icon_cell(ui, model, NavView::Prefabs, height, actions);
                 divider(ui, height);
-                icon_cell(ui, NavView::Instances, height);
-                icon_cell(ui, NavView::Lighting, height);
+                icon_cell(ui, model, NavView::Instances, height, actions);
+                icon_cell(ui, model, NavView::Lighting, height, actions);
             });
         });
 }
 
-/// One icon cell: the view's Nerd Font glyph centred in a full-height cell. The active view's cell
-/// gets an accent tint behind it and a 2px accent top-line at the bar's top edge, and its glyph is the
-/// accent colour; the rest sit dim.
-fn icon_cell(ui: &mut egui::Ui, view: NavView, height: f32) {
+/// One icon cell: the view's Nerd Font glyph centred in a full-height cell. The active view (per
+/// `model.shell.active_nav`) gets an accent tint behind it and a 2px accent top-line at the bar's top
+/// edge, and its glyph is the accent colour; the rest sit dim. A click emits
+/// `Action::SelectNavView(view)` - the one way the active view changes (the view never mutates the
+/// model itself).
+fn icon_cell(ui: &mut egui::Ui, model: &Model, view: NavView, height: f32, actions: &mut Vec<Action>) {
     let p = theme::palette(ui.ctx());
-    let active = view == ACTIVE;
-    let (rect, _response) = ui.allocate_exact_size(egui::vec2(ICON_CELL, height), egui::Sense::hover());
+    let active = view == model.shell.active_nav();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ICON_CELL, height), egui::Sense::click());
+    if response.clicked() {
+        actions.push(Action::SelectNavView(view));
+    }
     if active {
         let tint = egui::Color32::from_rgba_unmultiplied(p.accent.r(), p.accent.g(), p.accent.b(), 0x33);
         ui.painter().rect_filled(rect, 0.0, tint);
         ui.painter().hline(rect.x_range(), rect.top(), egui::Stroke::new(2.0, p.accent));
     }
     let color = if active { p.accent } else { p.text_dim };
-    icons::paint(ui.painter(), rect, view.icon(), color);
+    icons::paint(ui.painter(), rect, nav_icon(view), color);
 }
 
 /// The vertical divider between the project group and the this-scene group: a short 1px rule, inset
