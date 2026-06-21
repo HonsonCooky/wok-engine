@@ -68,17 +68,9 @@ const TUNING_PATH: &str = "taste/tuning.json";
 /// advice attached: taste never generates content, so the editor has to have run first.
 fn start(args: &[String]) -> Result<app::TasteApp, Box<dyn Error>> {
     let root = cli::parse_args(args)?;
-    let paths = content::ContentPaths::new(root);
+    let layout = wok_scene::ContentLayout::new(root);
 
-    if !paths.scene().exists() {
-        return Err(format!(
-            "no scene at {}; run the wok editor first to generate content",
-            paths.scene().display()
-        )
-        .into());
-    }
-
-    let loaded = content::load_all(&paths)?;
+    let loaded = content::load_all(&layout)?;
     println!(
         "taste: scene {:?}: {} chunk(s), {} prefab(s)",
         loaded.scene.name,
