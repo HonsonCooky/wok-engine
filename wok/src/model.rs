@@ -1,15 +1,22 @@
-//! The editor model: the shell layout state - everything the action layer writes and the view reads.
+//! The editor model: the open project, the recent-projects list, and the shell layout state -
+//! everything the action layer writes and the view reads.
 //!
-//! [`Model`] holds the [`Shell`] state (the active navigation view, plus the navigation panel's
-//! visibility and dock side). It is the single value `action::handle` mutates and the view renders
-//! from. Free of egui and the filesystem so the shell logic is unit testable without a window, and so
-//! the chrome reads it the same way live and in the snapshot test.
+//! [`Model`] holds the open [`Project`](crate::project::Project) (or `None`), the persisted
+//! [`Recents`](crate::recent::Recents), and the [`Shell`] state (the active navigation view, plus the
+//! navigation panel's visibility and dock side). It is the single value `action::handle` mutates and
+//! the view renders from. Free of egui and the filesystem so the shell logic is unit testable without
+//! a window, and so the chrome reads it the same way live and in the snapshot test - the disk I/O for
+//! opening a project and persisting recents lives in `crate::project` / `crate::recent`, called from
+//! the frame loop, never here.
 //!
 //! Single writer: `Shell`'s state is private and changes only through the `pub(crate)` mutators here,
 //! which `crate::action::handle` calls. The view reads through the `pub` queries and never mutates -
 //! it emits an [`Action`](crate::action::Action) instead. That seam is what later makes undo and redo
 //! possible; today it carries the navigation actions - the active view, the panel's visibility, and
-//! its dock side.
+//! its dock side - plus the project lifecycle (open, open recent, close).
+
+use crate::project::Project;
+use crate::recent::Recents;
 
 /// The navigation views, one per icon in the panel's bottom bar, split into the two scope groups the
 /// divider separates: the project group (Scenes, Prefabs) is the same whichever scene is open; the
@@ -47,12 +54,20 @@ pub enum NavSide {
     Right,
 }
 
-/// The editor's top-level state: how the shell around the content is arranged.
+/// The editor's top-level state: what project is open, the recent-projects list, and how the shell
+/// around the content is arranged.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Model {
-    /// The shell layout: the active navigation view, the panel's visibility and dock side. Tabs and
-    /// the project lifecycle return in later slices.
+    /// The open project (a content-root folder), or `None` when none is open. Set by the single
+    /// writer after the frame loop validates the folder (`crate::project`, `crate::action`); the
+    /// chrome reads it for the window title and the status bar.
+    pub project: Option<Project>,
+    /// The shell layout: the active navigation view, the panel's visibility and dock side. Tabs
+    /// return with the content bite.
     pub shell: Shell,
+    /// The recently opened projects (most-recent first), persisted across runs. Seeded from disk at
+    /// startup and written back by the action layer when it changes (`crate::recent`).
+    pub recents: Recents,
 }
 
 /// The shell layout state: the active navigation view, whether the navigation panel is visible, and
@@ -151,5 +166,14 @@ mod tests {
         assert_eq!(shell.nav_side(), NavSide::Right);
         shell.set_nav_side(NavSide::Left);
         assert_eq!(shell.nav_side(), NavSide::Left);
+    }
+
+    #[test]
+    fn a_default_model_has_no_project_and_no_recents() {
+        // The editor starts with nothing open and an empty MRU list; the startup edge then seeds
+        // recents from disk and may reopen the last project (`crate::main`).
+        let model = Model::default();
+        assert!(model.project.is_none());
+        assert!(model.recents.is_empty());
     }
 }

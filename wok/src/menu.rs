@@ -3,13 +3,19 @@
 //! The OS owns the title bar (`crate::main`), so the editor's menu is a single hamburger button at
 //! the left of the tab-bar row - always visible, since the tab bar always is, unlike the toggleable
 //! navigation panel (Zed's grammar, not a horizontal menu bar). The button opens an app-menu with
-//! File, View, Run, and Help; this slice wires View (it drives the navigation panel - show/hide and
-//! dock side) and renders File / Run / Help present-but-disabled until their own slices. Like all the
-//! view, the menu reads the model and emits actions; `crate::action::handle` is the single writer.
-//! Every colour is read through `theme::palette`, so the chrome follows the OS light/dark.
+//! File, View, Run, and Help; this slice wires File (the project lifecycle - Open Project via the
+//! native folder picker, Open Recent from the persisted list, Close Project) and View (the navigation
+//! panel - show/hide and dock side), and renders Run / Help present-but-disabled until their own
+//! slices. Like all the view, the menu reads the model and emits actions; `crate::action::handle` is
+//! the single writer. The one side effect at this edge is the folder picker, run synchronously inside
+//! the Open Project handler - it produces the path the [`Action::OpenProject`] carries, and the frame
+//! loop validates the folder. Every colour is read through `theme::palette`, so the chrome follows the
+//! OS light/dark.
 
 use crate::action::Action;
 use crate::model::{Model, NavSide, Shell};
+use crate::project::{self, Project};
+use crate::recent::Recents;
 use crate::theme;
 
 /// Status-bar height in points (README shell layout): one row of small text plus breathing room.
@@ -17,6 +23,11 @@ const STATUS_BAR_HEIGHT: f32 = 26.0;
 
 /// Size of the hamburger button cell, in points.
 const HAMBURGER_CELL: egui::Vec2 = egui::vec2(30.0, 22.0);
+
+/// Warning text for a surfaced failure (a failed project open). A muted red, fixed rather than themed:
+/// it reads against both the light and dark status-bar surface, and a single transient notice does not
+/// earn a per-theme palette entry.
+const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(0xd0, 0x5a, 0x4a);
 
 /// The app-menu hamburger, drawn by the caller into the tab-bar row. Opens a menu (File / View / Run
 /// / Help) on click; only View is wired this slice, the rest render present-but-disabled. The
@@ -30,7 +41,7 @@ pub fn hamburger(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
     let response = egui::menu::menu_custom_button(ui, button, |ui| {
         // Let items size to their text instead of wrapping in a narrow menu.
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        disabled_item(ui, "File");
+        file_menu(ui, model.project.as_ref(), &model.recents, actions);
         view_menu(ui, &model.shell, actions);
         disabled_item(ui, "Run");
         disabled_item(ui, "Help");
@@ -41,6 +52,54 @@ pub fn hamburger(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
     let p = theme::palette(ui.ctx());
     let color = if response.hovered() { p.text_bright } else { p.text_dim };
     crate::icons::paint(ui.painter(), response.rect, crate::icons::MENU, color);
+}
+
+/// The File menu: Open Project (the native folder picker), Open Recent (the persisted MRU list), and
+/// Close Project. Close Project is disabled with no project open, and Open Recent is disabled with an
+/// empty list, so the menu never offers an action that would do nothing. Creating a project and Save
+/// return with the content bite. The picker is the one side effect, run here at the view edge - it
+/// produces the path the [`Action::OpenProject`] carries; the frame loop then validates the folder.
+fn file_menu(ui: &mut egui::Ui, project: Option<&Project>, recents: &Recents, actions: &mut Vec<Action>) {
+    ui.menu_button("File", |ui| {
+        // Let items size to their text instead of wrapping in a narrow menu.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        if ui.button("Open Project...").clicked() {
+            // Close the menu before the modal picker, so the popup does not linger behind it.
+            ui.close_menu();
+            // Synchronous native folder picker: blocks until the user chooses or cancels. A chosen
+            // folder opens (the frame loop validates it is a wok project); a cancelled pick (None)
+            // leaves the current project be.
+            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                actions.push(Action::OpenProject(folder));
+            }
+        }
+        open_recent_menu(ui, recents, actions);
+        if ui.add_enabled(project.is_some(), egui::Button::new("Close Project")).clicked() {
+            actions.push(Action::CloseProject);
+            ui.close_menu();
+        }
+    });
+}
+
+/// The Open Recent submenu: the recent projects most-recent first, each reopening through the same
+/// [`Action::OpenProject`] the picker emits (one obvious way, not a parallel path). Each item shows the
+/// folder's own name, with the full path on hover to tell same-named folders apart. With no recents
+/// the entry is a disabled item rather than an empty submenu, so it still reads as present.
+fn open_recent_menu(ui: &mut egui::Ui, recents: &Recents, actions: &mut Vec<Action>) {
+    if recents.is_empty() {
+        disabled_item(ui, "Open Recent");
+        return;
+    }
+    ui.menu_button("Open Recent", |ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        for path in recents.paths() {
+            let label = project::display_name_of(path);
+            if ui.button(label).on_hover_text(path.display().to_string()).clicked() {
+                actions.push(Action::OpenProject(path.clone()));
+                ui.close_menu();
+            }
+        }
+    });
 }
 
 /// The View menu: show or hide the navigation panel (the label tracks the current state), then dock it
@@ -77,15 +136,25 @@ fn disabled_item(ui: &mut egui::Ui, label: &str) {
 }
 
 /// The bottom status bar, within the view column only (the composition root shows the navigation
-/// panel first, so this bottom panel spans only the width right of it, never under the nav). Reads
-/// contextual diagnostics in a built editor - mode, snap, counts, framerate, save state, integrity;
-/// here it holds dim placeholder text at each end (left context, right diagnostics) to exercise the
-/// layout. The richer readouts join as their features land.
-pub fn status_bar(ctx: &egui::Context) {
+/// panel first, so this bottom panel spans only the width right of it, never under the nav). The left
+/// shows the open project's name - the in-window confirmation that Open took effect, which the title
+/// bar carries too - or that none is open, then a surfaced open failure (so a folder that was not a
+/// wok project reads as a clear error rather than a silent no-op). The right is a snap-setting
+/// placeholder; the richer readouts (counts, framerate, save state, integrity) join as their features
+/// land. `open_error` is app-side (the frame loop's fs validation), not model state, so it is passed
+/// in rather than read from the model.
+pub fn status_bar(ctx: &egui::Context, project: Option<&Project>, open_error: Option<&str>) {
     egui::TopBottomPanel::bottom("wok_status_bar").exact_height(STATUS_BAR_HEIGHT).show(ctx, |ui| {
         let dim = theme::palette(ui.ctx()).text_dim;
         ui.horizontal_centered(|ui| {
-            ui.label(egui::RichText::new("No project open").small().color(dim));
+            match project {
+                Some(project) => ui.label(egui::RichText::new(project.name()).small().color(dim)),
+                None => ui.label(egui::RichText::new("No project open").small().color(dim)),
+            };
+            if let Some(message) = open_error {
+                ui.label(egui::RichText::new("-").small().color(dim));
+                ui.label(egui::RichText::new(message).small().color(WARN_COLOR)).on_hover_text(message);
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(egui::RichText::new("snap 1 m / 5 deg").small().color(dim));
             });
