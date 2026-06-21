@@ -13,11 +13,11 @@
 //! this for "when an action first needs a frame-loop effect like quit/save"; project open is that
 //! action, so the channel returns now.
 //!
-//! Open is split across the seam. Validating that a picked folder is a wok project is filesystem I/O,
-//! so it lives in the frame loop (`crate::project::open`), never in this pure handler. The loop
-//! validates first and applies [`Action::OpenProject`] only on success, so [`handle`]'s job is just
-//! the pure mutation - set the project and record the recent - and a recent is recorded only for a
-//! folder that really opened.
+//! Open is a pure state change. Opening a project has no gate and no filesystem touch (HLD "content
+//! conventions and integrity"): any picked folder becomes the project, so [`Action::OpenProject`] just
+//! sets the project and records the recent, applied through [`handle`] like every other action. wok
+//! writes only inside `assets/`, and only on save (a later bite), so there is nothing to validate at
+//! open and no validation step in the frame loop.
 
 use std::path::PathBuf;
 
@@ -38,9 +38,8 @@ pub enum Action {
     // ---- project lifecycle ----
     /// Open the project rooted at this path, and record it at the front of the recent list. The same
     /// action the folder picker and an Open Recent entry both emit, so reopening a recent is just
-    /// opening its path - one obvious way, not a parallel code path. The frame loop validates the
-    /// folder is a wok project before applying this (the I/O is the loop's, not the handler's), so it
-    /// reaches [`handle`] only for a folder that really opened.
+    /// opening its path - one obvious way, not a parallel code path. Opening has no gate (HLD content
+    /// conventions): any folder opens, so this sets the project directly with no filesystem check.
     OpenProject(PathBuf),
     /// Close the open project, returning to the no-project state. Emitted by the File menu.
     CloseProject,
@@ -72,8 +71,8 @@ pub fn handle(model: &mut Model, action: Action) -> Handled {
             Handled::default()
         }
         Action::OpenProject(root) => {
-            // The loop validated the folder is a wok project before applying this, so construct the
-            // project without re-touching the filesystem and record it at the front of recents.
+            // No gate: any picked folder becomes the project. Wrap it (no filesystem touch) and record
+            // it at the front of recents; the frame loop persists the changed list.
             model.project = Some(Project::new(root.clone()));
             model.recents.push(root);
             Handled { save_recents: true }
@@ -146,6 +145,17 @@ mod tests {
         assert_eq!(model.project.as_ref().map(Project::root), Some(Path::new("games/unstitched")));
         assert_eq!(model.recents.paths(), &[PathBuf::from("games/unstitched")]);
         assert!(handled.save_recents, "opening a project changes recents, so it should persist");
+    }
+
+    #[test]
+    fn open_project_does_not_gate_on_folder_contents() {
+        // No gate (HLD content conventions): a folder that is not a wok project - no scene.json, or one
+        // that does not even exist - opens just the same as any other. handle is pure and the frame
+        // loop no longer validates, so opening only sets the project and records the recent.
+        let mut model = Model::default();
+        let handled = handle(&mut model, Action::OpenProject(PathBuf::from("some/empty/folder")));
+        assert_eq!(model.project.as_ref().map(Project::root), Some(Path::new("some/empty/folder")));
+        assert!(handled.save_recents, "opening any folder records the recent");
     }
 
     #[test]

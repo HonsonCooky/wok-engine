@@ -25,11 +25,6 @@ const STATUS_BAR_HEIGHT: f32 = 28.0;
 /// Size of the hamburger button cell, in points.
 const HAMBURGER_CELL: egui::Vec2 = egui::vec2(30.0, 22.0);
 
-/// Warning text for a surfaced failure (a failed project open). A muted red, fixed rather than themed:
-/// it reads against both the light and dark status-bar surface, and a single transient notice does not
-/// earn a per-theme palette entry.
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(0xd0, 0x5a, 0x4a);
-
 /// The app-menu hamburger, drawn by the caller into the tab-bar row. Opens a menu (File / View / Run
 /// / Help) on click; only View is wired this slice, the rest render present-but-disabled. The
 /// `nf-md-menu` glyph is painted over the button's rect - dim at rest, bright on hover - at the chrome
@@ -139,12 +134,9 @@ fn disabled_item(ui: &mut egui::Ui, label: &str) {
 /// The bottom status bar, within the view column only (the composition root shows the navigation
 /// panel first, so this bottom panel spans only the width right of it, never under the nav). The left
 /// shows the open project's name - the in-window confirmation that Open took effect, which the title
-/// bar carries too - or that none is open, then a surfaced open failure (so a folder that was not a
-/// wok project reads as a clear error rather than a silent no-op). The right is a snap-setting
-/// placeholder; the richer readouts (counts, framerate, save state, integrity) join as their features
-/// land. `open_error` is app-side (the frame loop's fs validation), not model state, so it is passed
-/// in rather than read from the model.
-pub fn status_bar(ctx: &egui::Context, project: Option<&Project>, open_error: Option<&str>) {
+/// bar carries too - or that none is open. The right is a snap-setting placeholder; the richer
+/// readouts (counts, framerate, save state, integrity) join as their features land.
+pub fn status_bar(ctx: &egui::Context, project: Option<&Project>) {
     egui::TopBottomPanel::bottom("wok_status_bar").exact_height(STATUS_BAR_HEIGHT).show(ctx, |ui| {
         let dim = theme::palette(ui.ctx()).text_dim;
         ui.horizontal_centered(|ui| {
@@ -152,10 +144,6 @@ pub fn status_bar(ctx: &egui::Context, project: Option<&Project>, open_error: Op
                 Some(project) => ui.label(egui::RichText::new(project.name()).color(dim)),
                 None => ui.label(egui::RichText::new("No project open").color(dim)),
             };
-            if let Some(message) = open_error {
-                ui.label(egui::RichText::new("-").color(dim));
-                ui.label(egui::RichText::new(message).color(WARN_COLOR)).on_hover_text(message);
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(egui::RichText::new("snap 1 m / 5 deg").color(dim));
             });

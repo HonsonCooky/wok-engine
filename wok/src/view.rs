@@ -15,9 +15,8 @@
 //! remaining width, so the status bar never runs under the nav. This holds whichever side the panel
 //! docks to: it is added before the view column on either side. When the panel is hidden the view
 //! column spans the full width. The status bar now reads the open project (its name, or that none is
-//! open) and a surfaced open error; the editor well is still a static placeholder; the nav panel, the
-//! status bar, and the tab bar's hamburger (now with a wired File menu) read the model and emit
-//! actions.
+//! open); the editor well is still a static placeholder; the nav panel, the status bar, and the tab
+//! bar's hamburger (now with a wired File menu) read the model and emit actions.
 
 use crate::action::Action;
 use crate::menu;
@@ -27,9 +26,7 @@ use crate::workspace;
 /// Render the full editor chrome for one frame: the navigation panel first (full height on its docked
 /// side, and only when visible), then the view column's status bar, tab bar, and editor well. Returns
 /// the actions the regions emitted this frame, for the caller to apply through `crate::action::handle`.
-/// `open_error` is the last project-open failure to surface in the status bar (app-side, from the
-/// frame loop's fs validation), or `None`.
-pub fn chrome(ctx: &egui::Context, model: &Model, open_error: Option<&str>) -> Vec<Action> {
+pub fn chrome(ctx: &egui::Context, model: &Model) -> Vec<Action> {
     let mut actions = Vec::new();
     // Region order is load-bearing (sharp-edges 2): the nav panel is added first on whichever side it
     // docks, so it claims its full-height strip and the view column fills the rest - the status bar
@@ -37,7 +34,7 @@ pub fn chrome(ctx: &egui::Context, model: &Model, open_error: Option<&str>) -> V
     if model.shell.nav_visible() {
         workspace::nav_panel(ctx, model, &mut actions);
     }
-    menu::status_bar(ctx, model.project.as_ref(), open_error);
+    menu::status_bar(ctx, model.project.as_ref());
     workspace::tab_bar(ctx, model, &mut actions);
     workspace::editor_area(ctx);
     actions
@@ -87,7 +84,7 @@ mod tests {
             ctx.set_theme(theme);
             let editor_bg = crate::theme::palette(ctx).editor_bg;
             ctx.layer_painter(egui::LayerId::background()).rect_filled(ctx.screen_rect(), 0.0, editor_bg);
-            let _ = chrome(ctx, &model, None);
+            let _ = chrome(ctx, &model);
         })
     }
 
