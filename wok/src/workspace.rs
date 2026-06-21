@@ -26,9 +26,10 @@ use crate::theme;
 const NAV_PANEL_WIDTH: f32 = 240.0;
 
 /// The bottom icon bar's height in points (handoff view 2: a Zed-style icon row at the panel foot).
-/// Cells fill the bar height, so this sets each icon button's vertical padding around the ~12px glyph -
-/// kept down so the active cell reads as a compact button, not a tall strip.
-const ICON_BAR_HEIGHT: f32 = 32.0;
+/// Set equal to the status bar's height (`menu::STATUS_BAR_HEIGHT`) so the two bottom bars - this one
+/// under the nav panel and the status bar in the view column - line up into one continuous band along
+/// the window foot. Cells fill this height, so it also sets each icon button's vertical padding.
+const ICON_BAR_HEIGHT: f32 = 28.0;
 
 /// Width of each icon cell in the bottom bar; its height fills the bar. Sets each icon button's
 /// horizontal padding around the ~12px glyph - a little room each side so the row reads as discrete

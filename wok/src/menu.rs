@@ -20,6 +20,8 @@ use crate::theme;
 
 /// Status-bar height in points (README shell layout): one row of body text plus breathing room. Body
 /// rather than the small text style, so the line reads at the same weight as the rest of the chrome.
+/// The nav panel's bottom icon bar (`workspace::ICON_BAR_HEIGHT`) is set to match, so the two bottom
+/// bars line up into one continuous band along the window foot.
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 
 /// Size of the hamburger button cell, in points.
