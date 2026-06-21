@@ -17,9 +17,10 @@
 //!   applied to a name or a chunk coordinate. The `{x}_{z}` chunk stem matches the file-level loaders
 //!   in [`crate::io`] and the heightmap sibling in [`crate::heightmap_io`], so a path this surface
 //!   computes is one those functions load.
-//! - Discovery (the `*_names` / `*_slugs` scans): a tolerant `read_dir`. A missing `assets/` or
-//!   subdirectory is an empty list, never an error - a folder with no content is simply an empty
-//!   project. Results are sorted, so a scan is deterministic regardless of directory order.
+//! - Discovery (the `*_names` / `*_slugs` scans, plus `chunk_coords` within a scene): a tolerant
+//!   `read_dir`. A missing `assets/` or subdirectory is an empty list, never an error - a folder
+//!   with no content is simply an empty project. Results are sorted, so a scan is deterministic
+//!   regardless of directory order.
 //!
 //! This surface computes paths and lists what is present. It does not open a project, create the tree
 //! (that happens lazily on first save, a later bite), pick a default scene (there is none; a scene is
@@ -125,6 +126,31 @@ impl ContentLayout {
     pub fn lighting_names(&self) -> Vec<String> {
         json_stems(&self.lighting_dir())
     }
+
+    /// The chunk coordinates present in one scene: every `{x}_{z}.json` file name under
+    /// `assets/scenes/<scene>`, parsed back to a [`ChunkCoord`] and sorted (the deterministic load
+    /// order downstream relies on). This is the inverse of [`chunk`](Self::chunk) - the same
+    /// `{x}_{z}` stem, read rather than written. The manifest (`scene.json`), the sibling
+    /// `{x}_{z}.heightmap.bin` terrain, and any other non-`{x}_{z}.json` entry are skipped; a
+    /// missing scene folder yields an empty list, never an error.
+    pub fn chunk_coords(&self, scene: &str) -> Vec<ChunkCoord> {
+        let Ok(entries) = std::fs::read_dir(self.scene_dir(scene)) else {
+            return Vec::new();
+        };
+        let mut coords: Vec<ChunkCoord> = entries
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let path = e.path();
+                if !path.is_file() {
+                    return None;
+                }
+                let stem = path.file_name().and_then(|n| n.to_str())?.strip_suffix(".json")?;
+                chunk_coord_from_stem(stem)
+            })
+            .collect();
+        coords.sort_unstable();
+        coords
+    }
 }
 
 /// Sorted names of the immediate subdirectories of `dir`. A missing or unreadable directory, or an
@@ -161,6 +187,14 @@ fn json_stems(dir: &Path) -> Vec<String> {
         .collect();
     stems.sort_unstable();
     stems
+}
+
+/// Parse a chunk-file stem (`"{x}_{z}"`, e.g. `"0_0"` or `"-3_12"`) into its coordinate. `None` for
+/// anything that is not two `_`-separated integers, so the manifest stem (`scene`) and prefab-style
+/// names never read as chunks. The inverse of the `{x}_{z}` stem [`ContentLayout::chunk`] writes.
+fn chunk_coord_from_stem(stem: &str) -> Option<ChunkCoord> {
+    let (x, z) = stem.split_once('_')?;
+    Some(ChunkCoord::new(x.parse().ok()?, z.parse().ok()?))
 }
 
 #[cfg(test)]
@@ -268,5 +302,57 @@ mod tests {
         assert!(layout.prefab_slugs().is_empty());
         assert!(layout.lighting_names().is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- chunk discovery within a scene ----
+
+    #[test]
+    fn chunk_discovery_lists_sorted_coords_and_ignores_non_chunks() {
+        let root = unique_temp_dir();
+        let _ = std::fs::remove_dir_all(&root);
+        let layout = ContentLayout::new(&root);
+
+        // One scene folder seeded with chunk files (written out of sort order), the manifest, a
+        // sibling heightmap per chunk, and a stray non-chunk `.json`. Only the `{x}_{z}.json`
+        // files are chunks; everything else is skipped.
+        let scene = "village";
+        std::fs::create_dir_all(layout.scene_dir(scene)).unwrap();
+        std::fs::write(layout.scene_json(scene), b"{}").unwrap();
+        for coord in [ChunkCoord::new(2, -7), ChunkCoord::new(0, 0), ChunkCoord::new(-3, 12)] {
+            std::fs::write(layout.chunk(scene, coord), b"{}").unwrap();
+            std::fs::write(layout.heightmap(scene, coord), b"").unwrap();
+        }
+        std::fs::write(layout.scene_dir(scene).join("notes.json"), b"{}").unwrap();
+
+        assert_eq!(
+            layout.chunk_coords(scene),
+            vec![ChunkCoord::new(-3, 12), ChunkCoord::new(0, 0), ChunkCoord::new(2, -7)]
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn chunk_discovery_of_a_missing_scene_is_empty() {
+        // Same tolerance as the name scans: no folder, no error, just an empty list.
+        let root = unique_temp_dir();
+        let _ = std::fs::remove_dir_all(&root);
+        let layout = ContentLayout::new(&root);
+        assert!(layout.chunk_coords("nope").is_empty());
+    }
+
+    #[test]
+    fn stem_parses_positive_and_negative_coordinates() {
+        assert_eq!(chunk_coord_from_stem("0_0"), Some(ChunkCoord::new(0, 0)));
+        assert_eq!(chunk_coord_from_stem("-3_12"), Some(ChunkCoord::new(-3, 12)));
+    }
+
+    #[test]
+    fn stem_rejects_non_coordinate_names() {
+        // The manifest stem and prefab-style names must never read as chunks.
+        assert_eq!(chunk_coord_from_stem("scene"), None);
+        assert_eq!(chunk_coord_from_stem("oak_tree"), None);
+        assert_eq!(chunk_coord_from_stem("1_2_3"), None);
+        assert_eq!(chunk_coord_from_stem(""), None);
     }
 }
