@@ -82,7 +82,8 @@ fn file_menu(ui: &mut egui::Ui, project: Option<&Project>, recents: &Recents, ac
 /// The Open Recent submenu: the recent projects most-recent first, each reopening through the same
 /// [`Action::OpenProject`] the picker emits (one obvious way, not a parallel path). Each item shows the
 /// folder's own name, with the full path on hover to tell same-named folders apart. With no recents
-/// the entry is a disabled item rather than an empty submenu, so it still reads as present.
+/// the entry is a disabled item rather than an empty submenu, so it still reads as present. A separator
+/// then a Clear Recently Opened item at the foot empties the whole list ([`Action::ClearRecents`]).
 fn open_recent_menu(ui: &mut egui::Ui, recents: &Recents, actions: &mut Vec<Action>) {
     if recents.is_empty() {
         disabled_item(ui, "Open Recent");
@@ -97,13 +98,21 @@ fn open_recent_menu(ui: &mut egui::Ui, recents: &Recents, actions: &mut Vec<Acti
                 ui.close_menu();
             }
         }
+        ui.separator();
+        // Clear the whole list. Disabled when there is nothing to clear; in this structure that branch
+        // is unreachable (an empty list collapses to the disabled "Open Recent" above), but the item
+        // still states its own precondition rather than relying on the caller's gate.
+        if ui.add_enabled(!recents.is_empty(), egui::Button::new("Clear Recently Opened")).clicked() {
+            actions.push(Action::ClearRecents);
+            ui.close_menu();
+        }
     });
 }
 
 /// The View menu: show or hide the navigation panel (the label tracks the current state), then dock it
-/// left or right (the current side marked with a filled radio). Each item emits into the same
-/// per-frame action buffer the icon bar uses; `action::handle` applies them. Closing the menu after a
-/// pick keeps a click from re-firing while the popup lingers.
+/// left or right (the current side marked as selected). Each item emits into the same per-frame action
+/// buffer the icon bar uses; `action::handle` applies them. Closing the menu after a pick keeps a click
+/// from re-firing while the popup lingers.
 fn view_menu(ui: &mut egui::Ui, shell: &Shell, actions: &mut Vec<Action>) {
     ui.menu_button("View", |ui| {
         // Let items size to their text instead of wrapping in a narrow menu.
@@ -114,13 +123,16 @@ fn view_menu(ui: &mut egui::Ui, shell: &Shell, actions: &mut Vec<Action>) {
             ui.close_menu();
         }
         ui.separator();
-        // Left and Right are mutually exclusive, so a radio marks the current side; clicking the other
+        // Dock side: Button-based items, not radios, so each lights up across the full menu row on
+        // hover like the entries above (sharp-edges 2 - hover comes free from Button; a radio only
+        // highlights its dot and label). The current side is the one selected Button, which paints the
+        // accent selection fill as its marker. Left and Right are mutually exclusive: clicking the other
         // side re-docks, clicking the current side is a harmless no-op.
-        if ui.radio(shell.nav_side() == NavSide::Left, "Dock Left").clicked() {
+        if ui.add(egui::Button::new("Dock Left").selected(shell.nav_side() == NavSide::Left)).clicked() {
             actions.push(Action::SetNavSide(NavSide::Left));
             ui.close_menu();
         }
-        if ui.radio(shell.nav_side() == NavSide::Right, "Dock Right").clicked() {
+        if ui.add(egui::Button::new("Dock Right").selected(shell.nav_side() == NavSide::Right)).clicked() {
             actions.push(Action::SetNavSide(NavSide::Right));
             ui.close_menu();
         }

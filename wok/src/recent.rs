@@ -53,6 +53,12 @@ impl Recents {
         self.paths.truncate(CAP);
     }
 
+    /// Empty the list (the File menu's Clear Recently Opened, via `action::handle`). The frame loop then
+    /// persists the now-empty list, so cleared recents stay cleared across runs.
+    pub fn clear(&mut self) {
+        self.paths.clear();
+    }
+
     /// The recent paths, most-recent first.
     pub fn paths(&self) -> &[PathBuf] {
         &self.paths
@@ -297,6 +303,15 @@ mod tests {
         // The newest sits at the front; everything older than the cap window has fallen off the back.
         assert_eq!(r.paths()[0], PathBuf::from(format!("p{}", CAP + 4)));
         assert_eq!(r.paths().last().unwrap(), &PathBuf::from("p5"));
+    }
+
+    #[test]
+    fn clear_empties_the_list() {
+        let mut r = recents_of(&["a", "b", "c"]);
+        assert!(!r.is_empty());
+        r.clear();
+        assert!(r.is_empty());
+        assert_eq!(r.paths(), &[] as &[PathBuf]);
     }
 
     #[test]

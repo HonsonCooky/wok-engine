@@ -10,9 +10,10 @@
 //!
 //! The icon bar reads the active navigation view from the model and emits `Action::SelectNavView` on a
 //! click, switching the view through the action seam (`crate::action::handle`); the header label and
-//! the placeholder body track the active view too. The panel now docks to either side and toggles
-//! through the View menu (`crate::menu`): the composition root shows `nav_panel` only when visible, on
-//! the model's chosen side, and the menu drives both. The tab still does not switch or close - tabs
+//! the placeholder body track the active view too. The panel docks to either side and toggles through
+//! the View menu (`crate::menu`) - the composition root shows `nav_panel` only when visible, on the
+//! model's chosen side, and the menu drives both - and it resizes by dragging its inner edge, with egui
+//! owning the live width (so there is no Shell state for it). The tab still does not switch or close - tabs
 //! are a later slice. Every colour is read through `theme::palette`, so the chrome follows the OS
 //! light/dark.
 
@@ -22,8 +23,16 @@ use crate::menu;
 use crate::model::{Model, NavSide, NavView};
 use crate::theme;
 
-/// Navigation-panel width in points (README shell layout: ~240px on the left).
+/// The navigation panel's default width in points (README shell layout: ~240px on the left). The panel
+/// is resizable, so this is only the width it opens at; egui owns the live width from there (the drag
+/// is kept in egui's own memory, not the Shell - resizing is a view-local affordance, not model state).
 const NAV_PANEL_WIDTH: f32 = 240.0;
+
+/// The navigation panel's resize clamp in points. The floor keeps the header label, the placeholder
+/// body, and the bottom icon bar legible; the ceiling stops the panel from swallowing the editor area.
+/// egui constrains the resize drag to this range.
+const NAV_PANEL_MIN_WIDTH: f32 = 180.0;
+const NAV_PANEL_MAX_WIDTH: f32 = 420.0;
 
 /// The bottom icon bar's height in points (handoff view 2: a Zed-style icon row at the panel foot).
 /// Set equal to the status bar's height (`menu::STATUS_BAR_HEIGHT`) so the two bottom bars - this one
@@ -71,7 +80,9 @@ fn flush_panel(ctx: &egui::Context) -> egui::Frame {
 /// The full-height navigation panel: a header naming the active view, a placeholder body, and the
 /// bottom icon bar at the foot. Docked to the model's chosen side and shown before the view column (by
 /// the composition root) so it claims the full-height strip on that side; the view column fills what
-/// remains. The composition root only calls this when the panel is visible.
+/// remains. The composition root only calls this when the panel is visible. Resizable by dragging its
+/// inner edge (egui owns the width, clamped to [`NAV_PANEL_MIN_WIDTH`]..=[`NAV_PANEL_MAX_WIDTH`]);
+/// docking and toggling are unaffected.
 pub fn nav_panel(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
     // Same builder either way - only the docked edge differs (`SidePanel::left` vs `::right`).
     let panel = match model.shell.nav_side() {
@@ -79,8 +90,10 @@ pub fn nav_panel(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) 
         NavSide::Right => egui::SidePanel::right("wok_nav_panel"),
     };
     panel
-        .resizable(false)
-        .exact_width(NAV_PANEL_WIDTH)
+        .resizable(true)
+        .default_width(NAV_PANEL_WIDTH)
+        .min_width(NAV_PANEL_MIN_WIDTH)
+        .max_width(NAV_PANEL_MAX_WIDTH)
         .frame(flush_panel(ctx))
         .show(ctx, |ui| {
             // The header (top) and icon bar (foot) are nested panels claiming opposite edges; the body

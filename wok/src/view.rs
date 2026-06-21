@@ -194,4 +194,26 @@ mod tests {
         harness.run();
         harness.snapshot("chrome_file_menu");
     }
+
+    /// The Open Recent submenu open, descended Menu -> File -> Open Recent (each level opens on hover -
+    /// sharp-edges 3). Built over a model with two recents, so the submenu lists them and the new Clear
+    /// Recently Opened item sits enabled at the foot below a separator. Guards the Clear affordance and
+    /// the submenu contents.
+    #[test]
+    fn chrome_open_recent_menu_snapshot() {
+        let _gpu = gpu_guard();
+        let model = Model {
+            recents: Recents::from_paths(["C:/games/MyGame", "C:/games/Other"].iter().map(PathBuf::from)),
+            ..Default::default()
+        };
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model);
+        harness.run();
+        harness.get_by_label("Menu").click();
+        harness.run();
+        harness.get_by_label("File").hover();
+        harness.run();
+        harness.get_by_label("Open Recent").hover();
+        harness.run();
+        harness.snapshot("chrome_open_recent_menu");
+    }
 }

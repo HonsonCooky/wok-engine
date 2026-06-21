@@ -43,6 +43,9 @@ pub enum Action {
     OpenProject(PathBuf),
     /// Close the open project, returning to the no-project state. Emitted by the File menu.
     CloseProject,
+    /// Empty the recent-projects list. Emitted by the File -> Open Recent submenu's Clear item; the
+    /// handler clears the list and the frame loop persists the now-empty file, so it stays cleared.
+    ClearRecents,
 }
 
 /// What [`handle`] asks the frame loop to carry out - the effects the pure model cannot perform
@@ -82,6 +85,12 @@ pub fn handle(model: &mut Model, action: Action) -> Handled {
             // leaves them alone; recents keeps the just-closed project too.
             model.project = None;
             Handled::default()
+        }
+        Action::ClearRecents => {
+            // Empty the MRU list; the frame loop persists the now-empty list so it stays cleared across
+            // runs. The open project (if any) and the shell layout are untouched.
+            model.recents.clear();
+            Handled { save_recents: true }
         }
     }
 }
@@ -189,5 +198,27 @@ mod tests {
         assert_eq!(model.recents.paths(), &[PathBuf::from("games/unstitched")]);
         assert_eq!(model.shell.nav_side(), NavSide::Right);
         assert!(!handled.save_recents, "closing does not change recents");
+    }
+
+    #[test]
+    fn clear_recents_empties_the_list_and_signals_persist() {
+        let mut model = Model::default();
+        handle(&mut model, Action::OpenProject(PathBuf::from("a")));
+        handle(&mut model, Action::OpenProject(PathBuf::from("b")));
+        assert!(!model.recents.is_empty());
+        let handled = handle(&mut model, Action::ClearRecents);
+        assert!(model.recents.is_empty(), "clearing empties the recent list");
+        assert!(handled.save_recents, "clearing changes the list, so the now-empty list must persist");
+    }
+
+    #[test]
+    fn clear_recents_leaves_the_open_project_alone() {
+        // Clearing the MRU list is independent of what is open: the project (and the shell layout)
+        // stay; only the remembered history is dropped.
+        let mut model = Model::default();
+        handle(&mut model, Action::OpenProject(PathBuf::from("games/unstitched")));
+        handle(&mut model, Action::ClearRecents);
+        assert_eq!(model.project.as_ref().map(Project::root), Some(Path::new("games/unstitched")));
+        assert!(model.recents.is_empty());
     }
 }
