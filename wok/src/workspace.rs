@@ -29,8 +29,9 @@ const NAV_PANEL_WIDTH: f32 = 240.0;
 /// ~38-40px).
 const ICON_BAR_HEIGHT: f32 = 40.0;
 
-/// Width of each icon cell in the bottom bar; its height fills the bar.
-const ICON_CELL: f32 = 34.0;
+/// Width of each icon cell in the bottom bar; its height fills the bar. Kept close to the ~12px glyph
+/// so the row reads as a tight pack rather than spaced-out marks.
+const ICON_CELL: f32 = 28.0;
 
 /// Tab-strip height in points. It must contain the row content (the hamburger and the tab cell, with
 /// their margins) with no overflow, because egui clips a top panel's fill to `exact_height` while

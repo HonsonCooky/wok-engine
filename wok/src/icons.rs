@@ -15,11 +15,19 @@
 
 use std::sync::Arc;
 
-/// The chrome icon font size in points. Nerd Font glyphs fill the full em (unlike text, which fills
-/// ~70%), so this reads visually larger than text of the same nominal size; keep it small so the icons
-/// sit at the weight of the surrounding UI text rather than towering over it. Every chrome icon - the
-/// hamburger and the nav-bar icons - paints at this one size.
+/// The target ink height for a chrome icon, in points: every glyph is scaled so the height of its
+/// actual ink (not its em box) equals this, then centred on that ink. MDI glyphs fill the em by
+/// different amounts - a cube or layers fills it, a list or the hamburger is wide-and-short - so one
+/// font size renders them at visibly different sizes; normalizing the ink height makes the row read as
+/// one set. Kept small so the icons sit at the weight of the surrounding UI text. (This supersedes the
+/// earlier one-uniform-font-size approach noted in sharp-edges; it is automatic, not per-glyph hand
+/// tuning, so it does not reintroduce the fiddliness that one was reverted for.)
 pub const SIZE: f32 = 12.0;
+
+/// The reference font size the glyph's ink is measured at before rescaling to [`SIZE`]. Ink scales
+/// linearly with font size, so the exact value does not matter; a larger one just measures over more
+/// pixels. The measured-then-rescaled galleys are both stable cache keys, so egui caches them.
+const MEASURE_SIZE: f32 = 24.0;
 
 // The `nf-md-*` codepoints in use (Material Design Icons set). Names map to the Nerd Fonts cheat
 // sheet; keep this list to only the glyphs the chrome actually draws.
@@ -55,10 +63,47 @@ pub fn install_font(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Paint an icon glyph centred in `rect`, in `color`, at the chrome icon [`SIZE`]. The position is
-/// rounded to the pixel grid so the mark stays crisp.
+/// The font size to render a glyph at so its ink stands [`SIZE`] tall, given its ink measured at
+/// [`MEASURE_SIZE`]. Factored out so the painter and the uniformity test apply one rule.
+fn font_for_ink_height(ink_at_measure: egui::Vec2) -> f32 {
+    MEASURE_SIZE * SIZE / ink_at_measure.y.max(1.0)
+}
+
+/// Paint an icon glyph centred in `rect`, in `color`, normalized to the chrome icon [`SIZE`]: measure
+/// the glyph's tight ink, lay it out again scaled so its ink height is `SIZE`, and centre on the ink
+/// (not the em) so a glyph whose ink sits high or low still lands centred. Positions are rounded to the
+/// pixel grid so the mark stays crisp.
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, glyph: char, color: egui::Color32) {
-    let galley = painter.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(SIZE), color);
-    let pos = (rect.center() - galley.size() * 0.5).round();
+    let probe = painter.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(MEASURE_SIZE), color);
+    let font = font_for_ink_height(probe.mesh_bounds.size());
+    let galley = painter.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(font), color);
+    let pos = (rect.center() - galley.mesh_bounds.center().to_vec2()).round();
     painter.galley(pos, galley, color);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The "same size" guard: every glyph the chrome paints through [`paint`] - the hamburger and the
+    /// four nav-bar icons - normalizes to one ink height, regardless of how much of the em its shape
+    /// fills. Measures each glyph's ink at the rescaled font and asserts it lands on `SIZE` within a
+    /// pixel of rounding/hinting slack. The tab close glyph is excluded: it renders as a sized label,
+    /// not through `paint`.
+    #[test]
+    fn painted_glyphs_share_one_ink_height() {
+        let ctx = egui::Context::default();
+        install_font(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            ctx.fonts(|fonts| {
+                for glyph in [MENU, LAYERS, CUBE_OUTLINE, LIST_BULLETED, WEATHER_SUNNY] {
+                    let probe = fonts.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(MEASURE_SIZE), egui::Color32::WHITE);
+                    let font = font_for_ink_height(probe.mesh_bounds.size());
+                    let galley = fonts.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(font), egui::Color32::WHITE);
+                    let height = galley.mesh_bounds.size().y;
+                    assert!((height - SIZE).abs() <= 1.0, "glyph {glyph:?} ink height {height:.2} is not ~{SIZE}");
+                }
+            });
+        });
+    }
 }

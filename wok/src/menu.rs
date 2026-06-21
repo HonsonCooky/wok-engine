@@ -18,8 +18,9 @@ use crate::project::{self, Project};
 use crate::recent::Recents;
 use crate::theme;
 
-/// Status-bar height in points (README shell layout): one row of small text plus breathing room.
-const STATUS_BAR_HEIGHT: f32 = 26.0;
+/// Status-bar height in points (README shell layout): one row of body text plus breathing room. Body
+/// rather than the small text style, so the line reads at the same weight as the rest of the chrome.
+const STATUS_BAR_HEIGHT: f32 = 28.0;
 
 /// Size of the hamburger button cell, in points.
 const HAMBURGER_CELL: egui::Vec2 = egui::vec2(30.0, 22.0);
@@ -148,15 +149,15 @@ pub fn status_bar(ctx: &egui::Context, project: Option<&Project>, open_error: Op
         let dim = theme::palette(ui.ctx()).text_dim;
         ui.horizontal_centered(|ui| {
             match project {
-                Some(project) => ui.label(egui::RichText::new(project.name()).small().color(dim)),
-                None => ui.label(egui::RichText::new("No project open").small().color(dim)),
+                Some(project) => ui.label(egui::RichText::new(project.name()).color(dim)),
+                None => ui.label(egui::RichText::new("No project open").color(dim)),
             };
             if let Some(message) = open_error {
-                ui.label(egui::RichText::new("-").small().color(dim));
-                ui.label(egui::RichText::new(message).small().color(WARN_COLOR)).on_hover_text(message);
+                ui.label(egui::RichText::new("-").color(dim));
+                ui.label(egui::RichText::new(message).color(WARN_COLOR)).on_hover_text(message);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new("snap 1 m / 5 deg").small().color(dim));
+                ui.label(egui::RichText::new("snap 1 m / 5 deg").color(dim));
             });
         });
     });
