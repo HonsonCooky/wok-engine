@@ -25,13 +25,15 @@ use crate::theme;
 /// Navigation-panel width in points (README shell layout: ~240px on the left).
 const NAV_PANEL_WIDTH: f32 = 240.0;
 
-/// The bottom icon bar's height in points (handoff view 2: a Zed-style icon row at the panel foot,
-/// ~38-40px).
-const ICON_BAR_HEIGHT: f32 = 40.0;
+/// The bottom icon bar's height in points (handoff view 2: a Zed-style icon row at the panel foot).
+/// Cells fill the bar height, so this sets each icon button's vertical padding around the ~12px glyph -
+/// kept down so the active cell reads as a compact button, not a tall strip.
+const ICON_BAR_HEIGHT: f32 = 32.0;
 
-/// Width of each icon cell in the bottom bar; its height fills the bar. Kept close to the ~12px glyph
-/// so the row reads as a tight pack rather than spaced-out marks.
-const ICON_CELL: f32 = 28.0;
+/// Width of each icon cell in the bottom bar; its height fills the bar. Sets each icon button's
+/// horizontal padding around the ~12px glyph - a little room each side so the row reads as discrete
+/// buttons rather than glyphs jammed against their neighbours.
+const ICON_CELL: f32 = 32.0;
 
 /// Tab-strip height in points. It must contain the row content (the hamburger and the tab cell, with
 /// their margins) with no overflow, because egui clips a top panel's fill to `exact_height` while
