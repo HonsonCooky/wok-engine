@@ -13,14 +13,17 @@
 //! `Watcher` file watcher for hot reload.
 //!
 //! The crate has no internal asset registry: references are bare names, resolved by scanning
-//! the content folder. Identity is the per-`Scene` monotonic `InstanceId`, allocated through
-//! `Scene::allocate_instance_id` and stamped on every `Placement`.
+//! the content folder. `layout::ContentLayout` is the engine-owned definition of that folder
+//! convention - path resolution plus a tolerant discovery scan. Identity is the per-`Scene`
+//! monotonic `InstanceId`, allocated through `Scene::allocate_instance_id` and stamped on every
+//! `Placement`.
 
 pub mod chunk;
 pub mod error;
 pub mod heightmap;
 pub mod heightmap_io;
 pub mod io;
+pub mod layout;
 pub mod math;
 pub mod prefab;
 pub mod refs;
@@ -35,6 +38,7 @@ pub use heightmap::{
 };
 pub use heightmap_io::{load_heightmap, save_heightmap};
 pub use io::{load_chunk, load_prefab, load_scene, save_chunk, save_prefab, save_scene};
+pub use layout::ContentLayout;
 pub use math::{Aabb, Mat4, Transform};
 pub use prefab::{Prefab, PrefabState, Primitive, Shape, UNIT_HALF_EXTENT};
 pub use refs::{InstanceId, LightStateRef, MeshRef, PrefabRef, SurfaceTag};
