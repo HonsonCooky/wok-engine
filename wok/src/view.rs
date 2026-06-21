@@ -9,25 +9,32 @@
 //! snapshot test renders the same `chrome` over a model it builds directly, so the PNG tracks exactly
 //! what the app draws.
 //!
-//! Region order is layout order and load-bearing (see the README shell layout): the navigation panel
-//! is shown first so it claims the full-height left strip, then the view column - the status bar at the
-//! bottom, the tab bar at the top, the editor well filling the rest - spans only the remaining width,
-//! so the status bar never runs under the nav. The status bar, tab bar, and editor well are still
-//! static placeholders for this slice; only the navigation panel reads the model and emits actions.
+//! Region order is layout order and load-bearing (see the README shell layout, sharp-edges 2): the
+//! navigation panel is shown first so it claims its full-height strip, then the view column - the
+//! status bar at the bottom, the tab bar at the top, the editor well filling the rest - spans only the
+//! remaining width, so the status bar never runs under the nav. This holds whichever side the panel
+//! docks to: it is added before the view column on either side. When the panel is hidden the view
+//! column spans the full width. The status bar and editor well are still static placeholders; the nav
+//! panel and the tab bar's hamburger read the model and emit actions.
 
 use crate::action::Action;
 use crate::menu;
 use crate::model::Model;
 use crate::workspace;
 
-/// Render the full editor chrome for one frame: the navigation panel first (full height on the left),
-/// then the view column's status bar, tab bar, and editor well. Returns the actions the regions
-/// emitted this frame, for the caller to apply through `crate::action::handle`.
+/// Render the full editor chrome for one frame: the navigation panel first (full height on its docked
+/// side, and only when visible), then the view column's status bar, tab bar, and editor well. Returns
+/// the actions the regions emitted this frame, for the caller to apply through `crate::action::handle`.
 pub fn chrome(ctx: &egui::Context, model: &Model) -> Vec<Action> {
     let mut actions = Vec::new();
-    workspace::nav_panel(ctx, model, &mut actions);
+    // Region order is load-bearing (sharp-edges 2): the nav panel is added first on whichever side it
+    // docks, so it claims its full-height strip and the view column fills the rest - the status bar
+    // never runs under the nav. Hidden, the view column spans the full width.
+    if model.shell.nav_visible() {
+        workspace::nav_panel(ctx, model, &mut actions);
+    }
     menu::status_bar(ctx);
-    workspace::tab_bar(ctx);
+    workspace::tab_bar(ctx, model, &mut actions);
     workspace::editor_area(ctx);
     actions
 }
@@ -35,8 +42,9 @@ pub fn chrome(ctx: &egui::Context, model: &Model) -> Vec<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::NavView;
+    use crate::model::{NavSide, NavView};
     use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
     use std::sync::{Mutex, MutexGuard};
 
     /// Serializes the wgpu snapshot tests. egui_kittest builds a fresh headless wgpu device per
@@ -76,14 +84,20 @@ mod tests {
         })
     }
 
-    /// Render the chrome to a PNG under `tests/snapshots`, through the composition root the app renders
-    /// through, so the PNG tracks the real chrome. Refresh after an intended look change with
+    /// Render `model`'s chrome to a PNG under `tests/snapshots`, through the composition root the app
+    /// renders through, so the PNG tracks the real chrome. Refresh after an intended look change with
     /// `UPDATE_SNAPSHOTS=1 cargo test -p wok` and commit the new PNG.
-    fn snapshot(name: &str, theme: egui::ThemePreference, active: NavView) {
+    fn snapshot_of(name: &str, theme: egui::ThemePreference, model: Model) {
         let _gpu = gpu_guard();
-        let mut harness = chrome_harness(theme, egui::vec2(1100.0, 700.0), model_with(active));
+        let mut harness = chrome_harness(theme, egui::vec2(1100.0, 700.0), model);
         harness.run();
         harness.snapshot(name);
+    }
+
+    /// Snapshot the chrome with `active` as the navigation view - the common case where only the active
+    /// view varies.
+    fn snapshot(name: &str, theme: egui::ThemePreference, active: NavView) {
+        snapshot_of(name, theme, model_with(active));
     }
 
     /// The default landing state - the Instances view active - in dark and light. The pair guards that
@@ -109,5 +123,41 @@ mod tests {
     #[test]
     fn chrome_scenes_light_snapshot() {
         snapshot("chrome_scenes_light", egui::ThemePreference::Light, NavView::Scenes);
+    }
+
+    /// The navigation panel hidden: the view column - tab bar, editor well, status bar - spans the full
+    /// width with no nav strip. Dark alone is enough; this is a layout state, not a palette one (the
+    /// themes are guarded by the pairs above).
+    #[test]
+    fn chrome_nav_hidden_snapshot() {
+        let mut model = Model::default();
+        model.shell.toggle_nav();
+        snapshot_of("chrome_nav_hidden", egui::ThemePreference::Dark, model);
+    }
+
+    /// The navigation panel docked right: the nav strip on the right edge, the view column (with its
+    /// status bar) confined to the remaining left width - the region-order rule holding on the right
+    /// side, not just the left.
+    #[test]
+    fn chrome_nav_docked_right_snapshot() {
+        let mut model = Model::default();
+        model.shell.set_nav_side(NavSide::Right);
+        snapshot_of("chrome_nav_docked_right", egui::ThemePreference::Dark, model);
+    }
+
+    /// The app-menu open at its View submenu, driven by clicking the hamburger then hovering View (the
+    /// top button opens on an accesskit click, but egui opens a submenu on pointer hover - sharp-edges
+    /// 3). Guards that the menu renders and the View items are present: Hide Navigation Panel (the label
+    /// tracks the default visible state) and the Dock Left / Dock Right radios with Left marked.
+    #[test]
+    fn chrome_view_menu_snapshot() {
+        let _gpu = gpu_guard();
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), Model::default());
+        harness.run();
+        harness.get_by_label("Menu").click();
+        harness.run();
+        harness.get_by_label("View").hover();
+        harness.run();
+        harness.snapshot("chrome_view_menu");
     }
 }

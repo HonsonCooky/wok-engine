@@ -10,15 +10,16 @@
 //!
 //! The icon bar reads the active navigation view from the model and emits `Action::SelectNavView` on a
 //! click, switching the view through the action seam (`crate::action::handle`); the header label and
-//! the placeholder body track the active view too. The rest is still static framing - the tab does not
-//! switch or close, and the panel does not dock or toggle; those behaviors and the actions they need
-//! are later slices. Every colour is read through `theme::palette`, so the chrome follows the OS
+//! the placeholder body track the active view too. The panel now docks to either side and toggles
+//! through the View menu (`crate::menu`): the composition root shows `nav_panel` only when visible, on
+//! the model's chosen side, and the menu drives both. The tab still does not switch or close - tabs
+//! are a later slice. Every colour is read through `theme::palette`, so the chrome follows the OS
 //! light/dark.
 
 use crate::action::Action;
 use crate::icons;
 use crate::menu;
-use crate::model::{Model, NavView};
+use crate::model::{Model, NavSide, NavView};
 use crate::theme;
 
 /// Navigation-panel width in points (README shell layout: ~240px on the left).
@@ -63,11 +64,17 @@ fn flush_panel(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::ZERO)
 }
 
-/// The full-height navigation panel on the left: a header naming the active view, a placeholder body,
-/// and the bottom icon bar at the foot. Shown before the central panel (by the composition root) so
-/// it claims the full-height left strip; the view column fills what remains.
+/// The full-height navigation panel: a header naming the active view, a placeholder body, and the
+/// bottom icon bar at the foot. Docked to the model's chosen side and shown before the view column (by
+/// the composition root) so it claims the full-height strip on that side; the view column fills what
+/// remains. The composition root only calls this when the panel is visible.
 pub fn nav_panel(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
-    egui::SidePanel::left("wok_nav_panel")
+    // Same builder either way - only the docked edge differs (`SidePanel::left` vs `::right`).
+    let panel = match model.shell.nav_side() {
+        NavSide::Left => egui::SidePanel::left("wok_nav_panel"),
+        NavSide::Right => egui::SidePanel::right("wok_nav_panel"),
+    };
+    panel
         .resizable(false)
         .exact_width(NAV_PANEL_WIDTH)
         .frame(flush_panel(ctx))
@@ -179,15 +186,15 @@ fn divider(ui: &mut egui::Ui, height: f32) {
     ui.painter().vline(rect.center().x, rect.top() + inset..=rect.bottom() - inset, egui::Stroke::new(1.0, border));
 }
 
-/// The tab bar over the view column: the app-menu hamburger at the left, then one placeholder tab.
-/// Hand-drawn (egui has no tab widget). Static - the tab does not switch or close; opening, closing,
-/// and switching tabs is the next slice. The single tab is rendered active to exercise the active-tab
-/// styling: the editor-surface fill (so it reads continuous with the well below) and the one accent
-/// as a top line.
-pub fn tab_bar(ctx: &egui::Context) {
+/// The tab bar over the view column: the app-menu hamburger at the left (which opens the File / View /
+/// Run / Help menu), then one placeholder tab. Hand-drawn (egui has no tab widget). The tab does not
+/// switch or close; opening, closing, and switching tabs is a later slice. The single tab is rendered
+/// active to exercise the active-tab styling: the editor-surface fill (so it reads continuous with the
+/// well below) and the one accent as a top line.
+pub fn tab_bar(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
     egui::TopBottomPanel::top("wok_tab_bar").exact_height(TAB_BAR_HEIGHT).show(ctx, |ui| {
         ui.horizontal_centered(|ui| {
-            menu::hamburger(ui);
+            menu::hamburger(ui, model, actions);
             ui.add_space(8.0);
             // Tabs nearly touch, as in Zed, with the active fill the only thing parting them.
             ui.spacing_mut().item_spacing.x = 1.0;
