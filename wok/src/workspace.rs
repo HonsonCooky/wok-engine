@@ -10,12 +10,16 @@
 //!
 //! The icon bar reads the active navigation view from the model and emits `Action::SelectNavView` on a
 //! click, switching the view through the action seam (`crate::action::handle`); the header label and
-//! the placeholder body track the active view too. The panel docks to either side and toggles through
-//! the View menu (`crate::menu`) - the composition root shows `nav_panel` only when visible, on the
-//! model's chosen side, and the menu drives both - and it resizes by dragging its inner edge, with egui
-//! owning the live width (so there is no Shell state for it). The tab still does not switch or close - tabs
-//! are a later slice. Every colour is read through `theme::palette`, so the chrome follows the OS
-//! light/dark.
+//! the body track the active view too. The body lists the open project's content for the project-scoped
+//! views (Scenes, Prefabs, Lighting) through `wok_scene::ContentLayout` discovery, scanned per frame;
+//! Instances keeps a placeholder until it has an open scene to read (a later slice). The panel docks to
+//! either side and toggles through the View menu (`crate::menu`) - the composition root shows `nav_panel`
+//! only when visible, on the model's chosen side, and the menu drives both - and it resizes by dragging
+//! its inner edge, with egui owning the live width (so there is no Shell state for it). The tab still
+//! does not switch or close - tabs are a later slice. Every colour is read through `theme::palette`, so
+//! the chrome follows the OS light/dark.
+
+use wok_scene::ContentLayout;
 
 use crate::action::Action;
 use crate::icons;
@@ -55,6 +59,11 @@ const TAB_BAR_HEIGHT: f32 = 38.0;
 /// margin) so the icon bar and its hairlines reach the panel edges; rows that hold text add this back
 /// so the text is not jammed against the edge.
 const ROW_PAD: f32 = 10.0;
+
+/// Height of one content-list row in points (handoff view 2: tight file-list rows, ~24-25px). Set as a
+/// fixed cell height rather than letting each label size itself, so the rows read as an even list and
+/// the full-bleed selection highlight (a later slice) has a row rect to fill.
+const NAV_ROW_HEIGHT: f32 = 24.0;
 
 /// The Nerd Font glyph for a navigation view's bottom-bar cell. Which icon-font codepoint a view draws
 /// is a chrome concern, so the mapping lives here with the view rather than on `NavView` in the model
@@ -133,17 +142,83 @@ fn nav_header(ui: &mut egui::Ui, model: &Model) {
         });
 }
 
-/// The panel body: wholly the active view in a built editor (the Instances tree, etc.); a dim
-/// placeholder here, since those views are later slices. It names the active view so switching is
-/// visible in the body as well as the header and the icon accent.
+/// The panel body: wholly the active view. The project-scoped views (Scenes, Prefabs, Lighting) list
+/// the open project's content of that kind; Instances keeps a placeholder until it has an open scene to
+/// read (a later slice). The body names the active view either way, so switching is visible here as
+/// well as in the header and the icon accent.
 fn nav_body(ui: &mut egui::Ui, model: &Model) {
+    match model.shell.active_nav() {
+        NavView::Scenes => content_list(ui, model, "No scenes yet", ContentLayout::scene_names),
+        NavView::Prefabs => content_list(ui, model, "No prefabs yet", ContentLayout::prefab_slugs),
+        NavView::Lighting => content_list(ui, model, "No lighting states yet", ContentLayout::lighting_names),
+        // Instances lists the OPEN SCENE's placements, which this slice has no concept of yet; the
+        // original placeholder stands in until the scene-tab slice gives it a scene to read.
+        NavView::Instances => nav_placeholder(ui, model),
+    }
+}
+
+/// List the open project's content for a project-scoped view, one tight row per name. `scan` is the
+/// `ContentLayout` discovery method for this view's kind - `scene_names`, `prefab_slugs`, or
+/// `lighting_names` - run per frame against the open project's root. The per-frame scan is simple and
+/// self-refreshing: a file added on disk shows on the next frame with no cache to invalidate. (An
+/// app-side cache or a file-watch is a deferred optimization, for if the scan ever costs too much; it
+/// does not for a folder listing.) Display-only this slice: each row is a label, not a control -
+/// opening a scene as a tab and selecting it are later slices. Two empty states read dim and italic:
+/// no project open at all, or a project open with nothing of this kind yet (`empty`).
+fn content_list(ui: &mut egui::Ui, model: &Model, empty: &str, scan: fn(&ContentLayout) -> Vec<String>) {
+    ui.add_space(4.0);
+    let Some(project) = model.project.as_ref() else {
+        empty_note(ui, "No project open");
+        return;
+    };
+    let names = scan(&ContentLayout::new(project.root()));
+    if names.is_empty() {
+        empty_note(ui, empty);
+        return;
+    }
+    // A scroll area takes over when the list outgrows the body, so a content-heavy project can reach
+    // every name rather than losing the ones past the fold (the icon bar claims its strip first, so an
+    // un-scrolled overflow would simply be clipped). It draws no scrollbar until the content overflows.
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        // A tight file-list: rows sit close, parted by a hairline of spacing, not the form spacing the
+        // panel uses elsewhere.
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for name in &names {
+            content_row(ui, name);
+        }
+    });
+}
+
+/// One content row: the name in primary text, inset by [`ROW_PAD`] from the flush panel edge and
+/// centred in a fixed-height cell ([`NAV_ROW_HEIGHT`]). Display-only this slice - no hover, no click,
+/// no selection highlight; those land when a row opens a tab. The fixed cell (not the label's own
+/// height) keeps the rows even and gives the full-bleed selection highlight to come a rect to fill.
+fn content_row(ui: &mut egui::Ui, name: &str) {
+    let text = theme::palette(ui.ctx()).text;
+    let (rect, _response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), NAV_ROW_HEIGHT), egui::Sense::hover());
+    let pos = egui::pos2(rect.left() + ROW_PAD, rect.center().y);
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    ui.painter().text(pos, egui::Align2::LEFT_CENTER, name, font, text);
+}
+
+/// A dim, italic note filling the body in place of a list: the empty states for the project-scoped
+/// views (no project open, or none of this kind yet) and the Instances placeholder. Inset by
+/// [`ROW_PAD`] like the header and the rows, so the text lines up with them.
+fn empty_note(ui: &mut egui::Ui, text: &str) {
     let dim = theme::palette(ui.ctx()).text_dim;
-    let title = model.shell.active_nav().title();
-    ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.add_space(ROW_PAD);
-        ui.label(egui::RichText::new(format!("{title} - view content lands here")).color(dim).italics());
+        ui.label(egui::RichText::new(text).color(dim).italics());
     });
+}
+
+/// The Instances placeholder: the view names itself but has no open scene to list yet. Kept as the
+/// original placeholder line (its own slice replaces it with the instances tree), so this slice only
+/// changes the project-scoped views, not Instances.
+fn nav_placeholder(ui: &mut egui::Ui, model: &Model) {
+    let title = model.shell.active_nav().title();
+    ui.add_space(8.0);
+    empty_note(ui, &format!("{title} - view content lands here"));
 }
 
 /// The bottom icon bar at the panel foot (handoff view 2): a Zed-style row of view icons, split by a

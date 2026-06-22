@@ -32,8 +32,10 @@ pub struct Palette {
     hover: Color32,
     /// Pressed and open fill.
     pressed: Color32,
-    /// Primary text.
-    text: Color32,
+    /// Primary text: ordinary body text. Public because the nav panel paints its content-list rows
+    /// directly in this colour (sharp-edges: a colour the view paints must be public), the same reason
+    /// `border` is - egui's own widgets read it through `noninteractive.fg_stroke`, set from here.
+    pub text: Color32,
 }
 
 /// Dark palette, read off the Zed reference.

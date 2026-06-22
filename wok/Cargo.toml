@@ -41,11 +41,13 @@ unused_self                       = "allow"
 # line built against the wgpu 24 and winit 0.30 wok-platform pins). egui is a wok-application
 # dependency only; no engine crate may depend on it. rfd is the OS-native folder picker for the File
 # menu's Open Project, default-features off so only the synchronous WinAPI backend is pulled (no async
-# runtime). The engine libraries the editor composes (wok-scene, wok-content, wok-mesh, wok-render,
-# wok-light) return with the content bite, which loads and renders a scene; this slice is the project
-# lifecycle (open existing / open recent / close), so it needs only the substrate, egui, and rfd.
+# runtime). wok-scene is the first engine library the editor composes: the navigation panel lists the
+# open project's content (scenes, prefabs, lighting states) through its `ContentLayout` discovery scan.
+# The rest (wok-content, wok-mesh, wok-render, wok-light) return with the content bite that loads and
+# renders a scene; this slice only reads the layout to list names, it does not open chunks.
 [dependencies]
 wok-platform = { path = "../wok-platform" }
+wok-scene = { path = "../wok-scene" }
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true

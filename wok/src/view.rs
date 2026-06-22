@@ -116,9 +116,11 @@ mod tests {
         snapshot("chrome_light", egui::ThemePreference::Light, NavView::Instances);
     }
 
-    /// A second view active (Scenes, the project group's first), in dark and light: the header label,
-    /// the placeholder body, and the active-icon accent all move off Instances and onto Scenes, so the
-    /// pair guards that the chrome tracks `model.shell.active_nav` rather than a fixed view.
+    /// A second view active (Scenes, the project group's first) with no project open, in dark and
+    /// light: the header label and the active-icon accent move off Instances and onto Scenes, and the
+    /// body shows the Scenes view's "No project open" empty state (the default model has no project).
+    /// The pair guards both that the chrome tracks `model.shell.active_nav` rather than a fixed view,
+    /// and that the no-project empty state reads cleanly in each theme.
     #[test]
     fn chrome_scenes_snapshot() {
         snapshot("chrome_scenes", egui::ThemePreference::Dark, NavView::Scenes);
@@ -127,6 +129,35 @@ mod tests {
     #[test]
     fn chrome_scenes_light_snapshot() {
         snapshot("chrome_scenes_light", egui::ThemePreference::Light, NavView::Scenes);
+    }
+
+    /// The Scenes view over an open project whose `assets/scenes` holds two scene folders: the body
+    /// lists their names, sorted ("alpha" above "beta"), one row each, in place of the empty state.
+    /// Seeds a temp project on disk and lets the chrome scan it per frame, exactly as the live app
+    /// does (`workspace::content_list`), rather than injecting a name list - so this guards the
+    /// `ContentLayout` wiring end to end. The root's leaf is the fixed "DemoGame", so both the listed
+    /// rows and the status bar's project name are deterministic (a pid/temp suffix would not be). Dark
+    /// alone: this is a content state, not a palette one (the pair above guards the themes).
+    #[test]
+    fn chrome_scenes_listed_snapshot() {
+        let _gpu = gpu_guard();
+        // A fixed-leaf root under a distinctive parent: the leaf names the project in the status bar,
+        // the parent keeps this tree clear of other tests'. Cleared first so a crashed run cannot leave
+        // stray scenes that would change the listing.
+        let parent = std::env::temp_dir().join("wok-nav-listed-snapshot");
+        let root = parent.join("DemoGame");
+        let _ = std::fs::remove_dir_all(&parent);
+        for scene in ["alpha", "beta"] {
+            std::fs::create_dir_all(root.join("assets").join("scenes").join(scene)).unwrap();
+        }
+
+        let mut model = model_with(NavView::Scenes);
+        model.project = Some(Project::new(root.clone()));
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model);
+        harness.run();
+        harness.snapshot("chrome_scenes_listed");
+
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     /// The navigation panel hidden: the view column - tab bar, editor well, status bar - spans the full
