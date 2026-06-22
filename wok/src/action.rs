@@ -21,7 +21,7 @@
 
 use std::path::PathBuf;
 
-use crate::model::{Model, NavSide, NavView};
+use crate::model::{Model, NavSide, NavView, Tab};
 use crate::project::Project;
 
 /// A menu choice, keybind, or chrome interaction, emitted by the view and applied by [`handle`].
@@ -34,6 +34,17 @@ pub enum Action {
     ToggleNavPanel,
     /// Dock the navigation panel to this side. Emitted by the View menu.
     SetNavSide(NavSide),
+
+    // ---- tabs ----
+    /// Open the named scene as a tab over the editor area, focusing it if already open (no
+    /// duplicate). Emitted by a Scenes nav row. Scene-specific for now; opening prefab or lighting
+    /// contexts as tabs is a later bite.
+    OpenScene(String),
+    /// Make the tab at this index active. Emitted by clicking a tab.
+    SelectTab(usize),
+    /// Close the tab at this index. Emitted by a tab's close affordance; the model then picks the next
+    /// active tab ([`Shell::close_tab`](crate::model::Shell::close_tab)).
+    CloseTab(usize),
 
     // ---- project lifecycle ----
     /// Open the project rooted at this path, and record it at the front of the recent list. The same
@@ -71,6 +82,18 @@ pub fn handle(model: &mut Model, action: Action) -> Handled {
         }
         Action::SetNavSide(side) => {
             model.shell.set_nav_side(side);
+            Handled::default()
+        }
+        Action::OpenScene(name) => {
+            model.shell.open_tab(Tab::Scene(name));
+            Handled::default()
+        }
+        Action::SelectTab(index) => {
+            model.shell.select_tab(index);
+            Handled::default()
+        }
+        Action::CloseTab(index) => {
+            model.shell.close_tab(index);
             Handled::default()
         }
         Action::OpenProject(root) => {
@@ -143,6 +166,48 @@ mod tests {
         assert_eq!(model.shell.nav_side(), NavSide::Right);
         handle(&mut model, Action::SetNavSide(NavSide::Left));
         assert_eq!(model.shell.nav_side(), NavSide::Left);
+    }
+
+    // ---- tabs ----
+
+    #[test]
+    fn open_scene_opens_a_scene_tab_and_focuses_it() {
+        let mut model = Model::default();
+        handle(&mut model, Action::OpenScene("village".into()));
+        assert_eq!(model.shell.tabs(), &[Tab::Scene("village".into())]);
+        assert_eq!(model.shell.active_tab(), Some(0));
+    }
+
+    #[test]
+    fn open_scene_focuses_rather_than_duplicates_an_open_scene() {
+        let mut model = Model::default();
+        handle(&mut model, Action::OpenScene("village".into()));
+        handle(&mut model, Action::OpenScene("dungeon".into()));
+        handle(&mut model, Action::OpenScene("village".into()));
+        assert_eq!(model.shell.tabs().len(), 2, "re-opening focuses, it does not duplicate");
+        assert_eq!(model.shell.active_tab(), Some(0), "the re-opened scene is focused");
+    }
+
+    #[test]
+    fn select_tab_focuses_the_indexed_tab() {
+        let mut model = Model::default();
+        handle(&mut model, Action::OpenScene("a".into()));
+        handle(&mut model, Action::OpenScene("b".into()));
+        handle(&mut model, Action::SelectTab(0));
+        assert_eq!(model.shell.active_tab(), Some(0));
+    }
+
+    #[test]
+    fn close_tab_removes_it_and_reassigns_the_active_tab() {
+        let mut model = Model::default();
+        handle(&mut model, Action::OpenScene("a".into()));
+        handle(&mut model, Action::OpenScene("b".into()));
+        handle(&mut model, Action::CloseTab(1)); // close b, the active tab
+        assert_eq!(model.shell.tabs(), &[Tab::Scene("a".into())]);
+        assert_eq!(model.shell.active_tab(), Some(0));
+        handle(&mut model, Action::CloseTab(0)); // close the last remaining tab
+        assert!(model.shell.tabs().is_empty());
+        assert_eq!(model.shell.active_tab(), None);
     }
 
     // ---- project lifecycle ----

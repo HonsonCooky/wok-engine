@@ -11,13 +11,16 @@
 //! The icon bar reads the active navigation view from the model and emits `Action::SelectNavView` on a
 //! click, switching the view through the action seam (`crate::action::handle`); the header label and
 //! the body track the active view too. The body lists the open project's content for the project-scoped
-//! views (Scenes, Prefabs, Lighting) through `wok_scene::ContentLayout` discovery, scanned per frame;
-//! Instances keeps a placeholder until it has an open scene to read (a later slice). The panel docks to
-//! either side and toggles through the View menu (`crate::menu`) - the composition root shows `nav_panel`
-//! only when visible, on the model's chosen side, and the menu drives both - and it resizes by dragging
-//! its inner edge, with egui owning the live width (so there is no Shell state for it). The tab still
-//! does not switch or close - tabs are a later slice. Every colour is read through `theme::palette`, so
-//! the chrome follows the OS light/dark.
+//! views (Scenes, Prefabs, Lighting) through `wok_scene::ContentLayout` discovery, scanned per frame; a
+//! Scenes row opens that scene as a tab (`Action::OpenScene`), while Prefabs and Lighting rows stay
+//! display-only (opening those contexts is a later bite), and Instances keeps a placeholder until it has
+//! an open scene to read (part 2). The panel docks to either side and toggles through the View menu
+//! (`crate::menu`) - the composition root shows `nav_panel` only when visible, on the model's chosen
+//! side, and the menu drives both - and it resizes by dragging its inner edge, with egui owning the live
+//! width (so there is no Shell state for it). The tab bar renders the model's open tabs: a click selects
+//! a tab, its close glyph closes it, and the editor well names the active tab (the per-context surface -
+//! the 3D viewport, the data views - lands in later bites). Every colour is read through
+//! `theme::palette`, so the chrome follows the OS light/dark.
 
 use wok_scene::ContentLayout;
 
@@ -111,7 +114,7 @@ pub fn nav_panel(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) 
             // actions this slice; the header and body read the active view to label themselves.
             nav_header(ui, model);
             icon_bar(ui, model, actions);
-            nav_body(ui, model);
+            nav_body(ui, model, actions);
         });
 }
 
@@ -144,61 +147,92 @@ fn nav_header(ui: &mut egui::Ui, model: &Model) {
 
 /// The panel body: wholly the active view. The project-scoped views (Scenes, Prefabs, Lighting) list
 /// the open project's content of that kind; Instances keeps a placeholder until it has an open scene to
-/// read (a later slice). The body names the active view either way, so switching is visible here as
-/// well as in the header and the icon accent.
-fn nav_body(ui: &mut egui::Ui, model: &Model) {
+/// read (part 2). A Scenes row opens that scene as a tab; Prefabs and Lighting rows are display-only
+/// (opening those contexts is a later bite). The body names the active view either way, so switching is
+/// visible here as well as in the header and the icon accent.
+fn nav_body(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
     match model.shell.active_nav() {
-        NavView::Scenes => content_list(ui, model, "No scenes yet", ContentLayout::scene_names),
-        NavView::Prefabs => content_list(ui, model, "No prefabs yet", ContentLayout::prefab_slugs),
-        NavView::Lighting => content_list(ui, model, "No lighting states yet", ContentLayout::lighting_names),
+        NavView::Scenes => {
+            // The one clickable list this bite: a click opens that scene as a tab.
+            if let Some(name) = content_list(ui, model, "No scenes yet", ContentLayout::scene_names, true) {
+                actions.push(Action::OpenScene(name));
+            }
+        }
+        NavView::Prefabs => {
+            content_list(ui, model, "No prefabs yet", ContentLayout::prefab_slugs, false);
+        }
+        NavView::Lighting => {
+            content_list(ui, model, "No lighting states yet", ContentLayout::lighting_names, false);
+        }
         // Instances lists the OPEN SCENE's placements, which this slice has no concept of yet; the
-        // original placeholder stands in until the scene-tab slice gives it a scene to read.
+        // original placeholder stands in until part 2 gives it a scene to read.
         NavView::Instances => nav_placeholder(ui, model),
     }
 }
 
-/// List the open project's content for a project-scoped view, one tight row per name. `scan` is the
-/// `ContentLayout` discovery method for this view's kind - `scene_names`, `prefab_slugs`, or
-/// `lighting_names` - run per frame against the open project's root. The per-frame scan is simple and
-/// self-refreshing: a file added on disk shows on the next frame with no cache to invalidate. (An
-/// app-side cache or a file-watch is a deferred optimization, for if the scan ever costs too much; it
-/// does not for a folder listing.) Display-only this slice: each row is a label, not a control -
-/// opening a scene as a tab and selecting it are later slices. Two empty states read dim and italic:
-/// no project open at all, or a project open with nothing of this kind yet (`empty`).
-fn content_list(ui: &mut egui::Ui, model: &Model, empty: &str, scan: fn(&ContentLayout) -> Vec<String>) {
+/// List the open project's content for a project-scoped view, one tight row per name, returning the
+/// name of the row clicked this frame (only ever `Some` when `clickable`; the caller maps it to an
+/// action). `scan` is the `ContentLayout` discovery method for this view's kind - `scene_names`,
+/// `prefab_slugs`, or `lighting_names` - run per frame against the open project's root. The per-frame
+/// scan is simple and self-refreshing: a file added on disk shows on the next frame with no cache to
+/// invalidate. (An app-side cache or a file-watch is a deferred optimization, for if the scan ever
+/// costs too much; it does not for a folder listing.) `clickable` marks the rows as openable (Scenes);
+/// the display-only lists (Prefabs, Lighting) pass `false` and render inert. Two empty states read dim
+/// and italic: no project open at all, or a project open with nothing of this kind yet (`empty`).
+fn content_list(
+    ui: &mut egui::Ui,
+    model: &Model,
+    empty: &str,
+    scan: fn(&ContentLayout) -> Vec<String>,
+    clickable: bool,
+) -> Option<String> {
     ui.add_space(4.0);
     let Some(project) = model.project.as_ref() else {
         empty_note(ui, "No project open");
-        return;
+        return None;
     };
     let names = scan(&ContentLayout::new(project.root()));
     if names.is_empty() {
         empty_note(ui, empty);
-        return;
+        return None;
     }
     // A scroll area takes over when the list outgrows the body, so a content-heavy project can reach
     // every name rather than losing the ones past the fold (the icon bar claims its strip first, so an
     // un-scrolled overflow would simply be clipped). It draws no scrollbar until the content overflows.
+    let mut clicked = None;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         // A tight file-list: rows sit close, parted by a hairline of spacing, not the form spacing the
         // panel uses elsewhere.
         ui.spacing_mut().item_spacing.y = 2.0;
         for name in &names {
-            content_row(ui, name);
+            if content_row(ui, name, clickable) {
+                clicked = Some(name.clone());
+            }
         }
     });
+    clicked
 }
 
-/// One content row: the name in primary text, inset by [`ROW_PAD`] from the flush panel edge and
-/// centred in a fixed-height cell ([`NAV_ROW_HEIGHT`]). Display-only this slice - no hover, no click,
-/// no selection highlight; those land when a row opens a tab. The fixed cell (not the label's own
-/// height) keeps the rows even and gives the full-bleed selection highlight to come a rect to fill.
-fn content_row(ui: &mut egui::Ui, name: &str) {
-    let text = theme::palette(ui.ctx()).text;
-    let (rect, _response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), NAV_ROW_HEIGHT), egui::Sense::hover());
+/// One content row: the name inset by [`ROW_PAD`] from the flush panel edge and centred in a fixed-height
+/// cell ([`NAV_ROW_HEIGHT`]). Returns whether it was clicked this frame (always `false` for a display-only
+/// row). A `clickable` row lights up under the pointer (a hover fill and brighter text) and shows the hand
+/// cursor; a display-only row stays inert. Both render identically at rest (primary text, no fill), so a
+/// clickable list reads the same as before until the pointer is over it. The fixed cell (not the label's
+/// own height) keeps the rows even and gives the full-bleed selection highlight to come a rect to fill.
+fn content_row(ui: &mut egui::Ui, name: &str, clickable: bool) -> bool {
+    let p = theme::palette(ui.ctx());
+    let sense = if clickable { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), NAV_ROW_HEIGHT), sense);
+    let response = if clickable { response.on_hover_cursor(egui::CursorIcon::PointingHand) } else { response };
+    let hovered = clickable && response.hovered();
+    if hovered {
+        ui.painter().rect_filled(rect, 0.0, p.hover);
+    }
+    let color = if hovered { p.text_bright } else { p.text };
     let pos = egui::pos2(rect.left() + ROW_PAD, rect.center().y);
     let font = egui::TextStyle::Body.resolve(ui.style());
-    ui.painter().text(pos, egui::Align2::LEFT_CENTER, name, font, text);
+    ui.painter().text(pos, egui::Align2::LEFT_CENTER, name, font, color);
+    response.clicked()
 }
 
 /// A dim, italic note filling the body in place of a list: the empty states for the project-scoped
@@ -279,10 +313,9 @@ fn divider(ui: &mut egui::Ui, height: f32) {
 }
 
 /// The tab bar over the view column: the app-menu hamburger at the left (which opens the File / View /
-/// Run / Help menu), then one placeholder tab. Hand-drawn (egui has no tab widget). The tab does not
-/// switch or close; opening, closing, and switching tabs is a later slice. The single tab is rendered
-/// active to exercise the active-tab styling: the editor-surface fill (so it reads continuous with the
-/// well below) and the one accent as a top line.
+/// Run / Help menu), then one cell per open tab (`model.shell.tabs`). With no tab open the bar is just
+/// the hamburger. Hand-drawn (egui has no tab widget). A click on a tab selects it and its close glyph
+/// closes it (`tab_cell`); the active tab (`model.shell.active_tab`) carries the active styling.
 pub fn tab_bar(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
     egui::TopBottomPanel::top("wok_tab_bar").exact_height(TAB_BAR_HEIGHT).show(ctx, |ui| {
         ui.horizontal_centered(|ui| {
@@ -290,15 +323,20 @@ pub fn tab_bar(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
             ui.add_space(8.0);
             // Tabs nearly touch, as in Zed, with the active fill the only thing parting them.
             ui.spacing_mut().item_spacing.x = 1.0;
-            tab_cell(ui, "sample", true);
+            let active = model.shell.active_tab();
+            for (i, tab) in model.shell.tabs().iter().enumerate() {
+                tab_cell(ui, tab.title(), active == Some(i), i, actions);
+            }
         });
     });
 }
 
-/// One tab cell: the title over the active fill, with an inert close glyph. The active tab borrows the
-/// editor surface (so it reads continuous with the well below) and carries the accent as a top line;
-/// an inactive tab sits flat and dim (the styling is here for when tab switching lands).
-fn tab_cell(ui: &mut egui::Ui, title: &str, active: bool) {
+/// One tab cell: the title and a close glyph over the tab fill. The active tab borrows the editor
+/// surface (so it reads continuous with the well below) and carries the accent as a top line; an
+/// inactive tab sits flat and dim. The whole cell senses one click: a click landing on the close glyph
+/// emits `CloseTab` (decided by hit-testing the glyph's rect, so there are no overlapping click widgets
+/// racing for the press), any other click on the cell emits `SelectTab`.
+fn tab_cell(ui: &mut egui::Ui, title: &str, active: bool, index: usize, actions: &mut Vec<Action>) {
     let p = theme::palette(ui.ctx());
     let fill = if active { p.editor_bg } else { egui::Color32::TRANSPARENT };
     let inner = egui::Frame::NONE.fill(fill).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
@@ -310,21 +348,48 @@ fn tab_cell(ui: &mut egui::Ui, title: &str, active: bool) {
             let title = egui::RichText::new(title).color(color);
             let title = if active { title.strong() } else { title };
             ui.label(title);
-            // The close affordance, the same Nerd Font family as the rest of the chrome, sized small
-            // so it sits quietly beside the title rather than competing with it.
-            ui.label(egui::RichText::new(icons::CLOSE).size(10.0).color(p.text_dim));
-        });
+            // The close affordance, the same Nerd Font family as the rest of the chrome, sized small so
+            // it sits quietly beside the title. Its rect is returned so a click landing on it closes the
+            // tab rather than selecting it.
+            ui.label(egui::RichText::new(icons::CLOSE).size(10.0).color(p.text_dim)).rect
+        })
+        .inner
     });
+    let close_rect = inner.inner;
+    // One click-sensing region over the whole cell (the labels inside sense nothing), so close-vs-select
+    // is decided by where the press landed, not by overlapping widgets fighting for it.
+    let cell = inner.response.interact(egui::Sense::click());
+    if cell.clicked() {
+        let on_close = cell.interact_pointer_pos().is_some_and(|pos| close_rect.contains(pos));
+        actions.push(if on_close { Action::CloseTab(index) } else { Action::SelectTab(index) });
+    }
     if active {
         let rect = inner.response.rect;
         ui.painter().hline(rect.x_range(), rect.top(), egui::Stroke::new(2.0, p.accent));
     }
 }
 
-/// The editor area: an empty themed well for this slice. A transparent panel over the editor-
-/// background backdrop (the GPU clear in the live app, the snapshot harness's background fill in the
-/// test), so the well reads as `editor_bg`. The per-context surface - the 3D viewport, the data views
-/// - lands here in later slices, drawn into this same transparent panel.
-pub fn editor_area(ctx: &egui::Context) {
-    egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |_ui| {});
+/// The editor area: the active tab's placeholder, or an empty well when no tab is open. A transparent
+/// panel over the editor-background backdrop (the GPU clear in the live app, the snapshot harness's
+/// background fill in the test), so the well reads as `editor_bg`. With a tab open it names the open
+/// scene, dim and centred - the stand-in for the per-context surface (the 3D viewport, the data views),
+/// which lands in later bites, drawn into this same transparent panel; with no tab open it is the bare
+/// well.
+pub fn editor_area(ctx: &egui::Context, model: &Model) {
+    egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+        let Some(tab) = model.shell.active_tab().and_then(|i| model.shell.tabs().get(i)) else {
+            return;
+        };
+        let p = theme::palette(ui.ctx());
+        let center = ui.max_rect().center();
+        // The open scene's name over a one-line hint that the real surface is still to come, both dim
+        // and centred on the well. Painted directly (like the nav rows) rather than laid out, so the
+        // block sits at the centre regardless of the panel size; the name sits just above the centre
+        // line and the hint just below.
+        let name = egui::FontId::proportional(20.0);
+        let hint = egui::FontId::proportional(12.0);
+        let painter = ui.painter();
+        painter.text(center, egui::Align2::CENTER_BOTTOM, tab.title(), name, p.text_dim);
+        painter.text(center + egui::vec2(0.0, 6.0), egui::Align2::CENTER_TOP, "viewport lands here", hint, p.text_dim);
+    });
 }

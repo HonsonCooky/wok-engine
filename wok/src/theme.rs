@@ -28,8 +28,10 @@ pub struct Palette {
     /// bar's top hairline and group divider, the panel header's underline - not only through egui's
     /// own panel separators (sharp-edges: a colour the view paints must be public).
     pub border: Color32,
-    /// Hover fill for buttons and menu items.
-    hover: Color32,
+    /// Hover fill for buttons and menu items. Public because the nav panel paints it directly behind a
+    /// hovered clickable content row (sharp-edges: a colour the view paints must be public), the same
+    /// reason `text` and `border` are - egui's own widgets read it through `hovered.bg_fill`, set here.
+    pub hover: Color32,
     /// Pressed and open fill.
     pressed: Color32,
     /// Primary text: ordinary body text. Public because the nav panel paints its content-list rows

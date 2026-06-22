@@ -14,9 +14,10 @@
 //! status bar at the bottom, the tab bar at the top, the editor well filling the rest - spans only the
 //! remaining width, so the status bar never runs under the nav. This holds whichever side the panel
 //! docks to: it is added before the view column on either side. When the panel is hidden the view
-//! column spans the full width. The status bar now reads the open project (its name, or that none is
-//! open); the editor well is still a static placeholder; the nav panel, the status bar, and the tab
-//! bar's hamburger (now with a wired File menu) read the model and emit actions.
+//! column spans the full width. The status bar reads the open project (its name, or that none is open);
+//! the tab bar renders the open tabs and the editor well names the active one (an empty well when none
+//! is open); the nav panel, the status bar, the tab bar, and the hamburger's menus read the model and
+//! emit actions.
 
 use crate::action::Action;
 use crate::menu;
@@ -36,14 +37,14 @@ pub fn chrome(ctx: &egui::Context, model: &Model) -> Vec<Action> {
     }
     menu::status_bar(ctx, model.project.as_ref());
     workspace::tab_bar(ctx, model, &mut actions);
-    workspace::editor_area(ctx);
+    workspace::editor_area(ctx, model);
     actions
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{NavSide, NavView};
+    use crate::model::{NavSide, NavView, Tab};
     use crate::project::Project;
     use crate::recent::Recents;
     use egui_kittest::Harness;
@@ -70,6 +71,20 @@ mod tests {
     fn model_with(active: NavView) -> Model {
         let mut model = Model::default();
         model.shell.select_nav(active);
+        model
+    }
+
+    /// A model with `scenes` opened as tabs (in order) and the tab at `active` focused, built directly
+    /// through the tab mutators (not by faking clicks) so the snapshot pins a specific tab-bar state -
+    /// the active-tab styling and the editor-well placeholder both track it (sharp-edges 3). The
+    /// navigation view is left at the default; the tabs exercise the tab chrome independently of any
+    /// open project or nav content.
+    fn model_with_tabs(scenes: &[&str], active: usize) -> Model {
+        let mut model = Model::default();
+        for scene in scenes {
+            model.shell.open_tab(Tab::Scene((*scene).to_string()));
+        }
+        model.shell.select_tab(active);
         model
     }
 
@@ -178,6 +193,22 @@ mod tests {
         let mut model = Model::default();
         model.shell.set_nav_side(NavSide::Right);
         snapshot_of("chrome_nav_docked_right", egui::ThemePreference::Dark, model);
+    }
+
+    /// One scene tab open and active: the tab bar shows the single tab styled active (the accent
+    /// top-line and the editor-surface fill), and the editor well names the open scene in place of the
+    /// empty well. Dark alone is enough; this is a content/layout state, not a palette one.
+    #[test]
+    fn chrome_one_tab_snapshot() {
+        snapshot_of("chrome_one_tab", egui::ThemePreference::Dark, model_with_tabs(&["village"], 0));
+    }
+
+    /// Two scene tabs with the second active: the first sits inactive (flat and dim), the second active
+    /// (the editor-surface fill and accent top-line), and the editor well names the active scene - the
+    /// switching state the tab bar shows. Dark alone is enough; this is a layout state, not a palette one.
+    #[test]
+    fn chrome_two_tabs_snapshot() {
+        snapshot_of("chrome_two_tabs", egui::ThemePreference::Dark, model_with_tabs(&["village", "dungeon"], 1));
     }
 
     /// The app-menu open at its View submenu, driven by clicking the hamburger then hovering View (the
