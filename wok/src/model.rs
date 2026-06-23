@@ -47,6 +47,21 @@ impl NavView {
     }
 }
 
+/// How the Instances view orders the open scene's placements - the panel header's one contextual
+/// control for that view. `Group` buckets placements under their prefab as a collapsible tree (the
+/// default, the way you read a scene: "how many of each thing"); `Flat` is a single flat list sorted
+/// A-Z by row label. View state, not project content: it changes how the same placements are shown,
+/// never what is authored, so it lives on the [`Shell`] beside the active view, not on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InstanceSort {
+    /// Group placements by prefab, one collapsible group row per prefab with its instance count. The
+    /// default.
+    #[default]
+    Group,
+    /// A single flat list, every placement as one row, sorted A-Z by its display label.
+    Flat,
+}
+
 /// Which side of the editor the navigation panel docks to (the user's choice; a left-hand-keyboard,
 /// right-hand-mouse setup is the reason it is configurable). Named `NavSide`, not `Side`, so it does
 /// not clash with egui's `egui::panel::Side` where the view picks `SidePanel::left`/`::right`.
@@ -110,6 +125,9 @@ pub struct Shell {
     /// The active tab, as an index into `tabs`, or `None` when no tab is open. The mutators keep it in
     /// step with `tabs`, holding the invariant "`Some` exactly when `tabs` is non-empty".
     active_tab: Option<usize>,
+    /// How the Instances view orders the active scene's placements (group-by-prefab or flat A-Z). The
+    /// panel header's contextual control for that view sets it; the body reads it to pick the layout.
+    instance_sort: InstanceSort,
 }
 
 impl Default for Shell {
@@ -120,6 +138,7 @@ impl Default for Shell {
             nav_side: NavSide::default(),
             tabs: Vec::new(),
             active_tab: None,
+            instance_sort: InstanceSort::default(),
         }
     }
 }
@@ -154,6 +173,12 @@ impl Shell {
         self.active_tab
     }
 
+    /// How the Instances view orders its placements (group-by-prefab or flat A-Z). The Instances body
+    /// reads this to pick its layout, and the header control marks the active mode from it.
+    pub fn instance_sort(&self) -> InstanceSort {
+        self.instance_sort
+    }
+
     // ---- mutations (only action::handle calls these) ----
 
     /// Switch the panel to show `view`.
@@ -169,6 +194,11 @@ impl Shell {
     /// Dock the navigation panel to `side`.
     pub(crate) fn set_nav_side(&mut self, side: NavSide) {
         self.nav_side = side;
+    }
+
+    /// Set how the Instances view orders its placements.
+    pub(crate) fn set_instance_sort(&mut self, sort: InstanceSort) {
+        self.instance_sort = sort;
     }
 
     /// Open `tab`, or focus it if an equal tab is already open - the no-duplicate rule (one obvious
@@ -255,6 +285,22 @@ mod tests {
         assert_eq!(shell.nav_side(), NavSide::Right);
         shell.set_nav_side(NavSide::Left);
         assert_eq!(shell.nav_side(), NavSide::Left);
+    }
+
+    #[test]
+    fn the_default_instance_sort_is_group_by_prefab() {
+        // The way you read a scene first: how many of each thing. The flat A-Z list is the alternative,
+        // not the landing.
+        assert_eq!(Shell::default().instance_sort(), InstanceSort::Group);
+    }
+
+    #[test]
+    fn set_instance_sort_switches_the_instances_ordering() {
+        let mut shell = Shell::default();
+        shell.set_instance_sort(InstanceSort::Flat);
+        assert_eq!(shell.instance_sort(), InstanceSort::Flat);
+        shell.set_instance_sort(InstanceSort::Group);
+        assert_eq!(shell.instance_sort(), InstanceSort::Group);
     }
 
     // ---- tabs ----

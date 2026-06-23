@@ -21,7 +21,7 @@
 
 use std::path::PathBuf;
 
-use crate::model::{Model, NavSide, NavView, Tab};
+use crate::model::{InstanceSort, Model, NavSide, NavView, Tab};
 use crate::project::Project;
 
 /// A menu choice, keybind, or chrome interaction, emitted by the view and applied by [`handle`].
@@ -34,6 +34,9 @@ pub enum Action {
     ToggleNavPanel,
     /// Dock the navigation panel to this side. Emitted by the View menu.
     SetNavSide(NavSide),
+    /// Set how the Instances view orders its placements (group-by-prefab or flat A-Z). Emitted by the
+    /// panel header's sort control while the Instances view is active.
+    SetInstanceSort(InstanceSort),
 
     // ---- tabs ----
     /// Open the named scene as a tab over the editor area, focusing it if already open (no
@@ -82,6 +85,10 @@ pub fn handle(model: &mut Model, action: Action) -> Handled {
         }
         Action::SetNavSide(side) => {
             model.shell.set_nav_side(side);
+            Handled::default()
+        }
+        Action::SetInstanceSort(sort) => {
+            model.shell.set_instance_sort(sort);
             Handled::default()
         }
         Action::OpenScene(name) => {
@@ -166,6 +173,16 @@ mod tests {
         assert_eq!(model.shell.nav_side(), NavSide::Right);
         handle(&mut model, Action::SetNavSide(NavSide::Left));
         assert_eq!(model.shell.nav_side(), NavSide::Left);
+    }
+
+    #[test]
+    fn set_instance_sort_flips_the_instances_ordering() {
+        let mut model = Model::default();
+        assert_eq!(model.shell.instance_sort(), InstanceSort::Group, "group-by-prefab is the default");
+        handle(&mut model, Action::SetInstanceSort(InstanceSort::Flat));
+        assert_eq!(model.shell.instance_sort(), InstanceSort::Flat);
+        handle(&mut model, Action::SetInstanceSort(InstanceSort::Group));
+        assert_eq!(model.shell.instance_sort(), InstanceSort::Group);
     }
 
     // ---- tabs ----

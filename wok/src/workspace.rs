@@ -14,8 +14,9 @@
 //! views (Scenes, Prefabs, Lighting) through `wok_scene::ContentLayout` discovery, scanned per frame; a
 //! Scenes row opens that scene as a tab (`Action::OpenScene`), while Prefabs and Lighting rows stay
 //! display-only (opening those contexts is a later bite). The this-scene Instances view lists the active
-//! scene tab's placements flat (from the reconciled `LoadedScene` threaded in), display-only for now -
-//! the richer tree and selection are part 2b. The panel docks to either side and toggles through the View menu
+//! scene tab's placements (from the reconciled `LoadedScene` threaded in) two ways, on the header's sort
+//! toggle: grouped under their prefab as a collapsible tree (the default), or a flat A-Z list. Rows are
+//! display-only for now - selection and the floating inspector are a later bite. The panel docks to either side and toggles through the View menu
 //! (`crate::menu`) - the composition root shows `nav_panel` only when visible, on the model's chosen
 //! side, and the menu drives both - and it resizes by dragging its inner edge, with egui owning the live
 //! width (so there is no Shell state for it). The tab bar renders the model's open tabs: a click selects
@@ -29,7 +30,7 @@ use crate::action::Action;
 use crate::icons;
 use crate::loaded::LoadedScene;
 use crate::menu;
-use crate::model::{Model, NavSide, NavView};
+use crate::model::{InstanceSort, Model, NavSide, NavView};
 use crate::theme;
 
 /// The navigation panel's default width in points (README shell layout: ~240px on the left). The panel
@@ -69,6 +70,20 @@ const ROW_PAD: f32 = 10.0;
 /// fixed cell height rather than letting each label size itself, so the rows read as an even list and
 /// the full-bleed selection highlight (a later slice) has a row rect to fill.
 const NAV_ROW_HEIGHT: f32 = 24.0;
+
+/// The column width reserved for a tree row's glyph - the group chevron and folder, the instance cube -
+/// in points. A touch over the icon [`icons::SIZE`] so the ~12px glyph has a little room in its column
+/// and the glyph columns line up down the tree.
+const TREE_GLYPH: f32 = 16.0;
+
+/// The gap in points between a tree row's last glyph and the text that follows it.
+const TREE_GAP: f32 = 4.0;
+
+/// An instance row's indent in points: one disclosure-column ([`ROW_PAD`] + [`TREE_GLYPH`]) past where
+/// the group's chevron sits, so the instance cube lands under the group's folder and its label under
+/// the prefab name. The empty chevron column is what reads as the nesting (handoff view 2: instance
+/// rows indented ~30px).
+const INSTANCE_INDENT: f32 = ROW_PAD + TREE_GLYPH;
 
 /// The Nerd Font glyph for a navigation view's bottom-bar cell. Which icon-font codepoint a view draws
 /// is a chrome concern, so the mapping lives here with the view rather than on `NavView` in the model
@@ -112,20 +127,21 @@ pub fn nav_panel(ctx: &egui::Context, model: &Model, loaded_scene: Option<&Loade
         .show(ctx, |ui| {
             // The header (top) and icon bar (foot) are nested panels claiming opposite edges; the body
             // then fills what remains between them. The header claims the top first so it sits at the
-            // same y as the tab bar (see nav_header). The icon bar is the only region that emits
-            // actions this slice; the header and body read the active view to label themselves.
-            nav_header(ui, model);
+            // same y as the tab bar (see nav_header). The header's Instances sort toggle and the icon
+            // bar both emit actions; the body reads the active view (and, for Instances, the sort mode).
+            nav_header(ui, model, actions);
             icon_bar(ui, model, actions);
             nav_body(ui, model, loaded_scene, actions);
         });
 }
 
 /// The panel header: a single row naming the active view (the handoff's text_bright, weight-600
-/// title) with the view's one contextual control on the right - a dim placeholder here, inert until
-/// the views are built. Its height is exactly the tab-bar height (driven off `TAB_BAR_HEIGHT`, not a
-/// separate value), so the header and the tab bar read as one band across the top with flush bottom
-/// edges; a bottom hairline at the header's foot lands on that shared edge.
-fn nav_header(ui: &mut egui::Ui, model: &Model) {
+/// title) with the view's one contextual control on the right. Only the Instances view has one this
+/// bite - the group-by-prefab / flat A-Z sort toggle ([`sort_toggle`]); the other views' header right
+/// side is empty. Its height is exactly the tab-bar height (driven off `TAB_BAR_HEIGHT`, not a separate
+/// value), so the header and the tab bar read as one band across the top with flush bottom edges; a
+/// bottom hairline at the header's foot lands on that shared edge.
+fn nav_header(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
     egui::TopBottomPanel::top("wok_nav_header")
         .exact_height(TAB_BAR_HEIGHT)
         .frame(flush_panel(ui.ctx()))
@@ -139,20 +155,49 @@ fn nav_header(ui: &mut egui::Ui, model: &Model) {
                 ui.label(egui::RichText::new(model.shell.active_nav().title()).color(p.text_bright).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(ROW_PAD);
-                    // The contextual-control slot (for Instances, a group-by / sort toggle). A dim
-                    // placeholder for now; the real control lands with the view.
-                    ui.label(egui::RichText::new("A-Z").color(p.text_dim).small());
+                    // The view's one contextual control. Only Instances has one this bite; the rest
+                    // leave the right side empty.
+                    if model.shell.active_nav() == NavView::Instances {
+                        sort_toggle(ui, model.shell.instance_sort(), actions);
+                    }
                 });
             });
         });
 }
 
+/// The Instances view's contextual control: a compact two-segment toggle - "Group" and "A-Z" - marking
+/// the active [`InstanceSort`] in the accent and emitting [`Action::SetInstanceSort`] for the other on a
+/// click. The header lays its right side out right-to-left, so the segments are added right ("A-Z")
+/// before left ("Group") to read "Group | A-Z" across.
+fn sort_toggle(ui: &mut egui::Ui, sort: InstanceSort, actions: &mut Vec<Action>) {
+    let dim = theme::palette(ui.ctx()).text_dim;
+    if sort_seg(ui, "A-Z", sort == InstanceSort::Flat) {
+        actions.push(Action::SetInstanceSort(InstanceSort::Flat));
+    }
+    ui.label(egui::RichText::new("|").color(dim).small());
+    if sort_seg(ui, "Group", sort == InstanceSort::Group) {
+        actions.push(Action::SetInstanceSort(InstanceSort::Group));
+    }
+}
+
+/// One segment of the sort toggle: a small clickable label, the accent colour when it is the active
+/// mode and dim otherwise, showing the hand cursor. Returns whether it was clicked this frame. Not
+/// selectable, so it senses the click rather than offering text selection.
+fn sort_seg(ui: &mut egui::Ui, text: &str, active: bool) -> bool {
+    let p = theme::palette(ui.ctx());
+    let color = if active { p.accent } else { p.text_dim };
+    let label =
+        egui::Label::new(egui::RichText::new(text).small().color(color)).selectable(false).sense(egui::Sense::click());
+    ui.add(label).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
 /// The panel body: wholly the active view. The project-scoped views (Scenes, Prefabs, Lighting) list
 /// the open project's content of that kind; Instances lists the active scene tab's placements (from
-/// `loaded_scene`). A Scenes row opens that scene as a tab; Prefabs and Lighting rows are display-only
-/// (opening those contexts is a later bite), and the Instances rows are display-only too (selection is
-/// a later bite). The body names the active view either way, so switching is visible here as well as in
-/// the header and the icon accent.
+/// `loaded_scene`), grouped or flat per the header's sort toggle. A Scenes row opens that scene as a
+/// tab; Prefabs and Lighting rows are display-only (opening those contexts is a later bite), and the
+/// Instances rows are display-only too (selection and the floating inspector are a later bite). The
+/// body names the active view either way, so switching is visible here as well as in the header and the
+/// icon accent.
 fn nav_body(ui: &mut egui::Ui, model: &Model, loaded_scene: Option<&LoadedScene>, actions: &mut Vec<Action>) {
     match model.shell.active_nav() {
         NavView::Scenes => {
@@ -167,9 +212,10 @@ fn nav_body(ui: &mut egui::Ui, model: &Model, loaded_scene: Option<&LoadedScene>
         NavView::Lighting => {
             content_list(ui, model, "No lighting states yet", ContentLayout::lighting_names, false);
         }
-        // The this-scene view: the active scene tab's placements, flat. The richer tree (group-by-prefab,
-        // type icons, the state dots, hidden styling, the A-Z / group sort toggle) is part 2b.
-        NavView::Instances => instances_list(ui, loaded_scene),
+        // The this-scene view: the active scene tab's placements, grouped or flat per the sort toggle.
+        // No state dots / hidden styling / visibility toggles - per-instance physical state is not
+        // authored here (editor-design.md placement boundary); the game owns it by id at runtime.
+        NavView::Instances => instances_list(ui, model.shell.instance_sort(), loaded_scene),
     }
 }
 
@@ -249,14 +295,14 @@ fn empty_note(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-/// The Instances view: the active scene tab's placements as a flat list, one tight row each, reusing
-/// the content-list row styling. The label is the placement's author name where set, else the
-/// `{prefab} #{id}` fallback; rows are display-only this bite (selection is part 2b). Three resting
-/// states with nothing to list: no scene tab active (`loaded_scene` is `None`) reads "No scene open"; a
-/// scene that failed to load reads "Scene failed to load" (the detail is noted on the residency for a
-/// later bite to surface); and a loaded scene with no placements reads "No instances". Rows sit in the
-/// residency's order - by instance id - until the part-2b sort toggle.
-fn instances_list(ui: &mut egui::Ui, loaded_scene: Option<&LoadedScene>) {
+/// The Instances view: the active scene tab's placements, laid out per the header's sort toggle -
+/// grouped under their prefab as a collapsible tree ([`instances_tree`], the default), or a flat A-Z
+/// list ([`instances_flat`]). Rows are display-only this bite (selection and the floating inspector are
+/// a later bite). Three resting states with nothing to list: no scene tab active (`loaded_scene` is
+/// `None`) reads "No scene open"; a scene that failed to load reads "Scene failed to load" (the detail
+/// is noted on the residency for a later bite to surface); and a loaded scene with no placements reads
+/// "No instances".
+fn instances_list(ui: &mut egui::Ui, sort: InstanceSort, loaded_scene: Option<&LoadedScene>) {
     ui.add_space(4.0);
     let Some(loaded) = loaded_scene else {
         empty_note(ui, "No scene open");
@@ -276,17 +322,125 @@ fn instances_list(ui: &mut egui::Ui, loaded_scene: Option<&LoadedScene>) {
     // so a placement-heavy scene reaches every row rather than clipping past the fold.
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        for placement in placements {
-            // Display-only this bite: the row senses a hover but emits nothing (selection is part 2b).
-            content_row(ui, &placement_label(placement), false);
+        match sort {
+            InstanceSort::Group => instances_tree(ui, loaded.name(), placements),
+            InstanceSort::Flat => instances_flat(ui, placements),
         }
     });
 }
 
-/// One placement's flat-list label: its author-given name when set, else the `{prefab} #{id}` fallback
+/// The Instances view's flat layout: every placement as one row, sorted A-Z by its display label,
+/// reusing the content-list row styling. The order is on the label the row reads, so a named placement
+/// sorts by its name and an unnamed one by its `{prefab} #{id}` fallback - not by the underlying
+/// instance id.
+fn instances_flat(ui: &mut egui::Ui, placements: &[Placement]) {
+    let mut labels: Vec<String> = placements.iter().map(placement_label).collect();
+    labels.sort();
+    for label in &labels {
+        // Display-only this bite: the row senses a hover but emits nothing (selection is a later bite).
+        content_row(ui, label, false);
+    }
+}
+
+/// The Instances view's grouped layout: one collapsible group row per prefab (sorted by prefab name)
+/// carrying its instance count, and under an open group the indented instance rows (in instance-id
+/// order, the residency's order). The group open state is egui-managed transient view memory, not model
+/// state - collapsing a group is a browsing affordance, never an authored edit.
+fn instances_tree(ui: &mut egui::Ui, scene: &str, placements: &[Placement]) {
+    for (prefab, members) in group_by_prefab(placements) {
+        if group_row(ui, scene, prefab, members.len()) {
+            for placement in members {
+                instance_row(ui, &placement_label(placement));
+            }
+        }
+    }
+}
+
+/// Bucket placements by their prefab, returning one entry per prefab - its name and its members - with
+/// the entries sorted by prefab name. Members keep the input's order, which the residency sorts by
+/// instance id, so each bucket comes out id-ordered without a second sort. Pure (no egui), so the
+/// grouping is unit tested directly. A linear scan per placement is ample at editor scene scale.
+fn group_by_prefab(placements: &[Placement]) -> Vec<(&str, Vec<&Placement>)> {
+    let mut groups: Vec<(&str, Vec<&Placement>)> = Vec::new();
+    for placement in placements {
+        let prefab = placement.prefab.as_str();
+        match groups.iter_mut().find(|(name, _)| *name == prefab) {
+            Some((_, members)) => members.push(placement),
+            None => groups.push((prefab, vec![placement])),
+        }
+    }
+    groups.sort_by(|a, b| a.0.cmp(b.0));
+    groups
+}
+
+/// One prefab group row: a disclosure chevron, a folder glyph, the prefab name, and the instance count
+/// on the right, in a fixed-height cell. The whole row senses a click that toggles the group's open
+/// state - egui transient memory keyed per scene and prefab ([`instance_group_id`]), so it outlives a
+/// frame but is never authored. Returns whether the group is open, so the caller renders its instance
+/// rows. Hovering lights the row, the same as a clickable content row.
+fn group_row(ui: &mut egui::Ui, scene: &str, prefab: &str, count: usize) -> bool {
+    let p = theme::palette(ui.ctx());
+    let id = instance_group_id(scene, prefab);
+    let mut open = ui.data_mut(|d| d.get_temp::<bool>(id).unwrap_or(true));
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), NAV_ROW_HEIGHT), egui::Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if response.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_temp(id, open));
+    }
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter().rect_filled(rect, 0.0, p.hover);
+    }
+    let ink = if hovered { p.text_bright } else { p.text };
+    // [pad][chevron][folder][prefab name .......][count][pad]
+    let chevron = if open { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT };
+    let chevron_rect = glyph_cell(rect, ROW_PAD);
+    icons::paint(ui.painter(), chevron_rect, chevron, ink);
+    let folder_rect = glyph_cell(rect, chevron_rect.right());
+    icons::paint(ui.painter(), folder_rect, icons::FOLDER, ink);
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let name_pos = egui::pos2(folder_rect.right() + TREE_GAP, rect.center().y);
+    ui.painter().text(name_pos, egui::Align2::LEFT_CENTER, prefab, font.clone(), ink);
+    let count_pos = egui::pos2(rect.right() - ROW_PAD, rect.center().y);
+    ui.painter().text(count_pos, egui::Align2::RIGHT_CENTER, count.to_string(), font, p.text_dim);
+    open
+}
+
+/// One instance row under an open group: a cube glyph indented one disclosure-column in (so it sits
+/// under the group's folder, the empty chevron column reading as the indent) and the placement's label.
+/// Display-only this bite (selection is a later bite), so unlike a group row it senses nothing and does
+/// not light on hover.
+fn instance_row(ui: &mut egui::Ui, label: &str) {
+    let p = theme::palette(ui.ctx());
+    let (rect, _response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), NAV_ROW_HEIGHT), egui::Sense::hover());
+    let cube_rect = glyph_cell(rect, INSTANCE_INDENT);
+    icons::paint(ui.painter(), cube_rect, icons::CUBE, p.text);
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let pos = egui::pos2(cube_rect.right() + TREE_GAP, rect.center().y);
+    ui.painter().text(pos, egui::Align2::LEFT_CENTER, label, font, p.text);
+}
+
+/// A [`TREE_GLYPH`]-wide glyph cell at `left`, spanning the row's full height, for [`icons::paint`] to
+/// centre a tree glyph in. Sharing it keeps the chevron, folder, and cube columns aligned down the tree.
+fn glyph_cell(row: egui::Rect, left: f32) -> egui::Rect {
+    egui::Rect::from_min_size(egui::pos2(left, row.top()), egui::vec2(TREE_GLYPH, row.height()))
+}
+
+/// The egui-memory id a prefab group's open state is stored under, keyed per scene and prefab so
+/// collapsing a group in one scene leaves a same-named prefab's group in another scene at its default.
+/// `pub(crate)` so the snapshot test can drive a group collapsed by seeding the very id the view reads
+/// (the open state is transient view memory, not model state a test could build directly).
+pub(crate) fn instance_group_id(scene: &str, prefab: &str) -> egui::Id {
+    egui::Id::new(("wok_instances_group", scene, prefab))
+}
+
+/// One placement's display label: its author-given name when set, else the `{prefab} #{id}` fallback
 /// (e.g. `oak_tree #3`) - enough to tell two instances of the same prefab apart by their stable
-/// instance id. This is display formatting, so it lives view-side with the row that shows it, not on
-/// the data.
+/// instance id. Display formatting, so it lives view-side with the rows that show it, not on the data;
+/// both the flat list and the grouped tree's instance rows read from it.
 fn placement_label(placement: &Placement) -> String {
     match &placement.name {
         Some(name) => name.clone(),
@@ -435,4 +589,45 @@ pub fn editor_area(ctx: &egui::Context, model: &Model) {
         painter.text(center, egui::Align2::CENTER_BOTTOM, tab.title(), name, p.text_dim);
         painter.text(center + egui::vec2(0.0, 6.0), egui::Align2::CENTER_TOP, "viewport lands here", hint, p.text_dim);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wok_scene::{InstanceId, PrefabRef, Transform};
+
+    fn placement(prefab: &str, id: u32) -> Placement {
+        Placement {
+            prefab: PrefabRef::new(prefab),
+            instance_id: InstanceId(id),
+            name: None,
+            transform: Transform::IDENTITY,
+            state: None,
+        }
+    }
+
+    #[test]
+    fn group_by_prefab_buckets_sorted_by_name_with_id_ordered_members() {
+        // Input in instance-id order (the residency's order) with the prefabs interleaved and out of
+        // name order, so a pass proves the bucketing and the name sort rather than incidental input
+        // order: well #0, oak_tree #1, well #2, oak_tree #3, oak_tree #4.
+        let placements = vec![
+            placement("well", 0),
+            placement("oak_tree", 1),
+            placement("well", 2),
+            placement("oak_tree", 3),
+            placement("oak_tree", 4),
+        ];
+        let groups = group_by_prefab(&placements);
+
+        // One entry per distinct prefab, sorted by prefab name (oak_tree before well), counts correct.
+        let summary: Vec<(&str, usize)> = groups.iter().map(|(name, members)| (*name, members.len())).collect();
+        assert_eq!(summary, vec![("oak_tree", 3), ("well", 2)]);
+
+        // Members keep instance-id order within each group (the id-ordered input, bucketed in place).
+        let oak_ids: Vec<u32> = groups[0].1.iter().map(|p| p.instance_id.0).collect();
+        assert_eq!(oak_ids, vec![1, 3, 4]);
+        let well_ids: Vec<u32> = groups[1].1.iter().map(|p| p.instance_id.0).collect();
+        assert_eq!(well_ids, vec![0, 2]);
+    }
 }

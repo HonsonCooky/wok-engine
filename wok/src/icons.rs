@@ -44,6 +44,16 @@ pub const LIST_BULLETED: char = '\u{f0279}';
 pub const WEATHER_SUNNY: char = '\u{f0599}';
 /// `nf-md-close` - the tab close affordance.
 pub const CLOSE: char = '\u{f0156}';
+/// `nf-md-chevron-right` - a collapsed group's disclosure in the Instances tree.
+pub const CHEVRON_RIGHT: char = '\u{f0142}';
+/// `nf-md-chevron-down` - an expanded group's disclosure in the Instances tree.
+pub const CHEVRON_DOWN: char = '\u{f0140}';
+/// `nf-md-folder` - a prefab group row in the Instances tree.
+pub const FOLDER: char = '\u{f024b}';
+/// `nf-md-cube` - an instance (placement) row in the Instances tree. The filled cube, distinct from
+/// the Prefabs nav view's [`CUBE_OUTLINE`], so a placed instance reads as solid against the outline
+/// the library uses.
+pub const CUBE: char = '\u{f01a6}';
 
 /// The bundled icons-only symbols font, embedded so the build needs no network and the asset is
 /// version-pinned (see `wok/assets/README.md`).
@@ -85,18 +95,20 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, glyph: char, color: egui
 mod tests {
     use super::*;
 
-    /// The "same size" guard: every glyph the chrome paints through [`paint`] - the hamburger and the
-    /// four nav-bar icons - normalizes to one ink height, regardless of how much of the em its shape
-    /// fills. Measures each glyph's ink at the rescaled font and asserts it lands on `SIZE` within a
-    /// pixel of rounding/hinting slack. The tab close glyph is excluded: it renders as a sized label,
-    /// not through `paint`.
+    /// The "same size" guard: every glyph the chrome paints through [`paint`] - the hamburger, the
+    /// four nav-bar icons, and the Instances tree's chevrons, folder, and cube - normalizes to one ink
+    /// height, regardless of how much of the em its shape fills. Measures each glyph's ink at the
+    /// rescaled font and asserts it lands on `SIZE` within a pixel of rounding/hinting slack. A wrong
+    /// codepoint (a glyph the bundled font lacks) renders as zero-ink tofu and trips this assert, so it
+    /// doubles as a codepoint-exists check. The tab close glyph is excluded: it renders as a sized
+    /// label, not through `paint`.
     #[test]
     fn painted_glyphs_share_one_ink_height() {
         let ctx = egui::Context::default();
         install_font(&ctx);
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             ctx.fonts(|fonts| {
-                for glyph in [MENU, LAYERS, CUBE_OUTLINE, LIST_BULLETED, WEATHER_SUNNY] {
+                for glyph in [MENU, LAYERS, CUBE_OUTLINE, LIST_BULLETED, WEATHER_SUNNY, CHEVRON_RIGHT, CHEVRON_DOWN, FOLDER, CUBE] {
                     let probe = fonts.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(MEASURE_SIZE), egui::Color32::WHITE);
                     let font = font_for_ink_height(probe.mesh_bounds.size());
                     let galley = fonts.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(font), egui::Color32::WHITE);

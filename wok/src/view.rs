@@ -49,7 +49,7 @@ pub fn chrome(ctx: &egui::Context, model: &Model, loaded_scene: Option<&LoadedSc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{NavSide, NavView, Tab};
+    use crate::model::{InstanceSort, NavSide, NavView, Tab};
     use crate::project::Project;
     use crate::recent::Recents;
     use egui_kittest::Harness;
@@ -124,8 +124,8 @@ mod tests {
     fn snapshot_of(name: &str, theme: egui::ThemePreference, model: Model) {
         let _gpu = gpu_guard();
         // The states routed through here have no scene loaded (the nav-view, tab, dock, and menu
-        // snapshots); the Instances-with-placements state seeds its own scene and builds the harness
-        // directly (`chrome_instances_listed`).
+        // snapshots); the Instances-with-placements states seed their own scene and build the harness
+        // directly (the `chrome_instances_*` tests).
         let mut harness = chrome_harness(theme, egui::vec2(1100.0, 700.0), model, None);
         harness.run();
         harness.snapshot(name);
@@ -141,7 +141,7 @@ mod tests {
     /// guard. The body shows the Instances "No scene open" empty state (no scene tab is active, so the
     /// frame loop loads nothing). Scenes, not Instances, is the default landing view (since
     /// 2026-06-23); that default state is the `chrome_scenes` pair below, and the Instances view
-    /// listing a loaded scene's placements is `chrome_instances_listed`.
+    /// listing a loaded scene's placements is the `chrome_instances_*` trio (grouped, collapsed, flat).
     #[test]
     fn chrome_snapshot() {
         snapshot("chrome", egui::ThemePreference::Dark, NavView::Instances);
@@ -196,10 +196,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
     }
 
-    /// A minimal but well-formed scene on disk: a `scene.json` manifest plus one chunk holding three
-    /// placements - two unnamed (so the `{prefab} #{id}` fallback shows, including two `oak_tree`s
-    /// distinguished by id) and one named. Written under `root`/`scene`. The placement ids (0, 1, 2)
-    /// fix the listed order so the snapshot is deterministic; the temp path itself is never displayed.
+    /// A well-formed scene on disk spanning two prefabs with several instances each, so the grouped
+    /// tree shows real groups and counts: three `oak_tree`s (one named "the landmark oak", two on the
+    /// `{prefab} #{id}` fallback) and two `rock`s. Written as one chunk in scrambled order under
+    /// `root`/`scene`; the residency sorts by instance id (0..=4), so the listed order is deterministic
+    /// regardless of the file order. The fixed ids also fix both orderings under test - grouped (by
+    /// prefab name, then id) and flat (A-Z by row label, where "the landmark oak" sorts after the
+    /// `rock` fallbacks rather than at its id-1 slot).
     fn seed_instances_scene(root: &std::path::Path, scene: &str) {
         let layout = ContentLayout::new(root);
         std::fs::create_dir_all(layout.scene_dir(scene)).unwrap();
@@ -208,7 +211,7 @@ mod tests {
             default_lighting: LightStateRef::new("noon"),
             regions: vec![],
             default_streaming: StreamingDefaults { load_radius: 3, default_eagerness: Eagerness::Eager },
-            next_instance_id: InstanceId(3),
+            next_instance_id: InstanceId(5),
         };
         save_scene(&manifest, layout.scene_json(scene)).unwrap();
         let placement = |prefab: &str, id: u32, name: Option<&str>| Placement {
@@ -221,42 +224,81 @@ mod tests {
         let chunk = Chunk {
             coord: ChunkCoord::new(0, 0),
             placements: vec![
+                placement("rock", 3, None),
+                placement("oak_tree", 4, None),
                 placement("oak_tree", 0, None),
+                placement("rock", 2, None),
                 placement("oak_tree", 1, Some("the landmark oak")),
-                placement("well", 2, None),
             ],
             streaming: ChunkStreaming::default(),
         };
         save_chunk(&chunk, layout.chunk(scene, ChunkCoord::new(0, 0))).unwrap();
     }
 
-    /// The Instances view listing a loaded scene's placements: a scene tab open and active, the
-    /// Instances view selected, and the active scene's data loaded. The body lists the three placements
-    /// flat in instance-id order - the author name where set ("the landmark oak"), the `{prefab} #{id}`
-    /// fallback otherwise ("oak_tree #0", "well #2"). Seeds a temp scene on disk and loads it through
-    /// the real residency path (`LoadedScene::load`), so this guards the load-and-list end to end, the
-    /// way `chrome_scenes_listed` guards the content scan. The fixed-leaf "DemoGame" root keeps the
-    /// status-bar project name deterministic; the listed rows come from the seeded placements, not the
-    /// path. Dark alone: this is a content state, not a palette one (the `chrome` pair guards themes).
-    #[test]
-    fn chrome_instances_listed_snapshot() {
-        let _gpu = gpu_guard();
-        let parent = std::env::temp_dir().join("wok-instances-listed-snapshot");
+    /// Seed the two-prefab scene under a fixed-leaf "DemoGame" root (so the status-bar project name is
+    /// deterministic), and build the model with that project open, the scene opened as the active tab,
+    /// and the Instances view selected - the state a Scenes-row click then a switch to Instances
+    /// produces. Returns the model, the scene loaded through the real residency path
+    /// (`LoadedScene::load`, so the snapshots guard load-and-list end to end), and the temp parent to
+    /// remove when the test is done. `leaf` keeps each Instances snapshot's tree clear of the others'.
+    fn seed_instances_model(leaf: &str) -> (Model, LoadedScene, PathBuf) {
+        let parent = std::env::temp_dir().join(leaf);
         let root = parent.join("DemoGame");
         let _ = std::fs::remove_dir_all(&parent);
         seed_instances_scene(&root, "village");
 
         let mut model = model_with(NavView::Instances);
         model.project = Some(Project::new(root.clone()));
-        // Open the scene as the active tab - the same state a Scenes-row click produces - so the tab
-        // bar, the editor well, and the loaded scene all name "village".
         model.shell.open_tab(Tab::Scene("village".to_string()));
-
         let loaded = LoadedScene::load(&root, "village");
+        (model, loaded, parent)
+    }
+
+    /// The Instances view's grouped tree (the default sort): two group rows, sorted by prefab name -
+    /// "oak_tree" (count 3) above "rock" (count 2) - each open, with their instance rows indented under
+    /// them in id order. The named placement reads "the landmark oak" mid-group; the rest show the
+    /// `{prefab} #{id}` fallback. Dark alone: this is a content state, not a palette one (the `chrome`
+    /// pair guards themes).
+    #[test]
+    fn chrome_instances_grouped_snapshot() {
+        let _gpu = gpu_guard();
+        let (model, loaded, parent) = seed_instances_model("wok-instances-grouped-snapshot");
         let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, Some(loaded));
         harness.run();
-        harness.snapshot("chrome_instances_listed");
+        harness.snapshot("chrome_instances_grouped");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
 
+    /// The grouped tree with one group collapsed: the "oak_tree" group's open state is seeded `false`
+    /// in egui memory - the same transient store the view reads, under the very id it computes
+    /// (`workspace::instance_group_id`), since the open state is not model state a test could build
+    /// directly. So "oak_tree" shows its header and count with its instance rows hidden (a right-facing
+    /// chevron), while "rock" stays open below it. Dark alone: a layout state, not a palette one.
+    #[test]
+    fn chrome_instances_collapsed_snapshot() {
+        let _gpu = gpu_guard();
+        let (model, loaded, parent) = seed_instances_model("wok-instances-collapsed-snapshot");
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, Some(loaded));
+        // Drive the "oak_tree" group collapsed by seeding the id the view reads, then render that frame.
+        harness.ctx.data_mut(|d| d.insert_temp(crate::workspace::instance_group_id("village", "oak_tree"), false));
+        harness.run();
+        harness.snapshot("chrome_instances_collapsed");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// The Instances view's flat layout: every placement as one row, sorted A-Z by its display label.
+    /// Built by setting the shell's sort mode to `Flat` directly (not by clicking the header toggle),
+    /// so the snapshot pins the flat state (sharp-edges 3). The label order puts the two `oak_tree`
+    /// fallbacks first, then the two `rock` fallbacks, then "the landmark oak" last - by name, not by
+    /// its instance id. Dark alone: a content state, not a palette one.
+    #[test]
+    fn chrome_instances_flat_snapshot() {
+        let _gpu = gpu_guard();
+        let (mut model, loaded, parent) = seed_instances_model("wok-instances-flat-snapshot");
+        model.shell.set_instance_sort(InstanceSort::Flat);
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, Some(loaded));
+        harness.run();
+        harness.snapshot("chrome_instances_flat");
         let _ = std::fs::remove_dir_all(&parent);
     }
 
