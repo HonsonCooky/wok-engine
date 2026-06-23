@@ -214,6 +214,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
     }
 
+    /// The Prefabs view over an open project whose `assets/prefabs` holds two prefab files: the body
+    /// lists their slugs, sorted ("barrel" above "oak_tree"), one display-only row each led by the
+    /// filled-cube type glyph (`icons::CUBE`) - the project-scoped rows now carry a leading type glyph
+    /// so they read as one set with the Instances tree. Seeds a temp project on disk and lets the chrome
+    /// scan it per frame, exactly as the live app does, so this also guards the `prefab_slugs` wiring.
+    /// Same fixed-leaf "DemoGame" root as the Scenes listing for a deterministic project name. Dark
+    /// alone: a content state, not a palette one.
+    #[test]
+    fn chrome_prefabs_listed_snapshot() {
+        let _gpu = gpu_guard();
+        let parent = std::env::temp_dir().join("wok-nav-prefabs-snapshot");
+        let root = parent.join("DemoGame");
+        let _ = std::fs::remove_dir_all(&parent);
+        let layout = ContentLayout::new(&root);
+        std::fs::create_dir_all(layout.prefabs_dir()).unwrap();
+        for slug in ["barrel", "oak_tree"] {
+            std::fs::write(layout.prefab(slug), b"{}").unwrap();
+        }
+
+        let mut model = model_with(NavView::Prefabs);
+        model.project = Some(Project::new(root.clone()));
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, None);
+        harness.run();
+        harness.snapshot("chrome_prefabs_listed");
+
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// The Lighting view over an open project whose `assets/lighting` holds two light-state files: the
+    /// body lists their names, sorted ("dawn" above "noon"), one display-only row each led by the sun
+    /// type glyph (`icons::WEATHER_SUNNY`). Seeds a temp project on disk and scans it per frame as the
+    /// live app does, guarding the `lighting_names` wiring end to end. Same fixed-leaf "DemoGame" root.
+    /// Dark alone: a content state, not a palette one.
+    #[test]
+    fn chrome_lighting_listed_snapshot() {
+        let _gpu = gpu_guard();
+        let parent = std::env::temp_dir().join("wok-nav-lighting-snapshot");
+        let root = parent.join("DemoGame");
+        let _ = std::fs::remove_dir_all(&parent);
+        let layout = ContentLayout::new(&root);
+        std::fs::create_dir_all(layout.lighting_dir()).unwrap();
+        for name in ["dawn", "noon"] {
+            std::fs::write(layout.lighting(name), b"{}").unwrap();
+        }
+
+        let mut model = model_with(NavView::Lighting);
+        model.project = Some(Project::new(root.clone()));
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, None);
+        harness.run();
+        harness.snapshot("chrome_lighting_listed");
+
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
     /// A well-formed scene on disk spanning two prefabs with several instances each, so the grouped
     /// tree shows real groups and counts: three `oak_tree`s (one named "the landmark oak", two on the
     /// `{prefab} #{id}` fallback) and two `rock`s. Written as one chunk in scrambled order under

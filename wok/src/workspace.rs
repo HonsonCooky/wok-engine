@@ -208,16 +208,21 @@ fn sort_seg(ui: &mut egui::Ui, text: &str, active: bool) -> bool {
 fn nav_body(ui: &mut egui::Ui, model: &Model, loaded_scene: Option<&LoadedScene>, actions: &mut Vec<Action>) {
     match model.shell.active_nav() {
         NavView::Scenes => {
-            // The one clickable list this bite: a click opens that scene as a tab.
-            if let Some(name) = content_list(ui, model, "No scenes yet", ContentLayout::scene_names, true) {
+            // The one clickable list this bite: a click opens that scene as a tab. Its rows lead with
+            // the layers mark, the same glyph the Scenes nav-bar icon uses.
+            if let Some(name) =
+                content_list(ui, model, "No scenes yet", ContentLayout::scene_names, icons::LAYERS, true)
+            {
                 actions.push(Action::OpenScene(name));
             }
         }
         NavView::Prefabs => {
-            content_list(ui, model, "No prefabs yet", ContentLayout::prefab_slugs, false);
+            content_list(ui, model, "No prefabs yet", ContentLayout::prefab_slugs, icons::CUBE, false);
         }
         NavView::Lighting => {
-            content_list(ui, model, "No lighting states yet", ContentLayout::lighting_names, false);
+            content_list(
+                ui, model, "No lighting states yet", ContentLayout::lighting_names, icons::WEATHER_SUNNY, false,
+            );
         }
         // The this-scene view: the active scene tab's placements, grouped or flat per the sort toggle,
         // clickable to select. No state dots / hidden styling / visibility toggles - per-instance
@@ -235,14 +240,17 @@ fn nav_body(ui: &mut egui::Ui, model: &Model, loaded_scene: Option<&LoadedScene>
 /// `prefab_slugs`, or `lighting_names` - run per frame against the open project's root. The per-frame
 /// scan is simple and self-refreshing: a file added on disk shows on the next frame with no cache to
 /// invalidate. (An app-side cache or a file-watch is a deferred optimization, for if the scan ever
-/// costs too much; it does not for a folder listing.) `clickable` marks the rows as openable (Scenes);
-/// the display-only lists (Prefabs, Lighting) pass `false` and render inert. Two empty states read dim
-/// and italic: no project open at all, or a project open with nothing of this kind yet (`empty`).
+/// costs too much; it does not for a folder listing.) `glyph` is the view's leading type glyph, painted
+/// in the Instances rows' glyph column so a project-scoped row reads as one set with the tree below it
+/// (Scenes a layers mark, Prefabs a cube, Lighting a sun). `clickable` marks the rows as openable
+/// (Scenes); the display-only lists (Prefabs, Lighting) pass `false` and render inert. Two empty states
+/// read dim and italic: no project open at all, or a project open with nothing of this kind yet (`empty`).
 fn content_list(
     ui: &mut egui::Ui,
     model: &Model,
     empty: &str,
     scan: fn(&ContentLayout) -> Vec<String>,
+    glyph: char,
     clickable: bool,
 ) -> Option<String> {
     ui.add_space(4.0);
@@ -264,7 +272,7 @@ fn content_list(
         // panel uses elsewhere.
         ui.spacing_mut().item_spacing.y = 2.0;
         for name in &names {
-            if content_row(ui, name, clickable) {
+            if content_row(ui, name, glyph, clickable) {
                 clicked = Some(name.clone());
             }
         }
@@ -272,13 +280,15 @@ fn content_list(
     clicked
 }
 
-/// One content row: the name inset by [`ROW_PAD`] from the flush panel edge and centred in a fixed-height
-/// cell ([`NAV_ROW_HEIGHT`]). Returns whether it was clicked this frame (always `false` for a display-only
-/// row). A `clickable` row lights up under the pointer (a hover fill and brighter text) and shows the hand
-/// cursor; a display-only row stays inert. Both render identically at rest (primary text, no fill), so a
-/// clickable list reads the same as before until the pointer is over it. The fixed cell (not the label's
-/// own height) keeps the rows even and gives the full-bleed selection highlight to come a rect to fill.
-fn content_row(ui: &mut egui::Ui, name: &str, clickable: bool) -> bool {
+/// One content row: a leading type `glyph` then the name, inset by [`ROW_PAD`] from the flush panel edge
+/// and centred in a fixed-height cell ([`NAV_ROW_HEIGHT`]). The glyph sits in the same [`TREE_GLYPH`]-wide
+/// column the Instances tree's rows use ([`glyph_cell`] at [`ROW_PAD`], [`TREE_GAP`] before the name), so
+/// the project-scoped lists read as one set with that tree. Returns whether it was clicked this frame
+/// (always `false` for a display-only row). A `clickable` row lights up under the pointer (a hover fill
+/// and brighter glyph + text) and shows the hand cursor; a display-only row stays inert. Both render at
+/// the primary ink with no fill at rest. The fixed cell (not the label's own height) keeps the rows even
+/// and gives the full-bleed selection highlight to come a rect to fill.
+fn content_row(ui: &mut egui::Ui, name: &str, glyph: char, clickable: bool) -> bool {
     let p = theme::palette(ui.ctx());
     let sense = if clickable { egui::Sense::click() } else { egui::Sense::hover() };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), NAV_ROW_HEIGHT), sense);
@@ -288,7 +298,10 @@ fn content_row(ui: &mut egui::Ui, name: &str, clickable: bool) -> bool {
         ui.painter().rect_filled(rect, 0.0, p.hover);
     }
     let color = if hovered { p.text_bright } else { p.text };
-    let pos = egui::pos2(rect.left() + ROW_PAD, rect.center().y);
+    // [pad][type glyph][gap][name] - the glyph in the Instances rows' glyph column, the name one gap on.
+    let glyph_rect = glyph_cell(rect, ROW_PAD);
+    icons::paint(ui.painter(), glyph_rect, glyph, color);
+    let pos = egui::pos2(glyph_rect.right() + TREE_GAP, rect.center().y);
     let font = egui::TextStyle::Body.resolve(ui.style());
     ui.painter().text(pos, egui::Align2::LEFT_CENTER, name, font, color);
     response.clicked()
@@ -467,7 +480,8 @@ fn instance_row(ui: &mut egui::Ui, placement: &Placement, indent: f32, selected:
 }
 
 /// A [`TREE_GLYPH`]-wide glyph cell at `left`, spanning the row's full height, for [`icons::paint`] to
-/// centre a tree glyph in. Sharing it keeps the chevron, folder, and cube columns aligned down the tree.
+/// centre a tree glyph in. Sharing it keeps the Instances tree's folder and cube columns aligned, and
+/// the project-list rows' leading type glyph ([`content_row`]) in that same column.
 fn glyph_cell(row: egui::Rect, left: f32) -> egui::Rect {
     egui::Rect::from_min_size(egui::pos2(left, row.top()), egui::vec2(TREE_GLYPH, row.height()))
 }
