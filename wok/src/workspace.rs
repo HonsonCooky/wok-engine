@@ -217,7 +217,7 @@ fn nav_body(ui: &mut egui::Ui, model: &Model, loaded_scene: Option<&LoadedScene>
             }
         }
         NavView::Prefabs => {
-            content_list(ui, model, "No prefabs yet", ContentLayout::prefab_slugs, icons::CUBE, false);
+            content_list(ui, model, "No prefabs yet", ContentLayout::prefab_slugs, icons::CUBE_OUTLINE, false);
         }
         NavView::Lighting => {
             content_list(

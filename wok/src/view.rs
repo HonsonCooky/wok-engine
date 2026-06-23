@@ -216,8 +216,9 @@ mod tests {
 
     /// The Prefabs view over an open project whose `assets/prefabs` holds two prefab files: the body
     /// lists their slugs, sorted ("barrel" above "oak_tree"), one display-only row each led by the
-    /// filled-cube type glyph (`icons::CUBE`) - the project-scoped rows now carry a leading type glyph
-    /// so they read as one set with the Instances tree. Seeds a temp project on disk and lets the chrome
+    /// cube-outline type glyph (`icons::CUBE_OUTLINE`, the prefab-library mark, matching the Prefabs
+    /// nav-bar icon) - the project-scoped rows now carry a leading type glyph so they read as one set
+    /// with the Instances tree. Seeds a temp project on disk and lets the chrome
     /// scan it per frame, exactly as the live app does, so this also guards the `prefab_slugs` wiring.
     /// Same fixed-leaf "DemoGame" root as the Scenes listing for a deterministic project name. Dark
     /// alone: a content state, not a palette one.
