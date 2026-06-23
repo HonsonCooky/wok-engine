@@ -25,10 +25,12 @@ use crate::recent::Recents;
 /// name (the header label); the glyph mapping is a chrome concern and lives with the view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NavView {
+    /// The project's scenes (levels). The default landing view: with no scene open yet, this is where
+    /// you pick one to open as a tab.
+    #[default]
     Scenes,
     Prefabs,
-    /// The open scene's placements - the design's default landing view.
-    #[default]
+    /// The open scene's placements.
     Instances,
     Lighting,
 }
@@ -216,9 +218,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_active_view_is_instances() {
-        // The design's landing view: the open scene's placements.
-        assert_eq!(Shell::default().active_nav(), NavView::Instances);
+    fn the_default_active_view_is_scenes() {
+        // The landing view: with no scene open yet, Scenes is where you pick one to open.
+        assert_eq!(Shell::default().active_nav(), NavView::Scenes);
     }
 
     #[test]

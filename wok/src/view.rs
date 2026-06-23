@@ -119,8 +119,9 @@ mod tests {
         snapshot_of(name, theme, model_with(active));
     }
 
-    /// The default landing state - the Instances view active - in dark and light. The pair guards that
-    /// the light palette mirrors the dark one's structure and reads cleanly.
+    /// The Instances view active (a this-scene view, here with no open scene), in dark and light - the
+    /// light/dark palette guard. Scenes, not Instances, is the default landing view (since 2026-06-23);
+    /// that default state is the `chrome_scenes` pair below.
     #[test]
     fn chrome_snapshot() {
         snapshot("chrome", egui::ThemePreference::Dark, NavView::Instances);
@@ -131,11 +132,11 @@ mod tests {
         snapshot("chrome_light", egui::ThemePreference::Light, NavView::Instances);
     }
 
-    /// A second view active (Scenes, the project group's first) with no project open, in dark and
-    /// light: the header label and the active-icon accent move off Instances and onto Scenes, and the
-    /// body shows the Scenes view's "No project open" empty state (the default model has no project).
-    /// The pair guards both that the chrome tracks `model.shell.active_nav` rather than a fixed view,
-    /// and that the no-project empty state reads cleanly in each theme.
+    /// The default landing state - the Scenes view active (the project group's first) with no project
+    /// open, in dark and light: the body shows the Scenes view's "No project open" empty state (the
+    /// default model has no project). The pair guards that the chrome tracks `model.shell.active_nav`
+    /// (compare the `chrome` pair, which pins Instances) and that the no-project empty state reads
+    /// cleanly in each theme.
     #[test]
     fn chrome_scenes_snapshot() {
         snapshot("chrome_scenes", egui::ThemePreference::Dark, NavView::Scenes);
