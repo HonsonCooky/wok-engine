@@ -347,18 +347,22 @@ fn tab_cell(ui: &mut egui::Ui, title: &str, active: bool, index: usize, actions:
             let color = if active { p.text_bright } else { p.text_dim };
             let title = egui::RichText::new(title).color(color);
             let title = if active { title.strong() } else { title };
-            ui.label(title);
+            // Non-selectable so the labels sense nothing - no click to fight the cell's, and no
+            // text/IBeam cursor on hover (the cell below owns the interaction and sets the cursor).
+            ui.add(egui::Label::new(title).selectable(false));
             // The close affordance, the same Nerd Font family as the rest of the chrome, sized small so
             // it sits quietly beside the title. Its rect is returned so a click landing on it closes the
             // tab rather than selecting it.
-            ui.label(egui::RichText::new(icons::CLOSE).size(10.0).color(p.text_dim)).rect
+            let close = egui::RichText::new(icons::CLOSE).size(10.0).color(p.text_dim);
+            ui.add(egui::Label::new(close).selectable(false)).rect
         })
         .inner
     });
     let close_rect = inner.inner;
-    // One click-sensing region over the whole cell (the labels inside sense nothing), so close-vs-select
-    // is decided by where the press landed, not by overlapping widgets fighting for it.
-    let cell = inner.response.interact(egui::Sense::click());
+    // One click-sensing region over the whole cell (the labels sense nothing), so close-vs-select is
+    // decided by where the press landed, not by overlapping widgets fighting for it. The whole tab shows
+    // the pointing-hand cursor (it is clickable), including over the close glyph.
+    let cell = inner.response.interact(egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     if cell.clicked() {
         let on_close = cell.interact_pointer_pos().is_some_and(|pos| close_rect.contains(pos));
         actions.push(if on_close { Action::CloseTab(index) } else { Action::SelectTab(index) });
