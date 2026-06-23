@@ -52,6 +52,12 @@ egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
 rfd.workspace = true
+# The workspace's math crate (already vendored - every engine crate uses it), wired to the editor for
+# the inspector's read-only rotation readout: a placement's quaternion is decomposed to YXZ Euler
+# degrees (`glam::EulerRot`) for the X/Y/Z fields. wok-scene re-exports `Quat`/`Transform` but not the
+# Euler enum, and it is an engine crate the editor must not edit, so glam is named here, in the
+# application, rather than reached through it. No new crate enters the build graph.
+glam.workspace = true
 
 # Dev-only: renders the chrome through the view functions to a PNG for the snapshot regression test
 # (tests/snapshots). The wgpu feature draws via a headless GPU (the same wgpu 24 the workspace pins);

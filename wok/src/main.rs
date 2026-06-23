@@ -22,6 +22,7 @@
 mod action;
 mod gui;
 mod icons;
+mod inspector;
 mod loaded;
 mod menu;
 mod model;
@@ -104,8 +105,12 @@ impl App for Editor {
         let Some(gui) = self.gui.as_mut() else { return };
         // Reconcile the loaded scene to the active tab before building the chrome, so the Instances
         // view lists the active scene's placements this frame (reload-on-tab-change; disk hot reload is
-        // a later bite). This is filesystem I/O, so it lives here beside the model, not inside it.
-        loaded::reconcile(&mut self.loaded_scene, &self.model);
+        // a later bite). This is filesystem I/O, so it lives here beside the model, not inside it. When
+        // the active scene changes under it, drop the selection through the single writer: an instance
+        // id is per-scene, so a selection made in one scene must not carry onto the next.
+        if loaded::reconcile(&mut self.loaded_scene, &self.model) {
+            action::handle(&mut self.model, Action::Deselect);
+        }
         let model = &mut self.model;
         let loaded_scene = self.loaded_scene.as_ref();
 

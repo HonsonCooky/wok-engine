@@ -16,6 +16,8 @@
 //! its dock side - the open tabs (open or focus, switch, close), plus the project lifecycle (open,
 //! open recent, close).
 
+use wok_scene::InstanceId;
+
 use crate::project::Project;
 use crate::recent::Recents;
 
@@ -128,6 +130,13 @@ pub struct Shell {
     /// How the Instances view orders the active scene's placements (group-by-prefab or flat A-Z). The
     /// panel header's contextual control for that view sets it; the body reads it to pick the layout.
     instance_sort: InstanceSort,
+    /// The selected placement, by its instance id, or `None` when nothing is selected. The Instances
+    /// tree sets it on a row click and reads it back to highlight that row; the floating inspector reads
+    /// it to show the placement. An id, not the placement itself, because a placement is filesystem
+    /// residency outside the model ([`LoadedScene`](crate::loaded::LoadedScene)) - the model holds only
+    /// the stable identity, and the view resolves it against the loaded scene at read time, so a
+    /// selection whose id is absent simply resolves to nothing.
+    selected: Option<InstanceId>,
 }
 
 impl Default for Shell {
@@ -139,6 +148,7 @@ impl Default for Shell {
             tabs: Vec::new(),
             active_tab: None,
             instance_sort: InstanceSort::default(),
+            selected: None,
         }
     }
 }
@@ -179,6 +189,13 @@ impl Shell {
         self.instance_sort
     }
 
+    /// The selected placement's instance id, or `None` when nothing is selected. The Instances tree
+    /// highlights this row and the floating inspector shows it; both resolve the id against the loaded
+    /// scene, so an id with no matching placement shows nothing.
+    pub fn selection(&self) -> Option<InstanceId> {
+        self.selected
+    }
+
     // ---- mutations (only action::handle calls these) ----
 
     /// Switch the panel to show `view`.
@@ -199,6 +216,19 @@ impl Shell {
     /// Set how the Instances view orders its placements.
     pub(crate) fn set_instance_sort(&mut self, sort: InstanceSort) {
         self.instance_sort = sort;
+    }
+
+    /// Select the placement with this instance id. Replaces any prior selection (single-select this
+    /// bite). The id is taken as given - it is not validated against the loaded scene here, because the
+    /// model is free of that residency; the view resolves it when it reads, so a stale id shows nothing.
+    pub(crate) fn select(&mut self, id: InstanceId) {
+        self.selected = Some(id);
+    }
+
+    /// Clear the selection (Esc, a click on empty space, or switching to a different scene, where the
+    /// per-scene id no longer applies).
+    pub(crate) fn deselect(&mut self) {
+        self.selected = None;
     }
 
     /// Open `tab`, or focus it if an equal tab is already open - the no-duplicate rule (one obvious
@@ -301,6 +331,25 @@ mod tests {
         assert_eq!(shell.instance_sort(), InstanceSort::Flat);
         shell.set_instance_sort(InstanceSort::Group);
         assert_eq!(shell.instance_sort(), InstanceSort::Group);
+    }
+
+    // ---- selection ----
+
+    #[test]
+    fn a_default_shell_has_no_selection() {
+        assert_eq!(Shell::default().selection(), None);
+    }
+
+    #[test]
+    fn select_sets_then_replaces_the_selection_and_deselect_clears_it() {
+        let mut shell = Shell::default();
+        shell.select(InstanceId(3));
+        assert_eq!(shell.selection(), Some(InstanceId(3)));
+        // Single-select: a second select replaces the first rather than accumulating.
+        shell.select(InstanceId(7));
+        assert_eq!(shell.selection(), Some(InstanceId(7)));
+        shell.deselect();
+        assert_eq!(shell.selection(), None);
     }
 
     // ---- tabs ----

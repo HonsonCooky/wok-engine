@@ -18,16 +18,23 @@
 //! the tab bar renders the open tabs and the editor well names the active one (an empty well when none
 //! is open); the nav panel, the status bar, the tab bar, and the hamburger's menus read the model and
 //! emit actions.
+//!
+//! Above the well sits the floating layer: the conditional inspector (`crate::inspector`), an
+//! `egui::Window` clipped to the editor area and present only when a selection resolves to a placement.
+//! It is shown after the well so it layers over it, and Esc (when something is selected) emits a
+//! deselect - both read the same `model.shell.selection()` the Instances tree sets.
 
 use crate::action::Action;
+use crate::inspector;
 use crate::loaded::LoadedScene;
 use crate::menu;
 use crate::model::Model;
 use crate::workspace;
 
 /// Render the full editor chrome for one frame: the navigation panel first (full height on its docked
-/// side, and only when visible), then the view column's status bar, tab bar, and editor well. Returns
-/// the actions the regions emitted this frame, for the caller to apply through `crate::action::handle`.
+/// side, and only when visible), then the view column's status bar, tab bar, and editor well, and last
+/// the floating inspector over the well. Returns the actions the regions emitted this frame, for the
+/// caller to apply through `crate::action::handle`.
 ///
 /// `loaded_scene` is the active scene tab's loaded data (reconciled by the frame loop, `crate::loaded`),
 /// which the Instances nav view lists; it is `None` when no scene tab is active. The model alone cannot
@@ -42,7 +49,17 @@ pub fn chrome(ctx: &egui::Context, model: &Model, loaded_scene: Option<&LoadedSc
     }
     menu::status_bar(ctx, model.project.as_ref());
     workspace::tab_bar(ctx, model, &mut actions);
-    workspace::editor_area(ctx, model);
+    // The editor area is the central region left after the three bounding panels; capture it now, before
+    // the central panel consumes it, so the floating inspector can anchor to and clip to it. The
+    // inspector is shown after the well so it layers over it; it appears only when a selection resolves.
+    let editor_rect = ctx.available_rect();
+    workspace::editor_area(ctx, model, &mut actions);
+    inspector::floating(ctx, model, loaded_scene, editor_rect);
+    // Esc clears the selection (editor-design.md: Esc unwinds the selection). Gated on there being one,
+    // so it is inert otherwise and never fights for the key when nothing is selected.
+    if model.shell.selection().is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        actions.push(Action::Deselect);
+    }
     actions
 }
 
@@ -54,6 +71,7 @@ mod tests {
     use crate::recent::Recents;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
+    use glam::{Quat, Vec3};
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard};
     use wok_scene::{
@@ -203,6 +221,11 @@ mod tests {
     /// regardless of the file order. The fixed ids also fix both orderings under test - grouped (by
     /// prefab name, then id) and flat (A-Z by row label, where "the landmark oak" sorts after the
     /// `rock` fallbacks rather than at its id-1 slot).
+    ///
+    /// "the landmark oak" (id 1) gets a non-identity transform - a translation, a 45 degree yaw, and a
+    /// 1.5 uniform scale - so the inspector snapshot (which selects it) shows real Pos / Rot / Scale
+    /// values, the yaw landing in the Y field (the YXZ Euler readout). It is invisible to the other
+    /// Instances snapshots, which show row labels only, never the transform.
     fn seed_instances_scene(root: &std::path::Path, scene: &str) {
         let layout = ContentLayout::new(root);
         std::fs::create_dir_all(layout.scene_dir(scene)).unwrap();
@@ -221,6 +244,17 @@ mod tests {
             transform: Transform::IDENTITY,
             state: None,
         };
+        let landmark = Placement {
+            prefab: PrefabRef::new("oak_tree"),
+            instance_id: InstanceId(1),
+            name: Some("the landmark oak".to_owned()),
+            transform: Transform {
+                translation: Vec3::new(12.0, 0.5, -3.0),
+                rotation: Quat::from_rotation_y(45.0_f32.to_radians()),
+                scale: Vec3::splat(1.5),
+            },
+            state: None,
+        };
         let chunk = Chunk {
             coord: ChunkCoord::new(0, 0),
             placements: vec![
@@ -228,7 +262,7 @@ mod tests {
                 placement("oak_tree", 4, None),
                 placement("oak_tree", 0, None),
                 placement("rock", 2, None),
-                placement("oak_tree", 1, Some("the landmark oak")),
+                landmark,
             ],
             streaming: ChunkStreaming::default(),
         };
@@ -255,10 +289,11 @@ mod tests {
     }
 
     /// The Instances view's grouped tree (the default sort): two group rows, sorted by prefab name -
-    /// "oak_tree" (count 3) above "rock" (count 2) - each open, with their instance rows indented under
-    /// them in id order. The named placement reads "the landmark oak" mid-group; the rest show the
-    /// `{prefab} #{id}` fallback. Dark alone: this is a content state, not a palette one (the `chrome`
-    /// pair guards themes).
+    /// "oak_tree" (count 3) above "rock" (count 2) - each open (an open-folder glyph, no chevron), with
+    /// their instance rows indented under them in id order. The named placement reads "the landmark oak"
+    /// mid-group; the rest show the `{prefab} #{id}` fallback. Nothing selected, so no row is highlighted
+    /// and no inspector shows - this also serves as the deselected / no-inspector state. Dark alone: this
+    /// is a content state, not a palette one (the `chrome` pair guards themes).
     #[test]
     fn chrome_instances_grouped_snapshot() {
         let _gpu = gpu_guard();
@@ -299,6 +334,24 @@ mod tests {
         let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, Some(loaded));
         harness.run();
         harness.snapshot("chrome_instances_flat");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// An instance selected from the tree: "the landmark oak" (id 1) is selected directly on the model,
+    /// so its row in the grouped tree carries the full-bleed accent highlight and the floating inspector
+    /// shows it - IDENTITY (the name, the `oak_tree` prefab, the `0x00000001` id) and TRANSFORM (its
+    /// seeded Pos / 45-degree-yaw Rot / 1.5 Scale, the X/Y/Z fields axis-tinted), closing on the
+    /// boundary line. Built by setting the selection directly (not by faking a row click), the
+    /// counterpart to the grouped snapshot's deselected / no-inspector state (sharp-edges 3: build the
+    /// state on the model). Dark alone: a content state, not a palette one.
+    #[test]
+    fn chrome_instances_selected_snapshot() {
+        let _gpu = gpu_guard();
+        let (mut model, loaded, parent) = seed_instances_model("wok-instances-selected-snapshot");
+        model.shell.select(InstanceId(1));
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, Some(loaded));
+        harness.run();
+        harness.snapshot("chrome_instances_selected");
         let _ = std::fs::remove_dir_all(&parent);
     }
 

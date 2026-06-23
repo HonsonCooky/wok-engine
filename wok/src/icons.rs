@@ -44,12 +44,12 @@ pub const LIST_BULLETED: char = '\u{f0279}';
 pub const WEATHER_SUNNY: char = '\u{f0599}';
 /// `nf-md-close` - the tab close affordance.
 pub const CLOSE: char = '\u{f0156}';
-/// `nf-md-chevron-right` - a collapsed group's disclosure in the Instances tree.
-pub const CHEVRON_RIGHT: char = '\u{f0142}';
-/// `nf-md-chevron-down` - an expanded group's disclosure in the Instances tree.
-pub const CHEVRON_DOWN: char = '\u{f0140}';
-/// `nf-md-folder` - a prefab group row in the Instances tree.
+/// `nf-md-folder` - a collapsed prefab group row in the Instances tree. The closed folder is the
+/// group's collapsed state; [`FOLDER_OPEN`] is its expanded state - the folder glyph is the disclosure
+/// now (the chevron was dropped), so the whole group row toggles between the two.
 pub const FOLDER: char = '\u{f024b}';
+/// `nf-md-folder-open` - an expanded prefab group row in the Instances tree (see [`FOLDER`]).
+pub const FOLDER_OPEN: char = '\u{f0770}';
 /// `nf-md-cube` - an instance (placement) row in the Instances tree. The filled cube, distinct from
 /// the Prefabs nav view's [`CUBE_OUTLINE`], so a placed instance reads as solid against the outline
 /// the library uses.
@@ -96,7 +96,7 @@ mod tests {
     use super::*;
 
     /// The "same size" guard: every glyph the chrome paints through [`paint`] - the hamburger, the
-    /// four nav-bar icons, and the Instances tree's chevrons, folder, and cube - normalizes to one ink
+    /// four nav-bar icons, and the Instances tree's folder pair and cube - normalizes to one ink
     /// height, regardless of how much of the em its shape fills. Measures each glyph's ink at the
     /// rescaled font and asserts it lands on `SIZE` within a pixel of rounding/hinting slack. A wrong
     /// codepoint (a glyph the bundled font lacks) renders as zero-ink tofu and trips this assert, so it
@@ -108,7 +108,7 @@ mod tests {
         install_font(&ctx);
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             ctx.fonts(|fonts| {
-                for glyph in [MENU, LAYERS, CUBE_OUTLINE, LIST_BULLETED, WEATHER_SUNNY, CHEVRON_RIGHT, CHEVRON_DOWN, FOLDER, CUBE] {
+                for glyph in [MENU, LAYERS, CUBE_OUTLINE, LIST_BULLETED, WEATHER_SUNNY, FOLDER, FOLDER_OPEN, CUBE] {
                     let probe = fonts.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(MEASURE_SIZE), egui::Color32::WHITE);
                     let font = font_for_ink_height(probe.mesh_bounds.size());
                     let galley = fonts.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(font), egui::Color32::WHITE);

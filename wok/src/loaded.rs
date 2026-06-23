@@ -21,7 +21,7 @@
 
 use std::path::{Path, PathBuf};
 
-use wok_scene::{ContentLayout, LoadError, Placement};
+use wok_scene::{ContentLayout, InstanceId, LoadError, Placement};
 
 use crate::model::{Model, Tab};
 
@@ -75,6 +75,15 @@ impl LoadedScene {
         &self.placements
     }
 
+    /// The placement with this instance id, or `None` when none matches - the resolution the model's
+    /// [`selection`](crate::model::Shell::selection) goes through, since the model holds only the id.
+    /// A missing id (a stale selection, or one from a different scene) resolves to `None`, so the
+    /// selection becomes a no-op rather than an error: the highlight and the inspector simply do not
+    /// show. A linear scan is ample at editor scene scale (the same call site that lists every row).
+    pub fn placement(&self, id: InstanceId) -> Option<&Placement> {
+        self.placements.iter().find(|p| p.instance_id == id)
+    }
+
     /// The load error, or `None` when the scene loaded cleanly. Distinguishes "the scene has no
     /// placements" (`None`, empty list) from "the scene could not be read" (`Some`, also an empty
     /// list).
@@ -87,16 +96,22 @@ impl LoadedScene {
 /// (the project root and scene name) differs from what is loaded, so an unchanged active tab is a
 /// no-op with no disk touch; no active scene tab (or no open project) clears it to `None`. Called once
 /// per frame, before the chrome is built, so the Instances view reflects the current tab this frame.
-pub fn reconcile(loaded: &mut Option<LoadedScene>, model: &Model) {
+///
+/// Returns whether the active scene changed (a (re)load or a clear happened). The frame loop uses this
+/// to drop a selection when the scene under it changes: an [`InstanceId`] is per-scene, so a selection
+/// made in one scene must not carry onto the next. An unchanged identity returns `false`, so a standing
+/// selection survives every frame the scene stays put.
+pub fn reconcile(loaded: &mut Option<LoadedScene>, model: &Model) -> bool {
     let desired = desired_scene(model);
     // The identity already loaded, if any. Compared by (root, name) - the reload trigger.
     let current = loaded.as_ref().map(|l| (l.root(), l.name()));
     if current == desired {
-        return;
+        return false;
     }
     // Identity changed (a different tab, project, or none at all): (re)load, or clear when there is no
     // active scene tab to load.
     *loaded = desired.map(|(root, name)| LoadedScene::load(root, name));
+    true
 }
 
 /// The scene the active tab wants loaded: the active tab's scene name under the open project's root,
@@ -208,6 +223,23 @@ mod tests {
     }
 
     #[test]
+    fn placement_resolves_a_present_id_and_is_none_for_a_missing_one() {
+        // The resolution the selection goes through: a present id returns its placement; a missing id
+        // (a stale selection, or one from another scene) returns None, so the selection is a no-op
+        // rather than an error.
+        let root = unique_temp_root();
+        let _ = std::fs::remove_dir_all(&root);
+        seed_scene(&root, "village");
+        let loaded = LoadedScene::load(&root, "village");
+
+        let found = loaded.placement(InstanceId(1)).expect("id 1 is in the seeded scene");
+        assert_eq!(found.name.as_deref(), Some("the landmark oak"));
+        assert_eq!(loaded.placement(InstanceId(999)), None, "an absent id resolves to nothing");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn load_notes_the_error_and_stays_empty_when_the_scene_is_missing() {
         // A scene folder with no scene.json: load_scene fails, the error is noted, and the placement
         // list is empty - the editor degrades rather than crashing.
@@ -227,16 +259,20 @@ mod tests {
         let mut model = Model { project: Some(Project::new(&root)), ..Model::default() };
         model.shell.open_tab(Tab::Scene("village".to_string()));
 
-        // An active scene tab loads its scene.
+        // An active scene tab loads its scene, and reconcile reports the (re)load.
         let mut loaded = None;
-        reconcile(&mut loaded, &model);
+        assert!(reconcile(&mut loaded, &model), "the first load is a change");
         let scene = loaded.as_ref().expect("the active scene tab is loaded");
         assert_eq!(scene.name(), "village");
         assert_eq!(scene.placements().len(), 3);
 
-        // Closing the only tab leaves no active scene, so the loaded scene clears.
+        // The identity is unchanged the next frame, so reconcile is a no-op and reports no change (the
+        // signal the frame loop relies on to keep a standing selection rather than dropping it).
+        assert!(!reconcile(&mut loaded, &model), "an unchanged active scene is not a change");
+
+        // Closing the only tab leaves no active scene, so the loaded scene clears - and that is a change.
         model.shell.close_tab(0);
-        reconcile(&mut loaded, &model);
+        assert!(reconcile(&mut loaded, &model), "clearing the scene is a change");
         assert!(loaded.is_none(), "no active scene tab -> nothing loaded");
 
         let _ = std::fs::remove_dir_all(&root);

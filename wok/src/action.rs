@@ -21,6 +21,8 @@
 
 use std::path::PathBuf;
 
+use wok_scene::InstanceId;
+
 use crate::model::{InstanceSort, Model, NavSide, NavView, Tab};
 use crate::project::Project;
 
@@ -48,6 +50,15 @@ pub enum Action {
     /// Close the tab at this index. Emitted by a tab's close affordance; the model then picks the next
     /// active tab ([`Shell::close_tab`](crate::model::Shell::close_tab)).
     CloseTab(usize),
+
+    // ---- selection ----
+    /// Select the placement with this instance id. Emitted by clicking an Instances-tree row (viewport
+    /// picking is a later bite). The id is set as given; the view resolves it against the loaded scene
+    /// when it reads, so an id with no matching placement resolves to nothing rather than erroring.
+    Select(InstanceId),
+    /// Clear the selection. Emitted by Esc or a click on empty space, and applied by the frame loop
+    /// when it switches to a different scene (the per-scene id no longer applies).
+    Deselect,
 
     // ---- project lifecycle ----
     /// Open the project rooted at this path, and record it at the front of the recent list. The same
@@ -101,6 +112,14 @@ pub fn handle(model: &mut Model, action: Action) -> Handled {
         }
         Action::CloseTab(index) => {
             model.shell.close_tab(index);
+            Handled::default()
+        }
+        Action::Select(id) => {
+            model.shell.select(id);
+            Handled::default()
+        }
+        Action::Deselect => {
+            model.shell.deselect();
             Handled::default()
         }
         Action::OpenProject(root) => {
@@ -225,6 +244,26 @@ mod tests {
         handle(&mut model, Action::CloseTab(0)); // close the last remaining tab
         assert!(model.shell.tabs().is_empty());
         assert_eq!(model.shell.active_tab(), None);
+    }
+
+    // ---- selection ----
+
+    #[test]
+    fn select_sets_the_selection_and_deselect_clears_it() {
+        let mut model = Model::default();
+        handle(&mut model, Action::Select(InstanceId(4)));
+        assert_eq!(model.shell.selection(), Some(InstanceId(4)));
+        handle(&mut model, Action::Deselect);
+        assert_eq!(model.shell.selection(), None);
+    }
+
+    #[test]
+    fn select_replaces_the_prior_selection() {
+        // Single-select this bite: selecting another instance moves the selection rather than adding.
+        let mut model = Model::default();
+        handle(&mut model, Action::Select(InstanceId(1)));
+        handle(&mut model, Action::Select(InstanceId(2)));
+        assert_eq!(model.shell.selection(), Some(InstanceId(2)));
     }
 
     // ---- project lifecycle ----

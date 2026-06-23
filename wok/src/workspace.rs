@@ -15,8 +15,10 @@
 //! Scenes row opens that scene as a tab (`Action::OpenScene`), while Prefabs and Lighting rows stay
 //! display-only (opening those contexts is a later bite). The this-scene Instances view lists the active
 //! scene tab's placements (from the reconciled `LoadedScene` threaded in) two ways, on the header's sort
-//! toggle: grouped under their prefab as a collapsible tree (the default), or a flat A-Z list. Rows are
-//! display-only for now - selection and the floating inspector are a later bite. The panel docks to either side and toggles through the View menu
+//! toggle: grouped under their prefab as a collapsible tree (the default), or a flat A-Z list. Clicking
+//! an instance row emits `Action::Select`; the selected row carries the full-bleed accent highlight, and
+//! the floating inspector (`crate::inspector`) shows it. The panel docks to either side and toggles
+//! through the View menu
 //! (`crate::menu`) - the composition root shows `nav_panel` only when visible, on the model's chosen
 //! side, and the menu drives both - and it resizes by dragging its inner edge, with egui owning the live
 //! width (so there is no Shell state for it). The tab bar renders the model's open tabs: a click selects
@@ -24,7 +26,7 @@
 //! the 3D viewport, the data views - lands in later bites). Every colour is read through
 //! `theme::palette`, so the chrome follows the OS light/dark.
 
-use wok_scene::{ContentLayout, Placement};
+use wok_scene::{ContentLayout, InstanceId, Placement};
 
 use crate::action::Action;
 use crate::icons;
@@ -79,11 +81,16 @@ const TREE_GLYPH: f32 = 16.0;
 /// The gap in points between a tree row's last glyph and the text that follows it.
 const TREE_GAP: f32 = 4.0;
 
-/// An instance row's indent in points: one disclosure-column ([`ROW_PAD`] + [`TREE_GLYPH`]) past where
-/// the group's chevron sits, so the instance cube lands under the group's folder and its label under
-/// the prefab name. The empty chevron column is what reads as the nesting (handoff view 2: instance
-/// rows indented ~30px).
-const INSTANCE_INDENT: f32 = ROW_PAD + TREE_GLYPH;
+/// An instance row's indent in points (handoff view 2: instance rows indented ~30px): one glyph-column
+/// past the group's folder ([`ROW_PAD`] + [`TREE_GLYPH`] + [`TREE_GAP`] = 30), so the instance cube
+/// lands under the group's prefab name and its label one step further in. The empty column to the left
+/// is what reads as the nesting now that the disclosure chevron is gone (the folder glyph is the
+/// disclosure).
+const INSTANCE_INDENT: f32 = ROW_PAD + TREE_GLYPH + TREE_GAP;
+
+/// The alpha of the selected row's full-bleed highlight: the accent at ~30% (handoff view 2: an
+/// accent-at-30% fill spanning the full panel width, no inset or rounded pill). 0x4d/0xff is 30%.
+const SELECTION_ALPHA: u8 = 0x4d;
 
 /// The Nerd Font glyph for a navigation view's bottom-bar cell. Which icon-font codepoint a view draws
 /// is a chrome concern, so the mapping lives here with the view rather than on `NavView` in the model
@@ -212,10 +219,13 @@ fn nav_body(ui: &mut egui::Ui, model: &Model, loaded_scene: Option<&LoadedScene>
         NavView::Lighting => {
             content_list(ui, model, "No lighting states yet", ContentLayout::lighting_names, false);
         }
-        // The this-scene view: the active scene tab's placements, grouped or flat per the sort toggle.
-        // No state dots / hidden styling / visibility toggles - per-instance physical state is not
-        // authored here (editor-design.md placement boundary); the game owns it by id at runtime.
-        NavView::Instances => instances_list(ui, model.shell.instance_sort(), loaded_scene),
+        // The this-scene view: the active scene tab's placements, grouped or flat per the sort toggle,
+        // clickable to select. No state dots / hidden styling / visibility toggles - per-instance
+        // physical state is not authored here (editor-design.md placement boundary); the game owns it by
+        // id at runtime.
+        NavView::Instances => {
+            instances_list(ui, model.shell.instance_sort(), model.shell.selection(), loaded_scene, actions);
+        }
     }
 }
 
@@ -297,12 +307,18 @@ fn empty_note(ui: &mut egui::Ui, text: &str) {
 
 /// The Instances view: the active scene tab's placements, laid out per the header's sort toggle -
 /// grouped under their prefab as a collapsible tree ([`instances_tree`], the default), or a flat A-Z
-/// list ([`instances_flat`]). Rows are display-only this bite (selection and the floating inspector are
-/// a later bite). Three resting states with nothing to list: no scene tab active (`loaded_scene` is
-/// `None`) reads "No scene open"; a scene that failed to load reads "Scene failed to load" (the detail
-/// is noted on the residency for a later bite to surface); and a loaded scene with no placements reads
-/// "No instances".
-fn instances_list(ui: &mut egui::Ui, sort: InstanceSort, loaded_scene: Option<&LoadedScene>) {
+/// list ([`instances_flat`]). A row click emits [`Action::Select`]; the row matching `selection` carries
+/// the full-bleed highlight. Three resting states with nothing to list: no scene tab active
+/// (`loaded_scene` is `None`) reads "No scene open"; a scene that failed to load reads "Scene failed to
+/// load" (the detail is noted on the residency for a later bite to surface); and a loaded scene with no
+/// placements reads "No instances".
+fn instances_list(
+    ui: &mut egui::Ui,
+    sort: InstanceSort,
+    selection: Option<InstanceId>,
+    loaded_scene: Option<&LoadedScene>,
+    actions: &mut Vec<Action>,
+) {
     ui.add_space(4.0);
     let Some(loaded) = loaded_scene else {
         empty_note(ui, "No scene open");
@@ -319,38 +335,56 @@ fn instances_list(ui: &mut egui::Ui, sort: InstanceSort, loaded_scene: Option<&L
         return;
     }
     // A scroll area takes over when the list outgrows the body, the same as the project-scoped lists,
-    // so a placement-heavy scene reaches every row rather than clipping past the fold.
+    // so a placement-heavy scene reaches every row rather than clipping past the fold. The rows sit
+    // flush against each other (no inter-row spacing) so the tree reads tight and the full-bleed
+    // selection highlight is one continuous band, the Zed file-tree look.
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.spacing_mut().item_spacing.y = 0.0;
         match sort {
-            InstanceSort::Group => instances_tree(ui, loaded.name(), placements),
-            InstanceSort::Flat => instances_flat(ui, placements),
+            InstanceSort::Group => instances_tree(ui, loaded.name(), placements, selection, actions),
+            InstanceSort::Flat => instances_flat(ui, placements, selection, actions),
         }
     });
 }
 
-/// The Instances view's flat layout: every placement as one row, sorted A-Z by its display label,
-/// reusing the content-list row styling. The order is on the label the row reads, so a named placement
-/// sorts by its name and an unnamed one by its `{prefab} #{id}` fallback - not by the underlying
-/// instance id.
-fn instances_flat(ui: &mut egui::Ui, placements: &[Placement]) {
-    let mut labels: Vec<String> = placements.iter().map(placement_label).collect();
-    labels.sort();
-    for label in &labels {
-        // Display-only this bite: the row senses a hover but emits nothing (selection is a later bite).
-        content_row(ui, label, false);
+/// The Instances view's flat layout: every placement as one selectable row at the base indent, sorted
+/// A-Z by its display label. The order is on the label the row reads, so a named placement sorts by its
+/// name and an unnamed one by its `{prefab} #{id}` fallback - not by the underlying instance id. A click
+/// emits [`Action::Select`]; the row whose id is `selection` carries the highlight.
+fn instances_flat(
+    ui: &mut egui::Ui,
+    placements: &[Placement],
+    selection: Option<InstanceId>,
+    actions: &mut Vec<Action>,
+) {
+    let mut sorted: Vec<&Placement> = placements.iter().collect();
+    sorted.sort_by_key(|p| placement_label(p));
+    for placement in sorted {
+        if instance_row(ui, placement, ROW_PAD, selection == Some(placement.instance_id)) {
+            actions.push(Action::Select(placement.instance_id));
+        }
     }
 }
 
 /// The Instances view's grouped layout: one collapsible group row per prefab (sorted by prefab name)
-/// carrying its instance count, and under an open group the indented instance rows (in instance-id
-/// order, the residency's order). The group open state is egui-managed transient view memory, not model
-/// state - collapsing a group is a browsing affordance, never an authored edit.
-fn instances_tree(ui: &mut egui::Ui, scene: &str, placements: &[Placement]) {
+/// carrying its instance count, and under an open group the indented, selectable instance rows (in
+/// instance-id order, the residency's order). The group open state is egui-managed transient view
+/// memory, not model state - collapsing a group is a browsing affordance, never an authored edit. A
+/// click on an instance row emits [`Action::Select`]; the row whose id is `selection` carries the
+/// highlight.
+fn instances_tree(
+    ui: &mut egui::Ui,
+    scene: &str,
+    placements: &[Placement],
+    selection: Option<InstanceId>,
+    actions: &mut Vec<Action>,
+) {
     for (prefab, members) in group_by_prefab(placements) {
         if group_row(ui, scene, prefab, members.len()) {
             for placement in members {
-                instance_row(ui, &placement_label(placement));
+                if instance_row(ui, placement, INSTANCE_INDENT, selection == Some(placement.instance_id)) {
+                    actions.push(Action::Select(placement.instance_id));
+                }
             }
         }
     }
@@ -373,11 +407,11 @@ fn group_by_prefab(placements: &[Placement]) -> Vec<(&str, Vec<&Placement>)> {
     groups
 }
 
-/// One prefab group row: a disclosure chevron, a folder glyph, the prefab name, and the instance count
-/// on the right, in a fixed-height cell. The whole row senses a click that toggles the group's open
-/// state - egui transient memory keyed per scene and prefab ([`instance_group_id`]), so it outlives a
-/// frame but is never authored. Returns whether the group is open, so the caller renders its instance
-/// rows. Hovering lights the row, the same as a clickable content row.
+/// One prefab group row: a folder glyph (open or closed, the disclosure - the chevron was dropped), the
+/// prefab name, and the instance count on the right, in a fixed-height cell. The whole row senses a
+/// click that toggles the group's open state - egui transient memory keyed per scene and prefab
+/// ([`instance_group_id`]), so it outlives a frame but is never authored. Returns whether the group is
+/// open, so the caller renders its instance rows. Hovering lights the row.
 fn group_row(ui: &mut egui::Ui, scene: &str, prefab: &str, count: usize) -> bool {
     let p = theme::palette(ui.ctx());
     let id = instance_group_id(scene, prefab);
@@ -394,12 +428,10 @@ fn group_row(ui: &mut egui::Ui, scene: &str, prefab: &str, count: usize) -> bool
         ui.painter().rect_filled(rect, 0.0, p.hover);
     }
     let ink = if hovered { p.text_bright } else { p.text };
-    // [pad][chevron][folder][prefab name .......][count][pad]
-    let chevron = if open { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT };
-    let chevron_rect = glyph_cell(rect, ROW_PAD);
-    icons::paint(ui.painter(), chevron_rect, chevron, ink);
-    let folder_rect = glyph_cell(rect, chevron_rect.right());
-    icons::paint(ui.painter(), folder_rect, icons::FOLDER, ink);
+    // [pad][folder][prefab name .......][count][pad] - the open/closed folder is the disclosure.
+    let folder = if open { icons::FOLDER_OPEN } else { icons::FOLDER };
+    let folder_rect = glyph_cell(rect, ROW_PAD);
+    icons::paint(ui.painter(), folder_rect, folder, ink);
     let font = egui::TextStyle::Body.resolve(ui.style());
     let name_pos = egui::pos2(folder_rect.right() + TREE_GAP, rect.center().y);
     ui.painter().text(name_pos, egui::Align2::LEFT_CENTER, prefab, font.clone(), ink);
@@ -408,19 +440,30 @@ fn group_row(ui: &mut egui::Ui, scene: &str, prefab: &str, count: usize) -> bool
     open
 }
 
-/// One instance row under an open group: a cube glyph indented one disclosure-column in (so it sits
-/// under the group's folder, the empty chevron column reading as the indent) and the placement's label.
-/// Display-only this bite (selection is a later bite), so unlike a group row it senses nothing and does
-/// not light on hover.
-fn instance_row(ui: &mut egui::Ui, label: &str) {
+/// One selectable instance row: a cube glyph at `indent` and the placement's label, filling the row.
+/// `selected` paints the full-bleed selection highlight (the accent at [`SELECTION_ALPHA`] across the
+/// whole panel width); otherwise the row lights on hover. Returns whether it was clicked this frame, for
+/// the caller to emit [`Action::Select`]. Shared by the grouped tree (indented under its group, at
+/// [`INSTANCE_INDENT`]) and the flat list (at the base [`ROW_PAD`]).
+fn instance_row(ui: &mut egui::Ui, placement: &Placement, indent: f32, selected: bool) -> bool {
     let p = theme::palette(ui.ctx());
-    let (rect, _response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), NAV_ROW_HEIGHT), egui::Sense::hover());
-    let cube_rect = glyph_cell(rect, INSTANCE_INDENT);
-    icons::paint(ui.painter(), cube_rect, icons::CUBE, p.text);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), NAV_ROW_HEIGHT), egui::Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let hovered = response.hovered();
+    if selected {
+        let fill = egui::Color32::from_rgba_unmultiplied(p.accent.r(), p.accent.g(), p.accent.b(), SELECTION_ALPHA);
+        ui.painter().rect_filled(rect, 0.0, fill);
+    } else if hovered {
+        ui.painter().rect_filled(rect, 0.0, p.hover);
+    }
+    let ink = if selected || hovered { p.text_bright } else { p.text };
+    let cube_rect = glyph_cell(rect, indent);
+    icons::paint(ui.painter(), cube_rect, icons::CUBE, ink);
     let font = egui::TextStyle::Body.resolve(ui.style());
     let pos = egui::pos2(cube_rect.right() + TREE_GAP, rect.center().y);
-    ui.painter().text(pos, egui::Align2::LEFT_CENTER, label, font, p.text);
+    ui.painter().text(pos, egui::Align2::LEFT_CENTER, placement_label(placement), font, ink);
+    response.clicked()
 }
 
 /// A [`TREE_GLYPH`]-wide glyph cell at `left`, spanning the row's full height, for [`icons::paint`] to
@@ -572,8 +615,17 @@ fn tab_cell(ui: &mut egui::Ui, title: &str, active: bool, index: usize, actions:
 /// scene, dim and centred - the stand-in for the per-context surface (the 3D viewport, the data views),
 /// which lands in later bites, drawn into this same transparent panel; with no tab open it is the bare
 /// well.
-pub fn editor_area(ctx: &egui::Context, model: &Model) {
+///
+/// A click on the empty well clears the selection (editor-design.md: a click on empty space deselects;
+/// viewport picking that selects on a hit lands with the 3D, a later bite). The floating inspector is on
+/// a higher layer, so a click landing on it does not reach here - egui assigns the click to the topmost
+/// area, so the well's `clicked()` is false under the window.
+pub fn editor_area(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+        let well = ui.interact(ui.max_rect(), ui.id().with("editor_well"), egui::Sense::click());
+        if well.clicked() && model.shell.selection().is_some() {
+            actions.push(Action::Deselect);
+        }
         let Some(tab) = model.shell.active_tab().and_then(|i| model.shell.tabs().get(i)) else {
             return;
         };
