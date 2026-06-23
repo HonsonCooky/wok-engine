@@ -22,6 +22,7 @@
 mod action;
 mod gui;
 mod icons;
+mod loaded;
 mod menu;
 mod model;
 mod project;
@@ -32,6 +33,7 @@ mod workspace;
 
 use action::Action;
 use gui::Gui;
+use loaded::LoadedScene;
 use model::Model;
 use std::path::Path;
 use wok_platform::winit::event::WindowEvent;
@@ -43,6 +45,10 @@ struct Editor {
     /// The editor state the chrome reads and the action layer writes - the single writer's model: the
     /// open project, the recent-projects list, and the shell layout.
     model: Model,
+    /// The active scene tab's loaded data (or `None` when no scene tab is active). Reconciled to the
+    /// model each frame (`crate::loaded`); it is filesystem residency, so it lives here beside the
+    /// model rather than inside the egui- and disk-free `Model`.
+    loaded_scene: Option<LoadedScene>,
     /// The window title last pushed to the OS, so `set_title` fires only when it changes.
     title: String,
 }
@@ -61,7 +67,7 @@ impl Editor {
                 recent::save(&model.recents);
             }
         }
-        Editor { gui: None, model, title: String::new() }
+        Editor { gui: None, model, loaded_scene: None, title: String::new() }
     }
 
     /// Keep the window title showing the open project's name (`wok - {name}`), or just `wok` when none
@@ -96,13 +102,18 @@ impl App for Editor {
 
     fn frame(&mut self, ctx: &mut FrameCtx) {
         let Some(gui) = self.gui.as_mut() else { return };
+        // Reconcile the loaded scene to the active tab before building the chrome, so the Instances
+        // view lists the active scene's placements this frame (reload-on-tab-change; disk hot reload is
+        // a later bite). This is filesystem I/O, so it lives here beside the model, not inside it.
+        loaded::reconcile(&mut self.loaded_scene, &self.model);
         let model = &mut self.model;
+        let loaded_scene = self.loaded_scene.as_ref();
 
-        // Build the chrome for this frame, reading the model. The regions emit actions into a buffer
-        // rather than mutating the model inside their egui closures.
+        // Build the chrome for this frame, reading the model and the loaded scene. The regions emit
+        // actions into a buffer rather than mutating the model inside their egui closures.
         let mut actions = Vec::new();
         let output = gui.run(&ctx.platform.window, |egui_ctx| {
-            actions.extend(view::chrome(egui_ctx, model));
+            actions.extend(view::chrome(egui_ctx, model, loaded_scene));
         });
         // Drain the buffer through the single writer: click -> Action -> handle, and the next frame
         // re-renders the new state. Opening a project needs no validation - any picked folder opens

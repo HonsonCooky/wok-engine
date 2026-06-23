@@ -20,6 +20,7 @@
 //! emit actions.
 
 use crate::action::Action;
+use crate::loaded::LoadedScene;
 use crate::menu;
 use crate::model::Model;
 use crate::workspace;
@@ -27,13 +28,17 @@ use crate::workspace;
 /// Render the full editor chrome for one frame: the navigation panel first (full height on its docked
 /// side, and only when visible), then the view column's status bar, tab bar, and editor well. Returns
 /// the actions the regions emitted this frame, for the caller to apply through `crate::action::handle`.
-pub fn chrome(ctx: &egui::Context, model: &Model) -> Vec<Action> {
+///
+/// `loaded_scene` is the active scene tab's loaded data (reconciled by the frame loop, `crate::loaded`),
+/// which the Instances nav view lists; it is `None` when no scene tab is active. The model alone cannot
+/// carry it - it is filesystem residency, not pure model state - so it is threaded in separately.
+pub fn chrome(ctx: &egui::Context, model: &Model, loaded_scene: Option<&LoadedScene>) -> Vec<Action> {
     let mut actions = Vec::new();
     // Region order is load-bearing (sharp-edges 2): the nav panel is added first on whichever side it
     // docks, so it claims its full-height strip and the view column fills the rest - the status bar
     // never runs under the nav. Hidden, the view column spans the full width.
     if model.shell.nav_visible() {
-        workspace::nav_panel(ctx, model, &mut actions);
+        workspace::nav_panel(ctx, model, loaded_scene, &mut actions);
     }
     menu::status_bar(ctx, model.project.as_ref());
     workspace::tab_bar(ctx, model, &mut actions);
@@ -51,6 +56,10 @@ mod tests {
     use egui_kittest::kittest::Queryable;
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard};
+    use wok_scene::{
+        Chunk, ChunkCoord, ChunkStreaming, ContentLayout, Eagerness, InstanceId, LightStateRef, Placement,
+        PrefabRef, Scene, StreamingDefaults, Transform, save_chunk, save_scene,
+    };
 
     /// Serializes the wgpu snapshot tests. egui_kittest builds a fresh headless wgpu device per
     /// harness, and creating or tearing several down concurrently crashes on some Windows drivers - a
@@ -88,18 +97,24 @@ mod tests {
         model
     }
 
-    /// Build a harness that renders the chrome at `size` under `theme` over `model`, with the editor
-    /// surface filled behind the transparent editor well (standing in for the in-app GPU clear), so the
-    /// snapshot reads as it does live in that theme. Forcing the theme keeps each snapshot deterministic
-    /// regardless of the host's OS setting. The collected actions are discarded - a static render emits
-    /// none.
-    fn chrome_harness(theme: egui::ThemePreference, size: egui::Vec2, model: Model) -> Harness<'static> {
+    /// Build a harness that renders the chrome at `size` under `theme` over `model` and `loaded_scene`
+    /// (the active scene tab's loaded data, as the live frame loop threads in - `None` for the states
+    /// that have no scene loaded), with the editor surface filled behind the transparent editor well
+    /// (standing in for the in-app GPU clear), so the snapshot reads as it does live in that theme.
+    /// Forcing the theme keeps each snapshot deterministic regardless of the host's OS setting. The
+    /// collected actions are discarded - a static render emits none.
+    fn chrome_harness(
+        theme: egui::ThemePreference,
+        size: egui::Vec2,
+        model: Model,
+        loaded_scene: Option<LoadedScene>,
+    ) -> Harness<'static> {
         Harness::builder().with_size(size).wgpu().build(move |ctx| {
             crate::theme::apply(ctx);
             ctx.set_theme(theme);
             let editor_bg = crate::theme::palette(ctx).editor_bg;
             ctx.layer_painter(egui::LayerId::background()).rect_filled(ctx.screen_rect(), 0.0, editor_bg);
-            let _ = chrome(ctx, &model);
+            let _ = chrome(ctx, &model, loaded_scene.as_ref());
         })
     }
 
@@ -108,7 +123,10 @@ mod tests {
     /// `UPDATE_SNAPSHOTS=1 cargo test -p wok` and commit the new PNG.
     fn snapshot_of(name: &str, theme: egui::ThemePreference, model: Model) {
         let _gpu = gpu_guard();
-        let mut harness = chrome_harness(theme, egui::vec2(1100.0, 700.0), model);
+        // The states routed through here have no scene loaded (the nav-view, tab, dock, and menu
+        // snapshots); the Instances-with-placements state seeds its own scene and builds the harness
+        // directly (`chrome_instances_listed`).
+        let mut harness = chrome_harness(theme, egui::vec2(1100.0, 700.0), model, None);
         harness.run();
         harness.snapshot(name);
     }
@@ -119,9 +137,11 @@ mod tests {
         snapshot_of(name, theme, model_with(active));
     }
 
-    /// The Instances view active (a this-scene view, here with no open scene), in dark and light - the
-    /// light/dark palette guard. Scenes, not Instances, is the default landing view (since 2026-06-23);
-    /// that default state is the `chrome_scenes` pair below.
+    /// The Instances view active with no scene loaded, in dark and light - the light/dark palette
+    /// guard. The body shows the Instances "No scene open" empty state (no scene tab is active, so the
+    /// frame loop loads nothing). Scenes, not Instances, is the default landing view (since
+    /// 2026-06-23); that default state is the `chrome_scenes` pair below, and the Instances view
+    /// listing a loaded scene's placements is `chrome_instances_listed`.
     #[test]
     fn chrome_snapshot() {
         snapshot("chrome", egui::ThemePreference::Dark, NavView::Instances);
@@ -169,9 +189,73 @@ mod tests {
 
         let mut model = model_with(NavView::Scenes);
         model.project = Some(Project::new(root.clone()));
-        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model);
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, None);
         harness.run();
         harness.snapshot("chrome_scenes_listed");
+
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// A minimal but well-formed scene on disk: a `scene.json` manifest plus one chunk holding three
+    /// placements - two unnamed (so the `{prefab} #{id}` fallback shows, including two `oak_tree`s
+    /// distinguished by id) and one named. Written under `root`/`scene`. The placement ids (0, 1, 2)
+    /// fix the listed order so the snapshot is deterministic; the temp path itself is never displayed.
+    fn seed_instances_scene(root: &std::path::Path, scene: &str) {
+        let layout = ContentLayout::new(root);
+        std::fs::create_dir_all(layout.scene_dir(scene)).unwrap();
+        let manifest = Scene {
+            name: scene.to_string(),
+            default_lighting: LightStateRef::new("noon"),
+            regions: vec![],
+            default_streaming: StreamingDefaults { load_radius: 3, default_eagerness: Eagerness::Eager },
+            next_instance_id: InstanceId(3),
+        };
+        save_scene(&manifest, layout.scene_json(scene)).unwrap();
+        let placement = |prefab: &str, id: u32, name: Option<&str>| Placement {
+            prefab: PrefabRef::new(prefab),
+            instance_id: InstanceId(id),
+            name: name.map(str::to_owned),
+            transform: Transform::IDENTITY,
+            state: None,
+        };
+        let chunk = Chunk {
+            coord: ChunkCoord::new(0, 0),
+            placements: vec![
+                placement("oak_tree", 0, None),
+                placement("oak_tree", 1, Some("the landmark oak")),
+                placement("well", 2, None),
+            ],
+            streaming: ChunkStreaming::default(),
+        };
+        save_chunk(&chunk, layout.chunk(scene, ChunkCoord::new(0, 0))).unwrap();
+    }
+
+    /// The Instances view listing a loaded scene's placements: a scene tab open and active, the
+    /// Instances view selected, and the active scene's data loaded. The body lists the three placements
+    /// flat in instance-id order - the author name where set ("the landmark oak"), the `{prefab} #{id}`
+    /// fallback otherwise ("oak_tree #0", "well #2"). Seeds a temp scene on disk and loads it through
+    /// the real residency path (`LoadedScene::load`), so this guards the load-and-list end to end, the
+    /// way `chrome_scenes_listed` guards the content scan. The fixed-leaf "DemoGame" root keeps the
+    /// status-bar project name deterministic; the listed rows come from the seeded placements, not the
+    /// path. Dark alone: this is a content state, not a palette one (the `chrome` pair guards themes).
+    #[test]
+    fn chrome_instances_listed_snapshot() {
+        let _gpu = gpu_guard();
+        let parent = std::env::temp_dir().join("wok-instances-listed-snapshot");
+        let root = parent.join("DemoGame");
+        let _ = std::fs::remove_dir_all(&parent);
+        seed_instances_scene(&root, "village");
+
+        let mut model = model_with(NavView::Instances);
+        model.project = Some(Project::new(root.clone()));
+        // Open the scene as the active tab - the same state a Scenes-row click produces - so the tab
+        // bar, the editor well, and the loaded scene all name "village".
+        model.shell.open_tab(Tab::Scene("village".to_string()));
+
+        let loaded = LoadedScene::load(&root, "village");
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, Some(loaded));
+        harness.run();
+        harness.snapshot("chrome_instances_listed");
 
         let _ = std::fs::remove_dir_all(&parent);
     }
@@ -219,7 +303,7 @@ mod tests {
     #[test]
     fn chrome_view_menu_snapshot() {
         let _gpu = gpu_guard();
-        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), Model::default());
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), Model::default(), None);
         harness.run();
         harness.get_by_label("Menu").click();
         harness.run();
@@ -249,7 +333,7 @@ mod tests {
             recents: Recents::from_paths(["C:/games/MyGame", "C:/games/Other"].iter().map(PathBuf::from)),
             ..Default::default()
         };
-        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model);
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, None);
         harness.run();
         harness.get_by_label("Menu").click();
         harness.run();
@@ -269,7 +353,7 @@ mod tests {
             recents: Recents::from_paths(["C:/games/MyGame", "C:/games/Other"].iter().map(PathBuf::from)),
             ..Default::default()
         };
-        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model);
+        let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, None);
         harness.run();
         harness.get_by_label("Menu").click();
         harness.run();

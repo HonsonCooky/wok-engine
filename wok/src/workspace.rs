@@ -13,8 +13,9 @@
 //! the body track the active view too. The body lists the open project's content for the project-scoped
 //! views (Scenes, Prefabs, Lighting) through `wok_scene::ContentLayout` discovery, scanned per frame; a
 //! Scenes row opens that scene as a tab (`Action::OpenScene`), while Prefabs and Lighting rows stay
-//! display-only (opening those contexts is a later bite), and Instances keeps a placeholder until it has
-//! an open scene to read (part 2). The panel docks to either side and toggles through the View menu
+//! display-only (opening those contexts is a later bite). The this-scene Instances view lists the active
+//! scene tab's placements flat (from the reconciled `LoadedScene` threaded in), display-only for now -
+//! the richer tree and selection are part 2b. The panel docks to either side and toggles through the View menu
 //! (`crate::menu`) - the composition root shows `nav_panel` only when visible, on the model's chosen
 //! side, and the menu drives both - and it resizes by dragging its inner edge, with egui owning the live
 //! width (so there is no Shell state for it). The tab bar renders the model's open tabs: a click selects
@@ -22,10 +23,11 @@
 //! the 3D viewport, the data views - lands in later bites). Every colour is read through
 //! `theme::palette`, so the chrome follows the OS light/dark.
 
-use wok_scene::ContentLayout;
+use wok_scene::{ContentLayout, Placement};
 
 use crate::action::Action;
 use crate::icons;
+use crate::loaded::LoadedScene;
 use crate::menu;
 use crate::model::{Model, NavSide, NavView};
 use crate::theme;
@@ -95,7 +97,7 @@ fn flush_panel(ctx: &egui::Context) -> egui::Frame {
 /// remains. The composition root only calls this when the panel is visible. Resizable by dragging its
 /// inner edge (egui owns the width, clamped to [`NAV_PANEL_MIN_WIDTH`]..=[`NAV_PANEL_MAX_WIDTH`]);
 /// docking and toggling are unaffected.
-pub fn nav_panel(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
+pub fn nav_panel(ctx: &egui::Context, model: &Model, loaded_scene: Option<&LoadedScene>, actions: &mut Vec<Action>) {
     // Same builder either way - only the docked edge differs (`SidePanel::left` vs `::right`).
     let panel = match model.shell.nav_side() {
         NavSide::Left => egui::SidePanel::left("wok_nav_panel"),
@@ -114,7 +116,7 @@ pub fn nav_panel(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) 
             // actions this slice; the header and body read the active view to label themselves.
             nav_header(ui, model);
             icon_bar(ui, model, actions);
-            nav_body(ui, model, actions);
+            nav_body(ui, model, loaded_scene, actions);
         });
 }
 
@@ -146,11 +148,12 @@ fn nav_header(ui: &mut egui::Ui, model: &Model) {
 }
 
 /// The panel body: wholly the active view. The project-scoped views (Scenes, Prefabs, Lighting) list
-/// the open project's content of that kind; Instances keeps a placeholder until it has an open scene to
-/// read (part 2). A Scenes row opens that scene as a tab; Prefabs and Lighting rows are display-only
-/// (opening those contexts is a later bite). The body names the active view either way, so switching is
-/// visible here as well as in the header and the icon accent.
-fn nav_body(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
+/// the open project's content of that kind; Instances lists the active scene tab's placements (from
+/// `loaded_scene`). A Scenes row opens that scene as a tab; Prefabs and Lighting rows are display-only
+/// (opening those contexts is a later bite), and the Instances rows are display-only too (selection is
+/// a later bite). The body names the active view either way, so switching is visible here as well as in
+/// the header and the icon accent.
+fn nav_body(ui: &mut egui::Ui, model: &Model, loaded_scene: Option<&LoadedScene>, actions: &mut Vec<Action>) {
     match model.shell.active_nav() {
         NavView::Scenes => {
             // The one clickable list this bite: a click opens that scene as a tab.
@@ -164,9 +167,9 @@ fn nav_body(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
         NavView::Lighting => {
             content_list(ui, model, "No lighting states yet", ContentLayout::lighting_names, false);
         }
-        // Instances lists the OPEN SCENE's placements, which this slice has no concept of yet; the
-        // original placeholder stands in until part 2 gives it a scene to read.
-        NavView::Instances => nav_placeholder(ui, model),
+        // The this-scene view: the active scene tab's placements, flat. The richer tree (group-by-prefab,
+        // type icons, the state dots, hidden styling, the A-Z / group sort toggle) is part 2b.
+        NavView::Instances => instances_list(ui, loaded_scene),
     }
 }
 
@@ -246,13 +249,49 @@ fn empty_note(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-/// The Instances placeholder: the view names itself but has no open scene to list yet. Kept as the
-/// original placeholder line (its own slice replaces it with the instances tree), so this slice only
-/// changes the project-scoped views, not Instances.
-fn nav_placeholder(ui: &mut egui::Ui, model: &Model) {
-    let title = model.shell.active_nav().title();
-    ui.add_space(8.0);
-    empty_note(ui, &format!("{title} - view content lands here"));
+/// The Instances view: the active scene tab's placements as a flat list, one tight row each, reusing
+/// the content-list row styling. The label is the placement's author name where set, else the
+/// `{prefab} #{id}` fallback; rows are display-only this bite (selection is part 2b). Three resting
+/// states with nothing to list: no scene tab active (`loaded_scene` is `None`) reads "No scene open"; a
+/// scene that failed to load reads "Scene failed to load" (the detail is noted on the residency for a
+/// later bite to surface); and a loaded scene with no placements reads "No instances". Rows sit in the
+/// residency's order - by instance id - until the part-2b sort toggle.
+fn instances_list(ui: &mut egui::Ui, loaded_scene: Option<&LoadedScene>) {
+    ui.add_space(4.0);
+    let Some(loaded) = loaded_scene else {
+        empty_note(ui, "No scene open");
+        return;
+    };
+    // A failed load is empty too, but it is not "no instances" - say so rather than misreport it.
+    if loaded.error().is_some() {
+        empty_note(ui, "Scene failed to load");
+        return;
+    }
+    let placements = loaded.placements();
+    if placements.is_empty() {
+        empty_note(ui, "No instances");
+        return;
+    }
+    // A scroll area takes over when the list outgrows the body, the same as the project-scoped lists,
+    // so a placement-heavy scene reaches every row rather than clipping past the fold.
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for placement in placements {
+            // Display-only this bite: the row senses a hover but emits nothing (selection is part 2b).
+            content_row(ui, &placement_label(placement), false);
+        }
+    });
+}
+
+/// One placement's flat-list label: its author-given name when set, else the `{prefab} #{id}` fallback
+/// (e.g. `oak_tree #3`) - enough to tell two instances of the same prefab apart by their stable
+/// instance id. This is display formatting, so it lives view-side with the row that shows it, not on
+/// the data.
+fn placement_label(placement: &Placement) -> String {
+    match &placement.name {
+        Some(name) => name.clone(),
+        None => format!("{} #{}", placement.prefab.as_str(), placement.instance_id.0),
+    }
 }
 
 /// The bottom icon bar at the panel foot (handoff view 2): a Zed-style row of view icons, split by a
