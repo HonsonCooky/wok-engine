@@ -8,49 +8,74 @@
 //! writer, `action::handle` (see `crate::action`), so the model has exactly one mutation point. The
 //! loop also carries out the effects the pure handler cannot: it persists the recent-projects list
 //! when it changes (`crate::recent`), saves the open scene's chunks when an edit asks for it (Ctrl+S,
-//! via `Handled::save`; `crate::loaded`), and keeps the window title on the open project. Opening a project
-//! has no gate - any picked folder opens (HLD "content conventions and integrity") - so it flows
-//! through the single writer like any other action, with no validation step in the loop. The per-view
-//! content (the nav and editor area) is a later slice.
+//! via `Handled::save`; `crate::loaded`), and keeps the window title on the open project.
 //!
-//! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish`. Each frame runs the
-//! egui pass (building the chrome), clears the surface to the editor background, then paints the chrome
-//! over it as the final pass. The clear and the snapshot harness's background fill use the same
-//! `theme::palette(ctx).editor_bg`, so the transparent editor well reads identically live and in the
-//! snapshot. Sizing comes from `Frame::size()` (the acquired surface texture), never a separately
-//! tracked window size - see designs/sharp-edges.md section 1.
+//! The editor well is the 3D Scene viewport. The authored scene (`crate::loaded`) is derived into a
+//! render residency (`crate::render_scene`, distinct from the editable model) reconciled to the open
+//! scene, and wok-render draws it - terrain, placeholder prefab shapes, the scene's lighting - into the
+//! well's rect, flown by a mouse-only god-cam (`crate::camera`, `crate::input`). The frame order is
+//! load-bearing: reconcile the authored scene, build the chrome (its focus queries decide what input
+//! the camera may use), drain the chrome's actions, reconcile the render residency (an edit just
+//! applied shows this frame), advance the camera last (on this frame's focus state), then draw the 3D
+//! with the chrome painted over it (`crate::render`).
+//!
+//! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish` (inside `render::draw`):
+//! each frame runs the egui pass (building the chrome), draws the 3D into the well rect (or clears the
+//! surface to the editor background when no scene is open), then paints the chrome over it as the final
+//! pass. The clear and the snapshot harness's background fill use the same `theme::palette(ctx).editor_bg`,
+//! so the transparent editor well reads identically live and in the snapshot. Sizing comes from
+//! `Frame::size()` (the acquired surface texture), never a separately tracked window size - see
+//! designs/sharp-edges.md section 1.
 
 mod action;
+mod camera;
 mod gui;
 mod icons;
+mod input;
 mod inspector;
 mod loaded;
 mod menu;
 mod model;
 mod project;
 mod recent;
+mod render;
+mod render_scene;
 mod theme;
 mod view;
 mod workspace;
 
 use action::Action;
+use camera::FlyCamera;
+use glam::Vec3;
 use gui::Gui;
 use loaded::LoadedScene;
 use model::Model;
+use render::Gpu;
+use render_scene::RenderScene;
 use std::path::Path;
 use wok_platform::winit::event::WindowEvent;
-use wok_platform::{App, Desc, FrameCtx, Platform, gfx};
+use wok_platform::{App, Desc, FrameCtx, Platform};
 
 struct Editor {
     /// egui integration, built once a GPU device exists (`init`).
     gui: Option<Gui>,
+    /// The scene-independent GPU residency (the renderer + the unit-primitive meshes + the terrain
+    /// cache), built once a device exists (`init`). `None` until then.
+    gpu: Option<Gpu>,
     /// The editor state the chrome reads and the action layer writes - the single writer's model: the
     /// open project, the recent-projects list, and the shell layout.
     model: Model,
-    /// The active scene tab's loaded data (or `None` when no scene tab is active). Reconciled to the
-    /// model each frame (`crate::loaded`); it is filesystem residency, so it lives here beside the
-    /// model rather than inside the egui- and disk-free `Model`.
+    /// The active scene tab's loaded authored data (or `None` when no scene tab is active). Reconciled
+    /// to the model each frame (`crate::loaded`); it is filesystem residency, so it lives here beside
+    /// the model rather than inside the egui- and disk-free `Model`. The editable placements.
     loaded_scene: Option<LoadedScene>,
+    /// The open scene's runtime residency the viewport draws (`crate::render_scene`), derived from
+    /// `loaded_scene` and reconciled to it each frame so edits show. Separate from the editable model;
+    /// `None` when no scene is open or it failed to load.
+    render_scene: Option<RenderScene>,
+    /// The god-cam the viewport renders through. Spawned over the scene when one loads, then advanced
+    /// from the mouse each frame (`crate::camera`, `crate::input`).
+    camera: FlyCamera,
     /// The window title last pushed to the OS, so `set_title` fires only when it changes.
     title: String,
 }
@@ -70,7 +95,15 @@ impl Editor {
                 recent::save(&model.recents);
             }
         }
-        Editor { gui: None, model, loaded_scene: None, title: String::new() }
+        Editor {
+            gui: None,
+            gpu: None,
+            model,
+            loaded_scene: None,
+            render_scene: None,
+            camera: default_camera(),
+            title: String::new(),
+        }
     }
 
     /// Keep the window title showing the open project's name (`wok - {name}`), or just `wok` when none
@@ -91,10 +124,11 @@ impl App for Editor {
     fn init(&mut self, platform: &Platform) {
         // The OS owns the title bar, window drag, resize, and the min/max/close buttons; the editor
         // draws only its client area. Build egui and apply the editor theme (which follows the OS
-        // light/dark from here on).
+        // light/dark from here on), then the GPU residency now that a device exists.
         let gui = Gui::new(platform);
         theme::apply(&gui.ctx);
         self.gui = Some(gui);
+        self.gpu = Some(Gpu::new(platform));
     }
 
     fn on_window_event(&mut self, platform: Option<&Platform>, event: &WindowEvent) {
@@ -116,20 +150,34 @@ impl App for Editor {
 
         // Build the chrome for this frame, reading the model and the loaded scene. The immutable borrows
         // are scoped to this block so they release before the mutable drain below. The regions emit
-        // actions into a buffer rather than mutating state inside their egui closures.
+        // actions into a buffer rather than mutating state inside their egui closures, and return the
+        // editor-well rect the 3D viewport scopes to.
         let mut actions = Vec::new();
+        let mut editor_rect = egui::Rect::NOTHING;
         let output = {
             let model = &self.model;
             let loaded_scene = self.loaded_scene.as_ref();
             gui.run(&ctx.platform.window, |egui_ctx| {
-                actions.extend(view::chrome(egui_ctx, model, loaded_scene));
+                let (acts, rect) = view::chrome(egui_ctx, model, loaded_scene);
+                actions.extend(acts);
+                editor_rect = rect;
             })
         };
+
+        // The mouse drives the camera only when the cursor is free for the viewport: over the well rect,
+        // not under a foreground area (an open menu, the floating inspector), and not in an egui pointer
+        // gesture (a panel-resize drag straying onto the well). The well is egui's background layer under
+        // a CentralPanel, so is_pointer_over_area is always true over it and cannot tell the viewport
+        // from a panel - gate on the rect plus the layer order plus is_using_pointer (sharp-edges 2).
+        let pointer = gui.ctx.pointer_latest_pos();
+        let over_viewport = pointer.is_some_and(|p| editor_rect.contains(p));
+        let over_foreground =
+            pointer.and_then(|p| gui.ctx.layer_id_at(p)).is_some_and(|layer| layer.order != egui::Order::Background);
+        let pointer_free = over_viewport && !over_foreground && !gui.ctx.is_using_pointer();
+
         // Drain the buffer through the single writer: click -> Action -> handle, and the next frame
-        // re-renders the new state. Opening a project needs no validation - any picked folder opens
-        // (HLD content conventions) - so it flows through handle like every other action. The handler
-        // returns the effects it cannot perform itself: persisting the recent-projects list, and saving
-        // the open scene (handle stays filesystem-free, so the write is done here).
+        // re-renders the new state. The handler returns the effects it cannot perform itself: persisting
+        // the recent-projects list, and saving the open scene (handle stays filesystem-free).
         for action in actions {
             let handled = action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
             if handled.save_recents {
@@ -143,24 +191,36 @@ impl App for Editor {
                 }
             }
         }
-        // The editor well is a transparent egui panel, so the surface clear behind it is the well's
-        // colour: clear to the active theme's editor background. The surface is sRGB and wgpu reads the
-        // clear value as linear, so decode through Rgba.
-        let editor_bg = egui::Rgba::from(theme::palette(&gui.ctx).editor_bg);
 
-        let Some(mut frame) = gfx::begin_frame(ctx.platform) else { return };
-        frame.clear(editor_bg.r().into(), editor_bg.g().into(), editor_bg.b().into());
-        // Paint the chrome over the clear, sized from the acquired texture (the one authoritative size
-        // for this frame), never a separately tracked window size that can race ahead mid-resize.
-        let size = frame.size();
-        gui.paint(ctx.platform, &mut frame.encoder, &frame.view, output, size);
-        frame.finish(ctx.platform);
+        // The editor well is a transparent egui panel, so the surface clear behind it (when no scene
+        // draws) is the well's colour: the active theme's editor background. The surface is sRGB and
+        // wgpu reads the clear value as linear; `render::draw` decodes it through Rgba.
+        let editor_bg = theme::palette(&gui.ctx).editor_bg;
+
+        // The render residency and the 3D pass need the device. Reconcile the residency to the open
+        // scene (a fresh build spawns the god-cam over it; an in-memory edit just applied is re-derived
+        // here so it shows this frame), advance the camera from the mouse last so it sees this frame's
+        // focus state, then draw the 3D into the well and paint the chrome over it.
+        let Some(gpu) = self.gpu.as_mut() else { return };
+        if render_scene::reconcile(&mut self.render_scene, gpu, ctx.platform, self.loaded_scene.as_ref()) {
+            if let Some(scene) = self.render_scene.as_ref() {
+                self.camera = scene.spawn_camera();
+            }
+        }
+        self.camera = camera::update(&self.camera, &input::camera_input(&ctx.input, pointer_free));
+        render::draw(ctx.platform, gpu, self.render_scene.as_ref(), self.camera, editor_rect, editor_bg, gui, output);
 
         // Keep the window title on the open project's name (or just the app name when none).
         self.refresh_title(ctx.platform);
     }
 
     fn cleanup(&mut self, _platform: &Platform) {}
+}
+
+/// The camera before any scene loads - never rendered (the empty well just clears), but the field
+/// needs a value; [`RenderScene::spawn_camera`] overwrites it when a scene opens.
+fn default_camera() -> FlyCamera {
+    FlyCamera { position: Vec3::new(64.0, 30.0, 128.0), yaw: 0.0, pitch: -0.2 }
 }
 
 fn main() {

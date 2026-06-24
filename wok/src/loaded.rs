@@ -92,6 +92,13 @@ impl LoadedScene {
         &self.name
     }
 
+    /// The scene's chunks, the authoritative placement store - the live source the render residency
+    /// ([`RenderScene`](crate::render_scene::RenderScene)) derives the viewport's runtime arrays from,
+    /// so an in-memory edit shows in the 3D without a disk reload. Empty when the scene failed to load.
+    pub fn chunks(&self) -> &[Chunk] {
+        &self.chunks
+    }
+
     /// The scene's placements, sorted by instance id. Empty when the scene has none, or when it failed
     /// to load (check [`error`](Self::error) to tell the two apart). This is the derived read cache; an
     /// edit rebuilds it, so it always mirrors the chunks.

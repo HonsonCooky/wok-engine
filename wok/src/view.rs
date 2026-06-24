@@ -36,13 +36,16 @@ use crate::workspace;
 
 /// Render the full editor chrome for one frame: the navigation panel first (full height on its docked
 /// side, and only when visible), then the view column's status bar, tab bar, and editor well, and last
-/// the floating inspector over the well. Returns the actions the regions emitted this frame, for the
-/// caller to apply through `crate::action::handle`.
+/// the floating inspector over the well. Returns the actions the regions emitted this frame (for the
+/// caller to apply through `crate::action::handle`) and the editor-well rect (egui points): the frame
+/// loop scopes the 3D viewport to it (`crate::render`), so the rect the inspector clips to and the rect
+/// the viewport draws into are one shared source. `Rect::NOTHING` until the first chrome settles, which
+/// the render treats as the full target.
 ///
 /// `loaded_scene` is the active scene tab's loaded data (reconciled by the frame loop, `crate::loaded`),
 /// which the Instances nav view lists; it is `None` when no scene tab is active. The model alone cannot
 /// carry it - it is filesystem residency, not pure model state - so it is threaded in separately.
-pub fn chrome(ctx: &egui::Context, model: &Model, loaded_scene: Option<&LoadedScene>) -> Vec<Action> {
+pub fn chrome(ctx: &egui::Context, model: &Model, loaded_scene: Option<&LoadedScene>) -> (Vec<Action>, egui::Rect) {
     let mut actions = Vec::new();
     // Region order is load-bearing (sharp-edges 2): the nav panel is added first on whichever side it
     // docks, so it claims its full-height strip and the view column fills the rest - the status bar
@@ -72,7 +75,7 @@ pub fn chrome(ctx: &egui::Context, model: &Model, loaded_scene: Option<&LoadedSc
     if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
         actions.push(Action::Save);
     }
-    actions
+    (actions, editor_rect)
 }
 
 #[cfg(test)]

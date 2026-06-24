@@ -4562,7 +4562,11 @@ dependencies = [
  "egui_kittest",
  "glam",
  "rfd",
+ "wok-content",
+ "wok-light",
+ "wok-mesh",
  "wok-platform",
+ "wok-render",
  "wok-scene",
 ]
 
