@@ -53,6 +53,7 @@ use model::Model;
 use render::Gpu;
 use render_scene::RenderScene;
 use std::path::Path;
+use wok_platform::winit::dpi::PhysicalPosition;
 use wok_platform::winit::event::WindowEvent;
 use wok_platform::{App, Desc, FrameCtx, Platform};
 
@@ -76,6 +77,10 @@ struct Editor {
     /// The god-cam the viewport renders through. Spawned over the scene when one loads, then advanced
     /// from the mouse each frame (`crate::camera`, `crate::input`).
     camera: FlyCamera,
+    /// The cursor-lock anchor while a camera drag is held: the press position the cursor is hidden and
+    /// grabbed at, restored there on release so it never jumps (`input::update_cursor_grab`). `None`
+    /// when no drag is capturing the cursor.
+    cursor_grab: Option<PhysicalPosition<f64>>,
     /// The window title last pushed to the OS, so `set_title` fires only when it changes.
     title: String,
 }
@@ -102,6 +107,7 @@ impl Editor {
             loaded_scene: None,
             render_scene: None,
             camera: default_camera(),
+            cursor_grab: None,
             title: String::new(),
         }
     }
@@ -207,7 +213,12 @@ impl App for Editor {
                 self.camera = scene.spawn_camera();
             }
         }
-        self.camera = camera::update(&self.camera, &input::camera_input(&ctx.input, pointer_free));
+        // Hide and lock the cursor while a look/pan drag started in the viewport is held, restoring it
+        // on release (`input::update_cursor_grab`). While a lock is active the camera stays driven even
+        // if the captured cursor would nominally leave the well, so a confined cursor (the Windows
+        // fallback) drifting over a panel does not cut the drag.
+        let lock_active = input::update_cursor_grab(&mut self.cursor_grab, &ctx.platform.window, &ctx.input, pointer_free);
+        self.camera = camera::update(&self.camera, &input::camera_input(&ctx.input, pointer_free || lock_active));
         render::draw(ctx.platform, gpu, self.render_scene.as_ref(), self.camera, editor_rect, editor_bg, gui, output);
 
         // Keep the window title on the open project's name (or just the app name when none).
