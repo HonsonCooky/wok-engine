@@ -7,7 +7,8 @@
 //! [`Model`] and emits [`Action`](action::Action)s; this frame loop drains them through the single
 //! writer, `action::handle` (see `crate::action`), so the model has exactly one mutation point. The
 //! loop also carries out the effects the pure handler cannot: it persists the recent-projects list
-//! when it changes (`crate::recent`) and keeps the window title on the open project. Opening a project
+//! when it changes (`crate::recent`), saves the open scene's chunks when an edit asks for it (Ctrl+S,
+//! via `Handled::save`; `crate::loaded`), and keeps the window title on the open project. Opening a project
 //! has no gate - any picked folder opens (HLD "content conventions and integrity") - so it flows
 //! through the single writer like any other action, with no validation step in the loop. The per-view
 //! content (the nav and editor area) is a later slice.
@@ -64,7 +65,8 @@ impl Editor {
         // open is, and the reordered recents are persisted.
         let mut model = Model { recents: recent::load(), ..Model::default() };
         if let Some(root) = project::pick_startup(&model.recents, Path::is_dir) {
-            if action::handle(&mut model, Action::OpenProject(root)).save_recents {
+            // No scene is loaded yet at startup, so the edit channel gets `None`.
+            if action::handle(&mut model, None, Action::OpenProject(root)).save_recents {
                 recent::save(&model.recents);
             }
         }
@@ -109,24 +111,36 @@ impl App for Editor {
         // the active scene changes under it, drop the selection through the single writer: an instance
         // id is per-scene, so a selection made in one scene must not carry onto the next.
         if loaded::reconcile(&mut self.loaded_scene, &self.model) {
-            action::handle(&mut self.model, Action::Deselect);
+            action::handle(&mut self.model, self.loaded_scene.as_mut(), Action::Deselect);
         }
-        let model = &mut self.model;
-        let loaded_scene = self.loaded_scene.as_ref();
 
-        // Build the chrome for this frame, reading the model and the loaded scene. The regions emit
-        // actions into a buffer rather than mutating the model inside their egui closures.
+        // Build the chrome for this frame, reading the model and the loaded scene. The immutable borrows
+        // are scoped to this block so they release before the mutable drain below. The regions emit
+        // actions into a buffer rather than mutating state inside their egui closures.
         let mut actions = Vec::new();
-        let output = gui.run(&ctx.platform.window, |egui_ctx| {
-            actions.extend(view::chrome(egui_ctx, model, loaded_scene));
-        });
+        let output = {
+            let model = &self.model;
+            let loaded_scene = self.loaded_scene.as_ref();
+            gui.run(&ctx.platform.window, |egui_ctx| {
+                actions.extend(view::chrome(egui_ctx, model, loaded_scene));
+            })
+        };
         // Drain the buffer through the single writer: click -> Action -> handle, and the next frame
         // re-renders the new state. Opening a project needs no validation - any picked folder opens
         // (HLD content conventions) - so it flows through handle like every other action. The handler
-        // returns the effects it cannot perform itself (persisting the recent-projects list).
+        // returns the effects it cannot perform itself: persisting the recent-projects list, and saving
+        // the open scene (handle stays filesystem-free, so the write is done here).
         for action in actions {
-            if action::handle(model, action).save_recents {
-                recent::save(&model.recents);
+            let handled = action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
+            if handled.save_recents {
+                recent::save(&self.model.recents);
+            }
+            if handled.save {
+                if let Some(scene) = self.loaded_scene.as_mut() {
+                    // Best-effort write; a failure leaves the scene dirty, so the save dot stays lit as
+                    // the signal (surfacing a save error is a later bite, like load errors).
+                    let _ = scene.save();
+                }
             }
         }
         // The editor well is a transparent egui panel, so the surface clear behind it is the well's

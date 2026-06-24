@@ -22,7 +22,10 @@
 //! Above the well sits the floating layer: the conditional inspector (`crate::inspector`), an
 //! `egui::Window` clipped to the editor area and present only when a selection resolves to a placement.
 //! It is shown after the well so it layers over it, and Esc (when something is selected) emits a
-//! deselect - both read the same `model.shell.selection()` the Instances tree sets.
+//! deselect - both read the same `model.shell.selection()` the Instances tree sets. The inspector's
+//! Name field commits a rename (`SetInstanceName`), and Ctrl+S (or the status-bar save dot, shown when
+//! the loaded scene is dirty) emits `Save` - the editing actions the frame loop drains through the
+//! single writer, the same as every other action.
 
 use crate::action::Action;
 use crate::inspector;
@@ -47,18 +50,27 @@ pub fn chrome(ctx: &egui::Context, model: &Model, loaded_scene: Option<&LoadedSc
     if model.shell.nav_visible() {
         workspace::nav_panel(ctx, model, loaded_scene, &mut actions);
     }
-    menu::status_bar(ctx, model.project.as_ref());
+    // The status bar shows the save dot when the open scene has unsaved edits (residency state, not
+    // model state, so it is read from the loaded scene here and passed in).
+    let dirty = loaded_scene.is_some_and(|scene| scene.dirty());
+    menu::status_bar(ctx, model.project.as_ref(), dirty, &mut actions);
     workspace::tab_bar(ctx, model, &mut actions);
     // The editor area is the central region left after the three bounding panels; capture it now, before
     // the central panel consumes it, so the floating inspector can anchor to and clip to it. The
     // inspector is shown after the well so it layers over it; it appears only when a selection resolves.
     let editor_rect = ctx.available_rect();
     workspace::editor_area(ctx, model, &mut actions);
-    inspector::floating(ctx, model, loaded_scene, editor_rect);
+    inspector::floating(ctx, model, loaded_scene, editor_rect, &mut actions);
     // Esc clears the selection (editor-design.md: Esc unwinds the selection). Gated on there being one,
     // so it is inert otherwise and never fights for the key when nothing is selected.
     if model.shell.selection().is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         actions.push(Action::Deselect);
+    }
+    // Ctrl+S saves the open scene (editor-design.md command). Emitted on the chord; handle makes it a
+    // no-op when nothing is dirty. A focused Name field still types - Ctrl+S is not a character it
+    // consumes - so the save reaches the editor whether or not a field has focus.
+    if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+        actions.push(Action::Save);
     }
     actions
 }

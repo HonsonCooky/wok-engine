@@ -332,11 +332,13 @@ fn chrome_instances_flat_snapshot() {
 
 /// An instance selected from the tree: "the landmark oak" (id 1) is selected directly on the model,
 /// so its row in the grouped tree carries the full-bleed accent highlight and the floating inspector
-/// shows it - IDENTITY (the name, the `oak_tree` prefab, the `0x00000001` id) and TRANSFORM (its
-/// seeded Pos / 45-degree-yaw Rot / 1.5 Scale, the X/Y/Z fields axis-tinted), closing on the
-/// boundary line. Built by setting the selection directly (not by faking a row click), the
-/// counterpart to the grouped snapshot's deselected / no-inspector state (sharp-edges 3: build the
-/// state on the model). Dark alone: a content state, not a palette one.
+/// shows it - IDENTITY (the editable Name field showing the current name, the `oak_tree` prefab, the
+/// `0x00000001` id) and TRANSFORM (its seeded Pos / 45-degree-yaw Rot / 1.5 Scale, the X/Y/Z fields
+/// axis-tinted), closing on the boundary line. The Name is now a `TextEdit`, not a label; the scene is
+/// unedited, so the status bar shows no save dot - the dirty state is `chrome_instances_dirty`. Built
+/// by setting the selection directly (not by faking a row click), the counterpart to the grouped
+/// snapshot's deselected / no-inspector state (sharp-edges 3: build the state on the model). Dark
+/// alone: a content state, not a palette one.
 #[test]
 fn chrome_instances_selected_snapshot() {
     let _gpu = gpu_guard();
@@ -345,6 +347,24 @@ fn chrome_instances_selected_snapshot() {
     let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, Some(loaded));
     harness.run();
     harness.snapshot("chrome_instances_selected");
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
+/// The dirty editing state: the same selected instance as above, but the loaded scene carries an
+/// uncommitted rename (id 1 -> "renamed oak"), so the inspector's editable Name field shows the new
+/// value and the status bar's save dot is lit. Built by renaming the loaded scene directly (the
+/// in-memory mutator the action layer drives) and selecting that instance (sharp-edges 3: build the
+/// state, do not fake the keystrokes). Pins the editable Name field and the dirty save dot together.
+/// Dark alone: a content state, not a palette one.
+#[test]
+fn chrome_instances_dirty_snapshot() {
+    let _gpu = gpu_guard();
+    let (mut model, mut loaded, parent) = seed_instances_model("wok-instances-dirty-snapshot");
+    loaded.rename(InstanceId(1), Some("renamed oak".to_owned()));
+    model.shell.select(InstanceId(1));
+    let mut harness = chrome_harness(egui::ThemePreference::Dark, egui::vec2(1100.0, 700.0), model, Some(loaded));
+    harness.run();
+    harness.snapshot("chrome_instances_dirty");
     let _ = std::fs::remove_dir_all(&parent);
 }
 

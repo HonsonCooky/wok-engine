@@ -11,12 +11,16 @@
 //! per-placement, so they belong to the prefab editor, not here. It closes with the boundary line that
 //! states why there is no general property bag.
 //!
-//! Read-only this bite: every field is static text, not a `DragValue` or `TextEdit`. Editing (rename,
-//! transform entry) plus the working-copy / dirty / Save machinery is the next bite - shipping editable
-//! fields without persistence would silently lose edits.
+//! Name is editable: a `TextEdit` that commits a rename through the action layer (`SetInstanceName`) on
+//! blur or Enter, dirtying the scene and persisting on Save (`crate::action`, `crate::loaded`). The
+//! transform fields (Pos / Rot / Scale) stay read-only static text this bite; turning them into
+//! `DragValue`s is the next bite on the same edit seam.
 
 use glam::{EulerRot, Quat};
 
+use wok_scene::InstanceId;
+
+use crate::action::Action;
 use crate::loaded::LoadedScene;
 use crate::model::Model;
 use crate::theme;
@@ -25,6 +29,10 @@ use crate::theme;
 /// readout reads as a steady panel and the boundary line wraps to a known column rather than stretching
 /// the window to its full length.
 const WIDTH: f32 = 232.0;
+
+/// The Name `TextEdit`'s width in points: it fills the IDENTITY grid's right column, leaving the dim
+/// "Name" label its own column and a little slack to the inspector's edge.
+const NAME_FIELD_WIDTH: f32 = 160.0;
 
 /// The inspector's inset from the editor-area edge in points, applied at the top-right corner it anchors
 /// to, so it floats clear of the viewport edge rather than flush against it.
@@ -46,7 +54,13 @@ const BOUNDARY: &str = "Gameplay config binds in code by id or name. The editor 
 /// is selected and still on disk. `editor_rect` is the editor area (the region left after the chrome
 /// panels); the window anchors to its top-right corner and is constrained to it, so it floats over the
 /// viewport well and cannot be dragged out of the editor area.
-pub fn floating(ctx: &egui::Context, model: &Model, loaded_scene: Option<&LoadedScene>, editor_rect: egui::Rect) {
+pub fn floating(
+    ctx: &egui::Context,
+    model: &Model,
+    loaded_scene: Option<&LoadedScene>,
+    editor_rect: egui::Rect,
+    actions: &mut Vec<Action>,
+) {
     let Some(id) = model.shell.selection() else { return };
     let Some(loaded) = loaded_scene else { return };
     let Some(placement) = loaded.placement(id) else { return };
@@ -65,7 +79,11 @@ pub fn floating(ctx: &egui::Context, model: &Model, loaded_scene: Option<&Loaded
             // id (mono, as a 0x handle - the same id gameplay binds against).
             section(ui, "IDENTITY");
             egui::Grid::new("inspector_identity").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                field(ui, "Name", placement.name.as_deref().unwrap_or(""));
+                // Name is editable: the dim label in the left column, a TextEdit in the right that
+                // commits a rename on blur or Enter. Prefab and Id stay read-only.
+                ui.label(egui::RichText::new("Name").color(p.text_dim));
+                name_edit(ui, id, placement.name.as_deref().unwrap_or(""), actions);
+                ui.end_row();
                 field(ui, "Prefab", placement.prefab.as_str());
                 ui.label(egui::RichText::new("Id").color(p.text_dim));
                 ui.label(egui::RichText::new(format!("{:#010x}", id.0)).monospace().color(p.text));
@@ -103,6 +121,25 @@ fn field(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.label(egui::RichText::new(label).color(p.text_dim));
     ui.label(egui::RichText::new(value).color(p.text));
     ui.end_row();
+}
+
+/// The editable Name field: a singleline `TextEdit` in the IDENTITY grid's right column that commits a
+/// rename on blur or Enter ([`Action::SetInstanceName`]). The in-progress text is held in egui temp
+/// memory keyed by the instance id, so typing is not reset to the stored name each frame and switching
+/// selection never carries a stale buffer over; on commit the action is emitted and the scratch cleared,
+/// so the next frame reseeds from the (now updated) placement name. An untouched field commits its
+/// unchanged value, which the handler treats as a no-op, so focusing and blurring never dirties.
+fn name_edit(ui: &mut egui::Ui, id: InstanceId, current: &str, actions: &mut Vec<Action>) {
+    let scratch = egui::Id::new(("inspector_name_edit", id.0));
+    let mut text = ui.data_mut(|d| d.get_temp::<String>(scratch)).unwrap_or_else(|| current.to_owned());
+    let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(NAME_FIELD_WIDTH));
+    if response.changed() {
+        ui.data_mut(|d| d.insert_temp(scratch, text.clone()));
+    }
+    if response.lost_focus() {
+        actions.push(Action::SetInstanceName(id, text.clone()));
+        ui.data_mut(|d| d.remove::<String>(scratch));
+    }
 }
 
 /// One transform row in the TRANSFORM grid: the dim row label (Pos / Rot / Scale), then three

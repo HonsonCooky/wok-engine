@@ -148,9 +148,10 @@ fn disabled_item(ui: &mut egui::Ui, label: &str) {
 /// The bottom status bar, within the view column only (the composition root shows the navigation
 /// panel first, so this bottom panel spans only the width right of it, never under the nav). The left
 /// shows the open project's name - the in-window confirmation that Open took effect, which the title
-/// bar carries too - or that none is open. The right is a snap-setting placeholder; the richer
-/// readouts (counts, framerate, save state, integrity) join as their features land.
-pub fn status_bar(ctx: &egui::Context, project: Option<&Project>) {
+/// bar carries too - or that none is open. The right holds the snap setting and, when the open scene
+/// has unsaved edits (`dirty`), the save dot - the Save click target. The richer readouts (counts,
+/// framerate, integrity) join as their features land.
+pub fn status_bar(ctx: &egui::Context, project: Option<&Project>, dirty: bool, actions: &mut Vec<Action>) {
     egui::TopBottomPanel::bottom("wok_status_bar").exact_height(STATUS_BAR_HEIGHT).show(ctx, |ui| {
         let dim = theme::palette(ui.ctx()).text_dim;
         ui.horizontal_centered(|ui| {
@@ -159,8 +160,31 @@ pub fn status_bar(ctx: &egui::Context, project: Option<&Project>) {
                 None => ui.label(egui::RichText::new("No project open").color(dim)),
             };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The save dot sits at the right edge, shown only when there are unsaved edits; the snap
+                // setting to its left. In a right-to-left layout the first item added is the rightmost.
+                if dirty {
+                    save_dot(ui, actions);
+                }
                 ui.label(egui::RichText::new("snap 1 m / 5 deg").color(dim));
             });
         });
     });
+}
+
+/// The status bar's save dot: a small filled accent circle, shown only when the open scene has unsaved
+/// edits, and the Save click target (1-scene-view.md). Clicking it emits [`Action::Save`] - the same
+/// action Ctrl+S does - so the dot both reports the unsaved state and offers a pointer way to clear it.
+/// It brightens on hover to read as clickable.
+fn save_dot(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+    const DIAMETER: f32 = 8.0;
+    let p = theme::palette(ui.ctx());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(DIAMETER, STATUS_BAR_HEIGHT), egui::Sense::click());
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Unsaved changes - click to save");
+    let color = if response.hovered() { p.text_bright } else { p.accent };
+    ui.painter().circle_filled(rect.center(), DIAMETER / 2.0, color);
+    if response.clicked() {
+        actions.push(Action::Save);
+    }
 }
