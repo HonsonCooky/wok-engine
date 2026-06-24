@@ -179,7 +179,14 @@ impl App for Editor {
         let over_viewport = pointer.is_some_and(|p| editor_rect.contains(p));
         let over_foreground =
             pointer.and_then(|p| gui.ctx.layer_id_at(p)).is_some_and(|layer| layer.order != egui::Order::Background);
-        let pointer_free = over_viewport && !over_foreground && !gui.ctx.is_using_pointer();
+        // The well rect under no foreground layer - the cursor-lock engage gate. It omits is_using_pointer
+        // on purpose: on a drag's press frame egui marks the well's own deselect click-sense as the
+        // potential click, so is_using_pointer (and pointer_free) is true exactly then, and gating the lock
+        // on it would miss the press (the cursor would not hide until the click cleared a few pixels in). A
+        // press lands over the well only for a genuine viewport drag, never a panel-resize drag (which
+        // presses on the panel edge), so this is the right engage signal.
+        let over_well = over_viewport && !over_foreground;
+        let pointer_free = over_well && !gui.ctx.is_using_pointer();
 
         // Drain the buffer through the single writer: click -> Action -> handle, and the next frame
         // re-renders the new state. The handler returns the effects it cannot perform itself: persisting
@@ -213,11 +220,13 @@ impl App for Editor {
                 self.camera = scene.spawn_camera();
             }
         }
-        // Hide and lock the cursor while a look/pan drag started in the viewport is held, restoring it
-        // on release (`input::update_cursor_grab`). While a lock is active the camera stays driven even
-        // if the captured cursor would nominally leave the well, so a confined cursor (the Windows
-        // fallback) drifting over a panel does not cut the drag.
-        let lock_active = input::update_cursor_grab(&mut self.cursor_grab, &ctx.platform.window, &ctx.input, pointer_free);
+        // Hide and lock the cursor while a look/pan drag pressed over the viewport is held, restoring it
+        // on release (`input::update_cursor_grab`). Engage gates on `over_well` (the press frame, where
+        // is_using_pointer is set by the well's own click-sense, so pointer_free would miss it). While a
+        // lock is active the camera stays driven even if the captured cursor would nominally leave the
+        // well, so a confined cursor (the Windows fallback) drifting over a panel does not cut the drag -
+        // and it drives from frame one, covering pointer_free's press-frame dead spot.
+        let lock_active = input::update_cursor_grab(&mut self.cursor_grab, &ctx.platform.window, &ctx.input, over_well);
         self.camera = camera::update(&self.camera, &input::camera_input(&ctx.input, pointer_free || lock_active));
         render::draw(ctx.platform, gpu, self.render_scene.as_ref(), self.camera, editor_rect, editor_bg, gui, output);
 

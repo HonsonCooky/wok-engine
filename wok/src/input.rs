@@ -70,7 +70,7 @@ pub fn camera_input(input: &InputState, pointer_free: bool) -> CameraInput {
 /// button), which is why scroll never engages a lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DragInput {
-    /// A look or pan button went down this frame - the one edge that can engage a lock.
+    /// A look or pan button went down this frame - the edge that engages a lock.
     Started,
     /// A look or pan button is held, but not freshly pressed - a drag in progress.
     Held,
@@ -79,45 +79,57 @@ enum DragInput {
 }
 
 /// What the cursor lock should do this frame. A pure decision over the drag state, so the rule -
-/// engage only on a look/pan drag that *started* over the viewport, release the moment no drag button
-/// is held - is testable without a window.
+/// engage on a look/pan press over the viewport, release the moment no drag button is held - is
+/// testable without a window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GrabAction {
-    /// A camera drag just began over the viewport: hide and lock the cursor, anchoring it here.
+    /// A camera drag began over the viewport: hide and lock the cursor, anchoring it here.
     Engage,
     /// The drag ended: ungrab, restore the cursor to the anchor, and show it.
     Release,
-    /// Nothing to change this frame (no drag, or a lock simply held).
+    /// A lock is held this frame: re-assert it (hide + pin) against egui's per-frame cursor handling
+    /// and the confined cursor's drift. Also the do-nothing case when no drag and no lock.
     Hold,
 }
 
-/// Decide the lock transition from the drag state. Engage only when no lock is held yet, a look/pan
-/// button went down this frame, and that press landed over the viewport (`pointer_free`) - so a drag
-/// begun on the chrome never grabs, and a wheel-only scroll never engages. Release as soon as no
-/// look/pan button is held (even if the captured cursor has wandered off the well). The lock is keyed
-/// on a button press, not on hover, so it brackets exactly one drag.
-fn grab_transition(locked: bool, drag: DragInput, pointer_free: bool) -> GrabAction {
+/// Decide the lock transition. Engage when a look/pan button goes down this frame over the viewport
+/// (`over_well`: the pointer is in the well rect and under no foreground layer) and no lock is held.
+///
+/// `over_well` deliberately omits the camera gate's `is_using_pointer` term: on the very press frame
+/// egui marks its background click-sense (the well's deselect interaction) as the potential click, so
+/// `is_using_pointer` - and thus the full `pointer_free` - is true exactly when the drag begins, and
+/// gating engage on it would miss the lock until the press cleared a few pixels later (the bug behind
+/// "the cursor still moves"). Keying on a press *over the well* instead engages on frame one and still
+/// excludes a panel-resize drag straying onto the viewport: that drag's press landed on the panel
+/// edge, not the well, so it never produces a press edge here. A wheel-only scroll is `Idle`. Release
+/// as soon as no look/pan button is held (even if the captured cursor has wandered off the well - the
+/// button being up ends the lock, not the rect).
+fn grab_transition(locked: bool, drag: DragInput, over_well: bool) -> GrabAction {
     match drag {
-        DragInput::Started if !locked && pointer_free => GrabAction::Engage,
+        DragInput::Started if !locked && over_well => GrabAction::Engage,
         DragInput::Idle if locked => GrabAction::Release,
         _ => GrabAction::Hold,
     }
 }
 
 /// Hide and lock the cursor for the duration of a camera drag (right-button look or middle-button
-/// pan) that began in the viewport, restoring it on release where the drag started so it never jumps.
-/// `grab` carries the press-position anchor while a lock is active (the caller keeps it across
-/// frames). Returns whether a lock is active, so the caller keeps driving the camera even while the
-/// captured cursor would nominally fall outside the well rect (a confined cursor can drift over a
-/// panel; once a drag is held the lock, not the rect, gates the camera).
+/// pan) that began over the viewport, restoring it on release where the drag started so it never
+/// jumps. `over_well` is whether the pointer is in the well rect under no foreground layer (the engage
+/// gate; see [`grab_transition`]). `grab` carries the press-position anchor while a lock is active
+/// (the caller keeps it across frames). Returns whether a lock is active, so the caller keeps driving
+/// the camera from frame one even while the captured cursor would nominally fall outside the well (a
+/// confined cursor can drift over a panel; once a drag is held the lock, not the rect, gates the
+/// camera).
 ///
 /// The look and pan read raw `DeviceEvent::MouseMotion` (`InputState::mouse_motion`), which survives
-/// cursor capture, so the lock changes nothing about the input: the cursor is frozen ([`Locked`]) or,
-/// where Locked is unsupported (Windows), confined ([`Confined`]) and hidden, while raw motion keeps
-/// driving the camera. That is why no per-frame warp is needed - raw motion is independent of the
-/// cursor's position, and a synthetic warp never produces `MouseMotion`, so there is nothing to feed
-/// back and nothing to discard. A single warp to the anchor on release undoes the confined cursor's
-/// drift so it is restored exactly where the drag began.
+/// cursor capture, so the lock changes nothing about the *input*: it is purely cosmetic, keeping the
+/// cursor out of the way. [`Locked`] freezes the cursor where supported; where it is not (Windows
+/// commonly gives only [`Confined`], which still lets the cursor move inside the window) the lock
+/// re-warps the cursor to the anchor every frame to pin it in place. Warping is safe precisely because
+/// the look reads raw motion: a synthetic warp produces a `CursorMoved`, never a `MouseMotion`, so it
+/// never feeds the look and there is nothing to discard - the warp pins the cursor without touching
+/// the camera. The hide is re-asserted each frame too, so egui's own per-frame cursor handling cannot
+/// quietly show it again mid-drag.
 ///
 /// [`Locked`]: CursorGrabMode::Locked
 /// [`Confined`]: CursorGrabMode::Confined
@@ -125,7 +137,7 @@ pub fn update_cursor_grab(
     grab: &mut Option<PhysicalPosition<f64>>,
     window: &Window,
     input: &InputState,
-    pointer_free: bool,
+    over_well: bool,
 ) -> bool {
     let drag = if input.mouse_pressed(MouseButton::Right) || input.mouse_pressed(MouseButton::Middle) {
         DragInput::Started
@@ -134,27 +146,36 @@ pub fn update_cursor_grab(
     } else {
         DragInput::Idle
     };
-    match grab_transition(grab.is_some(), drag, pointer_free) {
+    match grab_transition(grab.is_some(), drag, over_well) {
         GrabAction::Engage => {
             // Anchor at the press position, hide, and grab. Locked freezes the cursor where supported;
             // Confined is the Windows fallback. Best-effort - a refused grab leaves the cursor merely
             // hidden, and raw motion still drives the camera.
+            let anchor = PhysicalPosition::new(input.mouse_pos.0, input.mouse_pos.1);
             window.set_cursor_visible(false);
             let _ = window
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
-            *grab = Some(PhysicalPosition::new(input.mouse_pos.0, input.mouse_pos.1));
+            *grab = Some(anchor);
+        }
+        GrabAction::Hold => {
+            // While a lock is held, re-assert the hide (egui re-applies the cursor icon on change) and
+            // pin the cursor to the anchor: a no-op under a true Lock, but under Confined it undoes the
+            // frame's drift so the cursor stays put. Inert when no lock is held.
+            if let Some(anchor) = *grab {
+                window.set_cursor_visible(false);
+                let _ = window.set_cursor_position(anchor);
+            }
         }
         GrabAction::Release => {
             if let Some(anchor) = grab.take() {
                 // Ungrab first so the warp is not blocked by an active lock, then restore the cursor to
-                // the anchor (a no-op under a true Lock; it undoes the drift under Confined) and show it.
+                // the anchor and show it.
                 let _ = window.set_cursor_grab(CursorGrabMode::None);
                 let _ = window.set_cursor_position(anchor);
                 window.set_cursor_visible(true);
             }
         }
-        GrabAction::Hold => {}
     }
     grab.is_some()
 }
@@ -229,14 +250,17 @@ mod tests {
 
     #[test]
     fn a_drag_press_over_the_viewport_engages_the_lock() {
-        // Not yet locked, a button went down this frame, over the viewport -> grab.
+        // Not yet locked, a button went down this frame, over the well -> grab. `over_well` omits
+        // is_using_pointer, so this fires on the press frame even though egui marks its own background
+        // click-sense as the potential click there.
         assert_eq!(grab_transition(false, DragInput::Started, true), GrabAction::Engage);
     }
 
     #[test]
-    fn a_drag_press_over_the_chrome_does_not_engage() {
-        // The same press but not pointer_free (it landed on a panel or a menu): no grab, so a drag
-        // begun on the chrome never captures the cursor.
+    fn a_drag_press_off_the_viewport_does_not_engage() {
+        // The press did not land over the well (on a panel, a menu, or under a foreground layer): no
+        // grab. A panel-resize drag that later strays onto the viewport pressed on the panel edge, so
+        // it never produces a press edge over the well and never captures the cursor.
         assert_eq!(grab_transition(false, DragInput::Started, false), GrabAction::Hold);
     }
 
@@ -245,22 +269,24 @@ mod tests {
         // A lock is held and no drag button remains down -> restore the cursor.
         assert_eq!(grab_transition(true, DragInput::Idle, true), GrabAction::Release);
         // Still released even if the pointer has wandered off the viewport (a confined cursor over a
-        // panel): the button being up is what ends the lock.
+        // panel): the button being up is what ends the lock, not the rect.
         assert_eq!(grab_transition(true, DragInput::Idle, false), GrabAction::Release);
     }
 
     #[test]
-    fn a_held_drag_keeps_the_lock_without_re_engaging() {
-        // Mid-drag: still locked, a button held but not freshly pressed -> hold (no repeated grab).
+    fn a_held_drag_holds_the_lock_without_re_engaging() {
+        // Mid-drag: still locked, a button held but not freshly pressed -> Hold (re-assert, never a
+        // second Engage), whether or not the captured cursor still reads as over the viewport.
         assert_eq!(grab_transition(true, DragInput::Held, true), GrabAction::Hold);
-        // And a second button pressed mid-drag must not re-engage over the existing lock.
+        assert_eq!(grab_transition(true, DragInput::Held, false), GrabAction::Hold);
+        // A second button pressed mid-drag must not re-engage over the existing lock.
         assert_eq!(grab_transition(true, DragInput::Started, true), GrabAction::Hold);
     }
 
     #[test]
     fn a_wheel_only_scroll_never_engages_a_lock() {
         // Scroll-dolly is a wheel event with no button down, so the drag input is Idle even over the
-        // viewport: no lock engages for a scroll.
+        // viewport: no lock engages for a scroll, and with no lock there is nothing to release.
         assert_eq!(grab_transition(false, DragInput::Idle, true), GrabAction::Hold);
     }
 }
