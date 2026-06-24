@@ -23,14 +23,18 @@
 
 use std::path::PathBuf;
 
-use wok_scene::InstanceId;
+use wok_scene::{InstanceId, Transform};
 
 use crate::loaded::LoadedScene;
 use crate::model::{InstanceSort, Model, NavSide, NavView, Tab};
 use crate::project::Project;
 
 /// A menu choice, keybind, or chrome interaction, emitted by the view and applied by [`handle`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` only, not `Eq`: [`SetInstanceTransform`](Action::SetInstanceTransform) carries a
+/// [`Transform`] of floats, which are not `Eq`. Nothing keys actions in a set or map, so `PartialEq`
+/// is all the vocabulary needs.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     // ---- navigation panel ----
     /// Switch the navigation panel to show this view. Emitted by the bottom icon bar.
@@ -70,6 +74,14 @@ pub enum Action {
     /// `{prefab} #{id}` fallback; handle maps it to `None`. A stale id or an unchanged value is a clean
     /// no-op (no dirty).
     SetInstanceName(InstanceId, String),
+    /// Set the whole transform (position, rotation, scale) of the placement with this instance id,
+    /// editing it in the loaded scene. Emitted by the inspector's Pos / Rot / Scale `DragValue`s on
+    /// change - the precise authoring path, exact values with no grid snap (the 1m / 5deg gizmo snap is
+    /// a later viewport bite). The whole transform travels each time (the field that changed already
+    /// folded into it), so one variant covers all three rows; per-component actions are a later
+    /// refinement if that proves too coarse. A stale id or a transform equal to the one stored is a
+    /// clean no-op (no dirty), the same as a rename.
+    SetInstanceTransform(InstanceId, Transform),
     /// Save the open scene to disk (Ctrl+S, or the status-bar save dot). The handler flags the write
     /// on [`Handled`] only when a scene is loaded and dirty; the frame loop calls
     /// [`LoadedScene::save`], which writes the chunks and clears the dirty flag on success.
@@ -152,6 +164,15 @@ pub fn handle(model: &mut Model, loaded: Option<&mut LoadedScene>, action: Actio
             let name = if name.is_empty() { None } else { Some(name) };
             if let Some(scene) = loaded {
                 scene.rename(id, name);
+            }
+            Handled::default()
+        }
+        Action::SetInstanceTransform(id, transform) => {
+            // The inspector's Pos / Rot / Scale fields commit here. Like a rename, it is a no-op (no
+            // dirty) when the id is stale or the transform equals the one already stored, and with no
+            // scene loaded it does nothing.
+            if let Some(scene) = loaded {
+                scene.set_transform(id, transform);
             }
             Handled::default()
         }
@@ -488,5 +509,44 @@ mod tests {
         let mut model = Model::default();
         let handled = handle(&mut model, None, Action::Save);
         assert!(!handled.save, "no scene -> nothing to save");
+    }
+
+    #[test]
+    fn set_instance_transform_routes_to_the_loaded_scene_and_dirties_it() {
+        let root = editing_temp_root();
+        let _ = std::fs::remove_dir_all(&root);
+        let mut loaded = seed_named_scene(&root);
+        let mut model = Model::default();
+
+        let moved = Transform { translation: glam::Vec3::new(1.0, 2.0, 3.0), ..Transform::IDENTITY };
+        let handled = handle(&mut model, Some(&mut loaded), Action::SetInstanceTransform(InstanceId(1), moved));
+        assert_eq!(handled, Handled::default(), "a transform edit needs no frame-loop effect of its own");
+        assert_eq!(loaded.placement(InstanceId(1)).unwrap().transform, moved);
+        assert!(loaded.dirty(), "the edit dirtied the scene");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn set_instance_transform_of_a_stale_id_is_a_clean_no_op() {
+        let root = editing_temp_root();
+        let _ = std::fs::remove_dir_all(&root);
+        let mut loaded = seed_named_scene(&root);
+        let mut model = Model::default();
+
+        // id 99 is not in the seeded scene, so the edit finds nothing and must not dirty.
+        let moved = Transform { translation: glam::Vec3::new(5.0, 0.0, 0.0), ..Transform::IDENTITY };
+        handle(&mut model, Some(&mut loaded), Action::SetInstanceTransform(InstanceId(99), moved));
+        assert!(!loaded.dirty(), "a stale-id transform edit leaves the scene clean");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn set_instance_transform_with_no_loaded_scene_is_a_safe_no_op() {
+        // Reachable if a transform action ever outlives its scene; it must route to nothing, not panic.
+        let mut model = Model::default();
+        let handled = handle(&mut model, None, Action::SetInstanceTransform(InstanceId(1), Transform::IDENTITY));
+        assert_eq!(handled, Handled::default());
     }
 }

@@ -11,14 +11,16 @@
 //! per-placement, so they belong to the prefab editor, not here. It closes with the boundary line that
 //! states why there is no general property bag.
 //!
-//! Name is editable: a `TextEdit` that commits a rename through the action layer (`SetInstanceName`) on
-//! blur or Enter, dirtying the scene and persisting on Save (`crate::action`, `crate::loaded`). The
-//! transform fields (Pos / Rot / Scale) stay read-only static text this bite; turning them into
-//! `DragValue`s is the next bite on the same edit seam.
+//! Both identity and transform are editable through the same single-writer edit seam (`crate::action`,
+//! `crate::loaded`): an edit dirties the scene and persists on Save. Name is a `TextEdit` committing a
+//! rename (`SetInstanceName`) on blur or Enter. Pos / Rot / Scale are `DragValue`s emitting
+//! `SetInstanceTransform` on change - the precise authoring path: exact typed or dragged values with no
+//! grid snap (the 1m / 5deg snapping is the future viewport-gizmo bite). Rotation edits through a held
+//! Euler scratch so adjusting one axis never scrambles the other two (see `rot_row`).
 
-use glam::{EulerRot, Quat};
+use glam::{EulerRot, Quat, Vec3};
 
-use wok_scene::InstanceId;
+use wok_scene::{InstanceId, Transform};
 
 use crate::action::Action;
 use crate::loaded::LoadedScene;
@@ -43,6 +45,23 @@ const MARGIN: f32 = 12.0;
 const AXIS_X: egui::Color32 = egui::Color32::from_rgb(0xd8, 0x53, 0x4a);
 const AXIS_Y: egui::Color32 = egui::Color32::from_rgb(0x5b, 0xbd, 0x5b);
 const AXIS_Z: egui::Color32 = egui::Color32::from_rgb(0x4a, 0x86, 0xd8);
+
+/// `DragValue` drag sensitivity for the linear transform fields (Pos and Scale), in units per point of
+/// pointer travel. Fine on purpose: the inspector is the precise path, so a drag nudges by hundredths
+/// and a typed value is the way to jump far. No grid snap here (the 1m / 5deg snapping is the future
+/// viewport-gizmo bite).
+const LINEAR_DRAG_SPEED: f64 = 0.01;
+
+/// `DragValue` drag sensitivity for the rotation fields, in degrees per point of pointer travel. A
+/// touch coarser than the linear fields so a drag sweeps a usable angle, still fine enough to settle on
+/// a precise value; typed entry covers the rest.
+const ANGULAR_DRAG_SPEED: f64 = 0.25;
+
+/// The most decimal places any transform `DragValue` shows. Caps the float noise the Euler
+/// decomposition leaves in the rotation fields (and a signed zero) so they read as a clean `0`, while
+/// still showing typed precision to three places. Display only - the bound value keeps full `f32`
+/// precision, so this never snaps the stored transform.
+const MAX_DECIMALS: usize = 3;
 
 /// The boundary line that closes the inspector, **verbatim** (editor-design.md / handoff view 1): the
 /// editor authors space, physical properties, and identity only - never a gameplay property bag - so
@@ -90,14 +109,16 @@ pub fn floating(
                 ui.end_row();
             });
 
-            // TRANSFORM: position, rotation (YXZ Euler degrees), and scale, each as an X/Y/Z triplet
-            // with the axis-tinted letters.
+            // TRANSFORM: position, rotation (YXZ Euler degrees), and scale, each as an X/Y/Z triplet of
+            // editable DragValues with the axis-tinted letters. An edit folds the changed field into the
+            // whole transform and emits SetInstanceTransform, routed through the same edit seam the Name
+            // field uses.
             section(ui, "TRANSFORM");
-            let t = &placement.transform;
+            let t = placement.transform;
             egui::Grid::new("inspector_transform").num_columns(7).spacing([6.0, 4.0]).show(ui, |ui| {
-                axis_row(ui, "Pos", [t.translation.x, t.translation.y, t.translation.z]);
-                axis_row(ui, "Rot", euler_xyz_degrees(t.rotation));
-                axis_row(ui, "Scale", [t.scale.x, t.scale.y, t.scale.z]);
+                vec3_row(ui, "Pos", id, t.translation, |v| Transform { translation: v, ..t }, actions);
+                rot_row(ui, id, t, actions);
+                vec3_row(ui, "Scale", id, t.scale, |v| Transform { scale: v, ..t }, actions);
             });
 
             ui.add_space(8.0);
@@ -142,14 +163,75 @@ fn name_edit(ui: &mut egui::Ui, id: InstanceId, current: &str, actions: &mut Vec
     }
 }
 
-/// One transform row in the TRANSFORM grid: the dim row label (Pos / Rot / Scale), then three
-/// axis-tinted letter + value pairs across the grid's aligned columns. Ends the grid row.
-fn axis_row(ui: &mut egui::Ui, label: &str, values: [f32; 3]) {
+/// One linear transform row (Pos or Scale) in the TRANSFORM grid: the dim row label, then three
+/// axis-tinted letter + `DragValue` pairs over the components of `value`. On any field's change it folds
+/// the edited vector back into the whole transform through `rebuild` and emits a single
+/// [`Action::SetInstanceTransform`]; an untouched row emits nothing. The values bind to the stored
+/// component each frame (no scratch needed - a linear component has one display), so a live drag tracks
+/// the placement as the frame loop applies it. Ends the grid row.
+fn vec3_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    id: InstanceId,
+    value: Vec3,
+    rebuild: impl Fn(Vec3) -> Transform,
+    actions: &mut Vec<Action>,
+) {
     let p = theme::palette(ui.ctx());
     ui.label(egui::RichText::new(label).color(p.text_dim));
+    let mut v = value;
+    let mut changed = false;
     for (i, (letter, color)) in [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AXIS_Z)].iter().enumerate() {
         ui.label(egui::RichText::new(*letter).strong().color(*color));
-        ui.label(egui::RichText::new(fmt(values[i])).color(p.text));
+        let dv = egui::DragValue::new(&mut v[i]).speed(LINEAR_DRAG_SPEED).max_decimals(MAX_DECIMALS);
+        changed |= ui.add(dv).changed();
+    }
+    if changed {
+        actions.push(Action::SetInstanceTransform(id, rebuild(v)));
+    }
+    ui.end_row();
+}
+
+/// The rotation row in the TRANSFORM grid: the same axis-tinted X/Y/Z triplet, but editing a quaternion
+/// through Euler degrees. The display is `Quat -> YXZ Euler degrees` ([`euler_xyz_degrees`]); an edit
+/// goes back `Euler -> Quat` ([`quat_from_euler_xyz_degrees`]). A quaternion has many Euler
+/// decompositions, and recomposing then re-decomposing only agrees within the principal range, so to
+/// stop an edit from scrambling the untouched axes the three degree values live in an egui-temp scratch
+/// keyed by the instance id - like the Name field. While a Rot field is being edited the scratch is both
+/// the display and the edit source: each change updates it and emits [`Action::SetInstanceTransform`]
+/// with the scratch recomposed to a quaternion. When no Rot field is active the scratch is dropped, so
+/// the next frame the display reverts to the canonical decomposition of the stored quaternion (on blur,
+/// the values read clean). Ends the grid row.
+fn rot_row(ui: &mut egui::Ui, id: InstanceId, t: Transform, actions: &mut Vec<Action>) {
+    let p = theme::palette(ui.ctx());
+    let scratch = egui::Id::new(("inspector_rot_edit", id.0));
+    // Display/edit source: the scratch while mid-edit, else the stored quaternion decomposed. The
+    // canonical decomposition is tidied (its sub-milli noise and signed zeros read as a clean 0.0); the
+    // scratch is left raw, so a tidy never touches a value the user is dragging or typing.
+    let mut deg = ui
+        .data_mut(|d| d.get_temp::<[f32; 3]>(scratch))
+        .unwrap_or_else(|| euler_xyz_degrees(t.rotation).map(tidy_zero));
+
+    ui.label(egui::RichText::new("Rot").color(p.text_dim));
+    let mut changed = false;
+    let mut active = false;
+    for (i, (letter, color)) in [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AXIS_Z)].iter().enumerate() {
+        ui.label(egui::RichText::new(*letter).strong().color(*color));
+        let dv = egui::DragValue::new(&mut deg[i]).speed(ANGULAR_DRAG_SPEED).max_decimals(MAX_DECIMALS);
+        let response = ui.add(dv);
+        changed |= response.changed();
+        active |= response.has_focus() || response.dragged();
+    }
+    if changed {
+        // Hold the edited degrees so next frame's display does not re-derive (and possibly scramble)
+        // them, and emit the recomposed rotation folded into the whole transform.
+        ui.data_mut(|d| d.insert_temp(scratch, deg));
+        let rotation = quat_from_euler_xyz_degrees(deg);
+        actions.push(Action::SetInstanceTransform(id, Transform { rotation, ..t }));
+    } else if !active {
+        // No Rot field is being edited: drop the scratch so the display reverts to the canonical
+        // decomposition of the stored quaternion next frame.
+        ui.data_mut(|d| d.remove::<[f32; 3]>(scratch));
     }
     ui.end_row();
 }
@@ -163,12 +245,21 @@ fn euler_xyz_degrees(rotation: Quat) -> [f32; 3] {
     [pitch.to_degrees(), yaw.to_degrees(), roll.to_degrees()]
 }
 
-/// Format a transform component for display: two decimals, with sub-milli magnitudes snapped to `0.00`
-/// so float noise from the Euler decomposition and a signed zero both read as a clean `0.00` rather than
-/// `-0.00` or `0.0001`.
-fn fmt(v: f32) -> String {
-    let v = if v.abs() < 1e-3 { 0.0 } else { v };
-    format!("{v:.2}")
+/// The inverse of [`euler_xyz_degrees`]: rebuild a quaternion from `[X, Y, Z]` Euler degrees in the
+/// editor's `YXZ` order. The display order is `[pitch, yaw, roll]` (rotation about X, Y, Z), so this
+/// feeds them back as `from_euler(YXZ, yaw, pitch, roll)` in radians - exactly undoing the
+/// `to_euler(YXZ)` the display does. Pure, so the round trip is unit-tested directly.
+fn quat_from_euler_xyz_degrees(xyz: [f32; 3]) -> Quat {
+    Quat::from_euler(EulerRot::YXZ, xyz[1].to_radians(), xyz[0].to_radians(), xyz[2].to_radians())
+}
+
+/// Tidy a rotation degree for display: a magnitude below a thousandth (the float noise a `Quat -> Euler`
+/// decomposition leaves, and a signed zero) reads as a clean positive `0.0`. Applied only to the
+/// canonical decomposition that seeds the Rot fields, never to a value mid-edit, so it cleans the
+/// readout without ever snapping what the user is dragging or typing. (The linear Pos / Scale fields
+/// store their values cleanly and need no such tidy.)
+fn tidy_zero(v: f32) -> f32 {
+    if v.abs() < 1e-3 { 0.0 } else { v }
 }
 
 #[cfg(test)]
@@ -196,10 +287,37 @@ mod tests {
     }
 
     #[test]
-    fn fmt_snaps_signed_zero_and_noise_to_clean_zero() {
-        assert_eq!(fmt(-0.0), "0.00");
-        assert_eq!(fmt(0.0001), "0.00");
-        assert_eq!(fmt(12.0), "12.00");
-        assert_eq!(fmt(-3.0), "-3.00");
+    fn quat_from_euler_degrees_inverts_the_display_decomposition() {
+        // The Rot field edits by recomposing the held degrees into a quaternion; that must be the exact
+        // inverse of the Quat -> Euler display, or even a no-op edit would drift the rotation. Holds for
+        // each single axis and a combined rotation, all within the principal YXZ range (pitch in
+        // (-90, 90)).
+        for e in [[0.0, 0.0, 0.0], [30.0, 0.0, 0.0], [0.0, 45.0, 0.0], [0.0, 0.0, 60.0], [10.0, 20.0, 30.0]] {
+            approx(euler_xyz_degrees(quat_from_euler_xyz_degrees(e)), e);
+        }
+    }
+
+    #[test]
+    fn editing_one_euler_axis_leaves_the_others_intact() {
+        // Why the Rot fields edit through a held [X, Y, Z] scratch rather than the stored quaternion:
+        // changing one axis, recomposing to a quaternion, then re-decomposing returns the other two axes
+        // unscrambled. Each axis in turn is set to a fresh value over a non-trivial starting rotation;
+        // the round trip pins exactly the edited triple, so the scratch keeps an edit local to its axis.
+        let start = [10.0, 20.0, 30.0];
+        for axis in 0..3 {
+            let mut edited = start;
+            edited[axis] = 55.0;
+            approx(euler_xyz_degrees(quat_from_euler_xyz_degrees(edited)), edited);
+        }
+    }
+
+    #[test]
+    fn tidy_zero_reads_noise_and_signed_zero_as_clean_zero() {
+        // The Rot seed runs through this so the decomposition's float noise and a signed zero read as a
+        // clean positive 0.0, while real angles pass through. Bit-compared on the zeros so the
+        // positive-zero is exact (a plain `== 0.0` would also accept `-0.0`).
+        assert_eq!(tidy_zero(-0.0).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(tidy_zero(0.0004).to_bits(), 0.0_f32.to_bits());
+        approx([tidy_zero(45.0), tidy_zero(-3.0), tidy_zero(0.0)], [45.0, -3.0, 0.0]);
     }
 }

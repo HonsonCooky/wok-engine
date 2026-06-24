@@ -15,10 +15,11 @@
 //! recomputed per call because the view reads it every frame while edits are rare. A [`dirty`] flag
 //! tracks unsaved edits.
 //!
-//! Editing goes through the mutators here (today [`rename`](LoadedScene::rename)), called by the single
-//! writer `crate::action::handle`. The mutators are in-memory and filesystem-free; the disk write is
-//! [`save`](LoadedScene::save), driven by the frame loop (Ctrl+S, via `Handled`) and by [`reconcile`]
-//! (auto-save on a tab switch). Selection, the 3D viewport, and transform editing are later bites.
+//! Editing goes through the mutators here ([`rename`](LoadedScene::rename) and
+//! [`set_transform`](LoadedScene::set_transform)), called by the single writer `crate::action::handle`.
+//! The mutators are in-memory and filesystem-free; the disk write is [`save`](LoadedScene::save),
+//! driven by the frame loop (Ctrl+S, via `Handled`) and by [`reconcile`] (auto-save on a tab switch).
+//! The 3D viewport and its picking are later bites.
 //!
 //! [`dirty`]: LoadedScene::dirty
 //!
@@ -33,7 +34,7 @@
 
 use std::path::{Path, PathBuf};
 
-use wok_scene::{Chunk, ContentLayout, InstanceId, LoadError, Placement, SaveError};
+use wok_scene::{Chunk, ContentLayout, InstanceId, LoadError, Placement, SaveError, Transform};
 
 use crate::model::{Model, Tab};
 
@@ -131,6 +132,25 @@ impl LoadedScene {
             return false;
         }
         placement.name = name;
+        self.dirty = true;
+        self.reindex();
+        true
+    }
+
+    /// Set the transform (position, rotation, scale) of the placement with `id`, marking the scene
+    /// dirty and rebuilding the flat list. Returns whether anything changed: a stale id (no matching
+    /// placement) or a set to the transform already held is a no-op that leaves the scene clean, so
+    /// re-committing an unchanged transform never spuriously dirties it. The flat list caches a clone
+    /// of each placement, so the reindex is what carries the new transform into the read model the
+    /// inspector reads back. In-memory only - the disk write is [`save`](Self::save). Mirrors
+    /// [`rename`](Self::rename); the inspector's Pos / Rot / Scale fields drive it through the action
+    /// layer.
+    pub fn set_transform(&mut self, id: InstanceId, transform: Transform) -> bool {
+        let Some(placement) = self.find_mut(id) else { return false };
+        if placement.transform == transform {
+            return false;
+        }
+        placement.transform = transform;
         self.dirty = true;
         self.reindex();
         true
@@ -392,6 +412,69 @@ mod tests {
         // id 1 already holds this exact name, so re-committing it changes nothing and must not dirty.
         assert!(!loaded.rename(InstanceId(1), Some("the landmark oak".to_owned())), "an identical rename is a no-op");
         assert!(!loaded.dirty(), "an unchanged name leaves the scene clean");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn set_transform_sets_the_transform_dirties_and_rebuilds_the_flat_list() {
+        let root = unique_temp_root();
+        let _ = std::fs::remove_dir_all(&root);
+        seed_scene(&root, "village");
+        let mut loaded = LoadedScene::load(&root, "village");
+
+        let moved = Transform {
+            translation: glam::Vec3::new(4.0, 1.0, -2.0),
+            rotation: glam::Quat::from_rotation_y(30.0_f32.to_radians()),
+            scale: glam::Vec3::splat(2.0),
+        };
+        assert!(loaded.set_transform(InstanceId(0), moved), "setting a present id's transform mutates");
+        assert!(loaded.dirty(), "a transform edit dirties the scene");
+        // The mutation lands on the chunk store and the derived flat list the inspector reads back.
+        assert_eq!(loaded.placement(InstanceId(0)).unwrap().transform, moved);
+        let from_list = loaded.placements().iter().find(|p| p.instance_id == InstanceId(0)).unwrap();
+        assert_eq!(from_list.transform, moved, "the flat list reflects the edit");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn set_transform_of_a_missing_id_or_an_unchanged_value_is_a_clean_no_op() {
+        let root = unique_temp_root();
+        let _ = std::fs::remove_dir_all(&root);
+        seed_scene(&root, "village");
+        let mut loaded = LoadedScene::load(&root, "village");
+
+        assert!(!loaded.set_transform(InstanceId(999), Transform::IDENTITY), "no placement, no edit");
+        assert!(!loaded.dirty(), "a missing-id set leaves the scene clean");
+        // id 0 was seeded at IDENTITY, so re-setting that exact transform changes nothing and must not
+        // dirty (the same no-op rule the inspector leans on for an untouched commit).
+        assert!(!loaded.set_transform(InstanceId(0), Transform::IDENTITY), "an identical transform is a no-op");
+        assert!(!loaded.dirty(), "an unchanged transform leaves the scene clean");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_persists_an_edited_transform_round_trip() {
+        let root = unique_temp_root();
+        let _ = std::fs::remove_dir_all(&root);
+        seed_scene(&root, "village");
+
+        let mut loaded = LoadedScene::load(&root, "village");
+        let moved = Transform {
+            translation: glam::Vec3::new(7.0, 0.0, 3.5),
+            rotation: glam::Quat::from_rotation_y(90.0_f32.to_radians()),
+            scale: glam::Vec3::splat(1.5),
+        };
+        assert!(loaded.set_transform(InstanceId(0), moved));
+        loaded.save().expect("the scene saves to disk");
+        assert!(!loaded.dirty(), "a successful save clears dirty");
+
+        // Reload from disk: the edited transform persisted through the chunk write (Save writes the
+        // whole chunk, transform and all).
+        let reloaded = LoadedScene::load(&root, "village");
+        assert_eq!(reloaded.placement(InstanceId(0)).unwrap().transform, moved, "the edit survived the round trip");
 
         let _ = std::fs::remove_dir_all(&root);
     }
