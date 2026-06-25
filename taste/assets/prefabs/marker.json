@@ -1,0 +1,28 @@
+{
+  "states": [
+    {
+      "name": "default",
+      "shapes": [
+        {
+          "primitive": "Capsule",
+          "transform": {
+            "pos": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "scale": [
+              0.8,
+              2.0,
+              0.8
+            ]
+          },
+          "surface": "metal",
+          "is_hitbox": true,
+          "is_visible": true
+        }
+      ]
+    }
+  ],
+  "default_state": "default"
+}

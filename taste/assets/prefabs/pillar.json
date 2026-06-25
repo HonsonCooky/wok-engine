@@ -1,0 +1,28 @@
+{
+  "states": [
+    {
+      "name": "default",
+      "shapes": [
+        {
+          "primitive": "Cylinder",
+          "transform": {
+            "pos": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "scale": [
+              1.2,
+              5.0,
+              1.2
+            ]
+          },
+          "surface": "stone",
+          "is_hitbox": true,
+          "is_visible": true
+        }
+      ]
+    }
+  ],
+  "default_state": "default"
+}

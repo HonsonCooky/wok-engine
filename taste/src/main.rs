@@ -6,7 +6,8 @@
 //! the same per-step composition the locomotion tests drive headless, now under a renderer (and
 //! still driven headless by `crate::replay`).
 //!
-//! Run with `cargo run -p taste [content-dir]` (default `./content`, the editor's convention).
+//! Run with `cargo run -p taste [content-dir]`. With no argument it plays taste's own `assets/` -
+//! the demo content taste owns in-repo - from anywhere; the wok editor opens `taste/` to author it.
 //! taste never writes content: with no scene on disk it asks you to run the editor first and exits.
 //!
 //! Controls: WASD to move relative to the camera, space to jump, the mouse to orbit the camera
@@ -58,9 +59,10 @@ fn main() {
     }
 }
 
-/// The tracked feel-tuning file, relative to the working directory: the same cwd convention the
-/// content directory follows, so a `cargo run -p taste` from the workspace root finds it. Tracked
-/// in git as the authored feel record.
+/// The tracked feel-tuning file, relative to the working directory, so a `cargo run -p taste` from
+/// the workspace root finds it. Unlike the content root (which resolves to taste's crate directory),
+/// this stays cwd-relative; from the workspace root - the usual launch - both resolve. Tracked in
+/// git as the authored feel record.
 const TUNING_PATH: &str = "taste/tuning.json";
 
 /// Everything before the window opens: parse the CLI, load the editor-authored content, load (or

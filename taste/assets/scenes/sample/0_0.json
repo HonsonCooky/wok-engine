@@ -1,0 +1,90 @@
+{
+  "coord": {
+    "x": 0,
+    "z": 0
+  },
+  "placements": [
+    {
+      "prefab": "crate",
+      "instance_id": 30,
+      "transform": {
+        "pos": [
+          59.76288,
+          -0.6023456,
+          66.05142
+        ],
+        "scale": [
+          3.65,
+          3.65,
+          3.65
+        ]
+      }
+    },
+    {
+      "prefab": "crate",
+      "instance_id": 31,
+      "transform": {
+        "pos": [
+          54.235504,
+          1.0579407,
+          65.43732
+        ],
+        "scale": [
+          3.65,
+          3.65,
+          3.65
+        ]
+      }
+    },
+    {
+      "prefab": "crate",
+      "instance_id": 32,
+      "name": "test",
+      "transform": {
+        "pos": [
+          58.6894,
+          4.529891,
+          61.502983
+        ],
+        "scale": [
+          3.65,
+          3.65,
+          3.65
+        ]
+      }
+    },
+    {
+      "prefab": "crate",
+      "instance_id": 33,
+      "transform": {
+        "pos": [
+          53.65516,
+          7.7901,
+          59.007763
+        ],
+        "scale": [
+          3.65,
+          3.65,
+          3.65
+        ]
+      }
+    },
+    {
+      "prefab": "crate",
+      "instance_id": 34,
+      "transform": {
+        "pos": [
+          56.022133,
+          15.543051,
+          64.10988
+        ],
+        "scale": [
+          3.65,
+          3.65,
+          3.65
+        ]
+      }
+    }
+  ],
+  "streaming": {}
+}

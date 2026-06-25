@@ -1,0 +1,23 @@
+{
+  "states": [
+    {
+      "name": "default",
+      "shapes": [
+        {
+          "primitive": "Cube",
+          "transform": {
+            "pos": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "surface": "wood",
+          "is_hitbox": true,
+          "is_visible": true
+        }
+      ]
+    }
+  ],
+  "default_state": "default"
+}

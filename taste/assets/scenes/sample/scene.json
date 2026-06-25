@@ -1,0 +1,9 @@
+{
+  "name": "sample",
+  "default_lighting": "default",
+  "default_streaming": {
+    "load_radius": 10,
+    "default_eagerness": "Eager"
+  },
+  "next_instance_id": 35
+}

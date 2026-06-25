@@ -1,15 +1,17 @@
 //! Command-line parsing for taste: the same one-argument convention as the wok editor.
 //!
-//! One optional positional argument, the content directory, defaulting to `./content` - so a
-//! `cargo run -p wok` followed by a `cargo run -p taste` in the same working directory plays the
-//! content the editor just authored. Anything that looks like a flag is rejected so a future flag
-//! cannot be silently swallowed as a directory name today. Pure (slice of strings in, path or
-//! message out) so the parse is unit testable without a process.
+//! One optional positional argument, the content directory. With none it defaults to taste's own
+//! crate directory (baked in at compile time): taste owns its demo content under `taste/assets`, so
+//! a bare `cargo run -p taste` plays it regardless of the working directory, and the wok editor
+//! opens `taste/` to author it. Anything that looks like a flag is rejected so a future flag cannot
+//! be silently swallowed as a directory name today. Pure (slice of strings in, path or message out)
+//! so the parse is unit testable without a process.
 
 use std::path::PathBuf;
 
-/// Default content directory, relative to the working directory.
-const DEFAULT_CONTENT_DIR: &str = "content";
+/// Default content root: taste's own crate directory, baked in at compile time so `ContentLayout`
+/// resolves `taste/assets` no matter the working directory. taste owns its demo content in-repo.
+const DEFAULT_CONTENT_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 /// Parse the arguments after the program name into the content-directory path.
 pub fn parse_args(args: &[String]) -> Result<PathBuf, String> {
@@ -30,8 +32,10 @@ mod tests {
     }
 
     #[test]
-    fn no_args_defaults_to_content() {
-        assert_eq!(parse_args(&[]).unwrap(), PathBuf::from("content"));
+    fn no_args_defaults_to_the_crate_dir() {
+        // No argument resolves to taste's own crate directory, so `ContentLayout` finds
+        // `taste/assets` regardless of where the binary is launched from.
+        assert_eq!(parse_args(&[]).unwrap(), PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     }
 
     #[test]
