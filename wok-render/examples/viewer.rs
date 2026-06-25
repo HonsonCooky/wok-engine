@@ -66,9 +66,10 @@ fn fixture_light() -> LightState {
             color: Vec3::new(1.0, 0.95, 0.85),
         },
         ambient: Vec3::new(0.12, 0.12, 0.16),
-        // The horizon matches the fog color (HLD: fog color drives the sky's horizon), so distant
-        // terrain dissolves into the sky instead of meeting it at a seam.
-        fog: Fog { color: Vec3::new(0.65, 0.70, 0.80), start: 40.0, end: 180.0 },
+        // Fog is on for this fixture, and its horizon is set to match the fog colour so distant
+        // terrain dissolves into the sky instead of meeting it at a seam (the sky uses its own
+        // horizon colour, not the fog colour).
+        fog: Fog { enabled: true, color: Vec3::new(0.65, 0.70, 0.80), start: 40.0, end: 180.0 },
         sky: SkyGradient {
             horizon: Vec3::new(0.65, 0.70, 0.80),
             zenith: Vec3::new(0.25, 0.45, 0.85),

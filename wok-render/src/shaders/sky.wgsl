@@ -26,5 +26,5 @@ fn fs_sky(in: SkyVsOut) -> @location(0) vec4<f32> {
     let far = camera.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
     let dir = normalize(far.xyz / far.w - camera.eye.xyz);
     let t = clamp(dir.y, 0.0, 1.0);
-    return vec4<f32>(mix(light.horizon_fog_end.xyz, light.zenith.xyz, t), 1.0);
+    return vec4<f32>(mix(light.horizon_fog_end.xyz, light.zenith_fog_on.xyz, t), 1.0);
 }

@@ -21,7 +21,7 @@ fn shadow_smoke_a_floating_cube_darkens_the_plane_behind_it() {
     let light = LightState {
         sun: Sun { direction: Vec3::new(1.0, -1.0, 0.0), color: Vec3::ONE },
         ambient: Vec3::splat(0.1),
-        fog: Fog { color: Vec3::splat(0.7), start: 500.0, end: 1000.0 },
+        fog: Fog { enabled: true, color: Vec3::splat(0.7), start: 500.0, end: 1000.0 },
         sky: SkyGradient { horizon: Vec3::splat(0.7), zenith: Vec3::new(0.3, 0.5, 0.9) },
         cel: CelParams { band_count: 4, transition_softness: 0.05, rim_intensity: 0.0 },
     };

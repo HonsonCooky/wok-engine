@@ -282,8 +282,8 @@ impl Renderer {
 
     /// Draw one frame into `target`: the sun's shadow map first (every item in `items` rendered
     /// depth-only from the sun's view), then the gradient sky, then every item again, cel-shaded
-    /// under `light`'s sun - shadowed by the map - and fogged by its fog. The caller owns the
-    /// encoder and submission, so a frame can compose other passes around this one.
+    /// under `light`'s sun - shadowed by the map - and, when `light` enables fog, fogged by it. The
+    /// caller owns the encoder and submission, so a frame can compose other passes around this one.
     ///
     /// `shadow_region` is the world-space box shadows must cover, caller policy: typically the
     /// AABB of the caller's loaded content (terrain plus placements). The sun's orthographic

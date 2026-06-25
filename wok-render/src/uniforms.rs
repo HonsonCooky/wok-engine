@@ -9,7 +9,9 @@
 //! direction is normalized (wok-light documents it may arrive unnormalized), the band count is
 //! floored at 2 so the band divisor stays positive (the HLD sets no upper clamp), the
 //! transition softness is kept strictly positive so the band smoothstep's edges never coincide,
-//! and the fog end is kept strictly past its start so the fog divisor is never zero.
+//! and the fog end is kept strictly past its start so the fog divisor is never zero. The
+//! per-scene fog on/off rides in the sky zenith's spare `w` lane (1.0 on, 0.0 off); the mesh pass
+//! tests it before blending, so a fog-off scene skips fog entirely.
 
 use glam::{Mat3, Mat4, Vec3};
 use wok_light::LightState;
@@ -54,6 +56,7 @@ pub(crate) fn light_floats(light: &LightState) -> [f32; 24] {
     let softness = light.cel.transition_softness.clamp(MIN_SOFTNESS, 1.0);
     let fog_start = light.fog.start;
     let fog_end = light.fog.end.max(fog_start + MIN_FOG_SPAN);
+    let fog_on = if light.fog.enabled { 1.0 } else { 0.0 };
 
     let mut out = [0.0; 24];
     pack(&mut out, 0, sun_dir, bands);
@@ -61,7 +64,7 @@ pub(crate) fn light_floats(light: &LightState) -> [f32; 24] {
     pack(&mut out, 8, light.ambient, light.cel.rim_intensity);
     pack(&mut out, 12, light.fog.color, fog_start);
     pack(&mut out, 16, light.sky.horizon, fog_end);
-    pack(&mut out, 20, light.sky.zenith, 0.0);
+    pack(&mut out, 20, light.sky.zenith, fog_on);
     out
 }
 
@@ -95,7 +98,7 @@ mod tests {
         LightState {
             sun: Sun { direction: Vec3::new(0.0, -2.0, 0.0), color: Vec3::new(1.0, 0.9, 0.8) },
             ambient: Vec3::new(0.1, 0.2, 0.3),
-            fog: Fog { color: Vec3::new(0.5, 0.6, 0.7), start: 10.0, end: 100.0 },
+            fog: Fog { enabled: true, color: Vec3::new(0.5, 0.6, 0.7), start: 10.0, end: 100.0 },
             sky: SkyGradient { horizon: Vec3::new(0.7, 0.7, 0.7), zenith: Vec3::new(0.2, 0.4, 0.9) },
             cel: CelParams { band_count: 4, transition_softness: 0.1, rim_intensity: 0.5 },
         }
@@ -140,6 +143,15 @@ mod tests {
         assert_eq!(floats[3], 2.0); // band count floored at 2
         assert_eq!(floats[7], MIN_SOFTNESS); // softness floored above zero
         assert_eq!(floats[19], state.fog.start + MIN_FOG_SPAN); // fog end pushed past start
+    }
+
+    #[test]
+    fn light_packs_the_fog_enabled_flag_in_the_zenith_w_lane() {
+        // The mesh shader reads index 23 (the zenith vec4's w) to decide whether to blend fog.
+        let mut state = light();
+        assert_eq!(light_floats(&state)[23], 1.0); // enabled
+        state.fog.enabled = false;
+        assert_eq!(light_floats(&state)[23], 0.0); // off
     }
 
     #[test]

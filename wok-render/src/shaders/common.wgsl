@@ -30,8 +30,9 @@ struct Light {
     fog_color_start: vec4<f32>,
     // xyz: sky horizon color; w: fog end distance in metres.
     horizon_fog_end: vec4<f32>,
-    // xyz: sky zenith color.
-    zenith: vec4<f32>,
+    // xyz: sky zenith color; w: fog enabled (1.0 on, 0.0 off). The mesh pass skips the fog blend
+    // when off, so render distance (the caller's far plane) and the sky are independent of fog.
+    zenith_fog_on: vec4<f32>,
 }
 
 struct Draw {

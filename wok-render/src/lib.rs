@@ -1,10 +1,10 @@
 //! wok-render: the forward renderer.
 //!
 //! Part 1 was the smallest renderer that puts real pixels on screen: GPU mesh drawing through a
-//! single forward pass, cel-shaded geometry under a [`LightState`]'s directional sun, distance
-//! fog (always on, an identity commitment per the HLD), and the parametric gradient sky. Part 2
-//! adds the other identity commitment: one shadow map per frame, rendered from the sun. This
-//! revision adds per-item opacity as screen-door cutout (below). Later parts add post-process.
+//! single forward pass, cel-shaded geometry under a [`LightState`]'s directional sun, optional
+//! per-scene distance fog, and the parametric gradient sky. Part 2 adds the identity commitment of
+//! one shadow map per frame, rendered from the sun. This revision adds per-item opacity as
+//! screen-door cutout (below). Later parts add post-process.
 //!
 //! ## The render-list contract
 //!
@@ -64,9 +64,11 @@
 //! `band_count` discrete bands with `transition_softness` smoothstep edges; rim light at
 //! `rim_intensity` brightens silhouettes and is deliberately not shadowed (a silhouette cue, not
 //! illumination); the ambient color is a floor (the minimum light any surface receives), not an
-//! additive term. Fog blends toward the fog color by distance from the eye after lighting. The
-//! sky is a horizon-to-zenith gradient evaluated per pixel from the camera's view ray. Shader
-//! sources live in `src/shaders/` and are compiled into the binary.
+//! additive term. Fog blends toward the fog color by distance from the eye after lighting, when
+//! the light state enables it (fog is a per-scene config, optionally off; with it off the far
+//! plane, the caller's render distance, is a clean cut). The sky is a horizon-to-zenith gradient
+//! evaluated per pixel from the camera's view ray, using the sky gradient's own horizon colour -
+//! independent of fog. Shader sources live in `src/shaders/` and are compiled into the binary.
 //!
 //! ## Determinism
 //!

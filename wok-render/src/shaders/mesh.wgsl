@@ -105,9 +105,15 @@ fn fs_mesh(in: MeshVsOut) -> @location(0) vec4<f32> {
     let lit = max(light.sun_color_soft.xyz * level, light.ambient_rim.xyz);
     let shaded = draw.color.xyz * lit + rim;
 
-    // Distance fog after lighting (HLD: fog is always on). uniforms.rs guarantees end > start.
-    let dist = distance(in.world_pos, camera.eye.xyz);
-    let span = light.horizon_fog_end.w - light.fog_color_start.w;
-    let fog = clamp((dist - light.fog_color_start.w) / span, 0.0, 1.0);
-    return vec4<f32>(mix(shaded, light.fog_color_start.xyz, fog), 1.0);
+    // Distance fog after lighting, when the scene enables it (HLD: fog is a per-scene config,
+    // optionally off). With fog on this is the same blend as before; with it off the shaded color
+    // is the final color and the far plane - the scene's streaming extent, no longer fog-derived -
+    // is a clean cut. uniforms.rs guarantees end > start.
+    if light.zenith_fog_on.w >= 0.5 {
+        let dist = distance(in.world_pos, camera.eye.xyz);
+        let span = light.horizon_fog_end.w - light.fog_color_start.w;
+        let fog = clamp((dist - light.fog_color_start.w) / span, 0.0, 1.0);
+        return vec4<f32>(mix(shaded, light.fog_color_start.xyz, fog), 1.0);
+    }
+    return vec4<f32>(shaded, 1.0);
 }
