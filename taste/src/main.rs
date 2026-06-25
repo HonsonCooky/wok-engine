@@ -59,11 +59,12 @@ fn main() {
     }
 }
 
-/// The tracked feel-tuning file, relative to the working directory, so a `cargo run -p taste` from
-/// the workspace root finds it. Unlike the content root (which resolves to taste's crate directory),
-/// this stays cwd-relative; from the workspace root - the usual launch - both resolve. Tracked in
-/// git as the authored feel record.
-const TUNING_PATH: &str = "taste/tuning.json";
+/// The tracked feel-tuning file, resolved to taste's crate directory (baked in at compile time) like
+/// the content root, so both find their files from any working directory: a bare `cargo run -p taste`
+/// picks up the authored tuning. The hot-reload watcher watches this file's directory (taste's crate
+/// dir, where tuning.json lives), so reload works from any cwd too. Tracked in git as the authored
+/// feel record.
+const TUNING_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tuning.json");
 
 /// Everything before the window opens: parse the CLI, load the editor-authored content, load (or
 /// first-run write) the feel tuning, and build the app. A missing scene is the one failure with

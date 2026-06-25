@@ -78,8 +78,9 @@ pub const PITCH_MAX: f32 = 1.35;
 /// Starting orbit pitch: a little above the shoulder, looking gently down.
 pub const PITCH_DEFAULT: f32 = 0.35;
 
-/// Vertical field of view and near plane for the projection. The far plane is per-frame data (fog
-/// distance sets render distance, per the HLD), so it is a parameter, not a constant.
+/// Vertical field of view and near plane for the projection. The far plane is per-frame data (render
+/// distance is the scene's streaming extent, independent of fog), so it is a parameter, not a
+/// constant.
 pub const FOV_Y_RADIANS: f32 = std::f32::consts::FRAC_PI_3;
 pub const NEAR_PLANE: f32 = 0.1;
 

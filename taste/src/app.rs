@@ -111,6 +111,10 @@ pub struct TasteApp {
     /// The shadow region the frame call passes: the loaded content's bounds plus jump headroom,
     /// computed once because taste loads everything up front and never reloads.
     shadow_region: Aabb,
+    /// The scene's render distance in metres - its streaming extent (`load_radius` chunks) - read
+    /// once at load (taste never reloads). The far plane sits here, independent of fog; mirrors the
+    /// editor's `RenderScene` render distance.
+    render_distance: f32,
     world: World,
     /// The live feel tuning (`crate::tuning`): the gameplay and camera numbers the sim, the jump
     /// latch, the camera, and the look mapping all read each frame. Swapped wholesale when the
@@ -152,11 +156,13 @@ impl TasteApp {
         let player = sim::spawn(&world, &tuning);
         let camera = FollowCamera::spawn(camera_target(player.motion.position), &tuning);
         let watcher = start_tuning_watch(&tuning_path);
+        let render_distance = loaded.scene.default_streaming.render_distance();
         Ok(TasteApp {
             scene_name: loaded.scene.name,
             light: loaded.light,
             store,
             shadow_region,
+            render_distance,
             world,
             tuning,
             tuning_path,
@@ -227,8 +233,9 @@ impl TasteApp {
         renderer.resize(&ctx.platform.device, fw, fh);
 
         let aspect = fw as f32 / fh.max(1) as f32;
-        // Fog distance sets render distance (HLD); the far plane sits past full occlusion.
-        let far = (self.light.fog.end * 1.2).max(50.0);
+        // Render distance is the scene's streaming extent, independent of fog; the far plane sits
+        // there. Mirrors the editor's `RenderScene::far_plane` (render_distance floored at 50m).
+        let far = self.render_distance.max(50.0);
         let camera = Camera {
             view_proj: self.camera.view_proj(aspect, far, &self.tuning),
             eye: self.camera.position,

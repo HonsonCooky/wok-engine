@@ -108,7 +108,8 @@ impl FollowCamera {
     }
 
     /// The combined view-projection matrix, looking from the camera at its look-ahead target, with
-    /// the far plane supplied per frame (fog distance sets render distance, per the HLD).
+    /// the far plane supplied per frame (render distance is the scene's streaming extent, independent
+    /// of fog).
     /// `perspective_rh` maps depth to `0..=1`, wgpu's clip-space convention. Should eye and target
     /// ever coincide (a vertical pitch scales the lead away entirely; on a fully collapsed boom
     /// the eye then sits on the anchor) the look direction degenerates; fall back to the boom's
