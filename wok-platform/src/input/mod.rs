@@ -49,6 +49,18 @@ impl InputState {
         })
     }
 
+    /// Is a printable character key held this frame? The held counterpart to
+    /// [`char_pressed`](Self::char_pressed) - same case-insensitive match, but
+    /// over the keys still down rather than the press edge, for hold-to-act
+    /// keys (e.g. the editor's hold-`r` / hold-`s` transform fast path).
+    #[must_use]
+    pub fn char_held(&self, ch: char) -> bool {
+        self.keys_held.iter().any(|k| match k {
+            Key::Character(s) => s.chars().any(|c| c.eq_ignore_ascii_case(&ch)),
+            _ => false,
+        })
+    }
+
     #[must_use]
     pub fn mouse_held(&self, button: MouseButton) -> bool {
         self.mouse_buttons_held.contains(&button)
@@ -329,6 +341,27 @@ mod tests {
         let frame = c.snapshot();
         assert!(frame.keys_pressed.is_empty(), "a repeat is not a new press");
         assert!(frame.keys_held.contains(&key("w")));
+    }
+
+    #[test]
+    fn char_pressed_edges_once_and_char_held_persists_case_insensitively() {
+        // The letter-key accessors the editor's hold-to-act keys read: the press edges char_pressed
+        // for exactly one frame, char_held tracks the key while it is down, and both match the typed
+        // letter regardless of case (shift / caps lock).
+        let mut c = InputCollector::new();
+        c.key_input(key("r"), ElementState::Pressed);
+
+        let frame = c.snapshot();
+        assert!(frame.char_pressed('r'), "the press frame edges char_pressed");
+        assert!(frame.char_pressed('R'), "the match is case-insensitive");
+        assert!(frame.char_held('r'), "and the key is held the same frame");
+
+        let next = c.snapshot();
+        assert!(!next.char_pressed('r'), "the pressed edge lasts exactly one frame");
+        assert!(next.char_held('R'), "held persists until release, case-insensitively");
+
+        c.key_input(key("r"), ElementState::Released);
+        assert!(!c.snapshot().char_held('r'), "held clears on release");
     }
 
     #[test]
