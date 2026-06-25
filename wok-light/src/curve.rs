@@ -112,7 +112,7 @@ mod tests {
         LightState {
             sun: Sun { direction: Vec3::new(0.0, -1.0, 0.0), color: Vec3::splat(v) },
             ambient: Vec3::splat(v),
-            fog: Fog { color: Vec3::splat(v), start: v, end: v },
+            fog: Fog { enabled: true, color: Vec3::splat(v), start: v, end: v },
             sky: SkyGradient { horizon: Vec3::splat(v), zenith: Vec3::splat(v) },
             cel: CelParams { band_count: 4, transition_softness: v, rim_intensity: v },
         }

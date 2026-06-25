@@ -31,16 +31,33 @@ pub struct Sun {
     pub color: Vec3,
 }
 
-/// Distance-based fog. `start` is the distance at which fog begins, `end` the distance at which
-/// it fully occludes; both in metres. The HLD ties render distance to `end` and the sky horizon
-/// to `color`, but those are render-side reads: here they are plain data.
+/// Distance-based fog, optionally enabled per scene. `start` is the distance at which fog begins,
+/// `end` the distance at which it fully occludes, both in metres; `color` is the linear-RGB colour
+/// surfaces fade toward. `enabled` is the master switch: when false the renderer skips the fog
+/// blend entirely, and `start`/`end`/`color` are retained but unused, so toggling fog off and back
+/// on does not lose its authored values.
+///
+/// Fog drives nothing else. Render distance is the scene's streaming extent (wok-scene's
+/// `render_distance`), and the sky horizon is the gradient sky's own `horizon` colour (see
+/// [`SkyGradient`]); all three are independent.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fog {
+    /// When false the renderer draws no fog (a clean far cut at the render distance). Defaults to
+    /// true on load, so a fog block authored before the flag existed loads enabled and renders
+    /// exactly as it did.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     #[serde(with = "crate::serde_vec3")]
     pub color: Vec3,
     pub start: f32,
     pub end: f32,
+}
+
+/// The serde default for [`Fog::enabled`]: fog is on unless a scene explicitly turns it off, so a
+/// file written before the flag existed loads as enabled.
+fn default_enabled() -> bool {
+    true
 }
 
 /// The parametric gradient sky: a vertical blend from `horizon` colour to `zenith` colour. Sun
@@ -94,6 +111,7 @@ impl LightState {
             },
             ambient: self.ambient.lerp(other.ambient, s),
             fog: Fog {
+                enabled: lerp_bool(self.fog.enabled, other.fog.enabled, s),
                 color: self.fog.color.lerp(other.fog.color, s),
                 start: lerp_f32(self.fog.start, other.fog.start, s),
                 end: lerp_f32(self.fog.end, other.fog.end, s),
@@ -123,8 +141,17 @@ fn lerp_u32(a: u32, b: u32, s: f32) -> u32 {
     lerp_f32(a as f32, b as f32, s).round() as u32
 }
 
-/// A neutral daytime default: white sun straight down, dim ambient, mid-distance grey fog, a blue
-/// gradient sky, and 4 cel bands. Useful as a starting point for authoring and as the value an
+/// Blend a discrete on/off flag across a transition: it takes whichever endpoint the blend is
+/// nearer to, the boolean analogue of how `band_count` rounds (a continuous fog density would need
+/// its own field). At `s == 0` it returns `a` and at `s == 1` it returns `b`, so `lerp`'s endpoint
+/// guarantees hold; the exact midpoint rounds toward the enabled side.
+fn lerp_bool(a: bool, b: bool, s: f32) -> bool {
+    let (a, b) = (if a { 1.0 } else { 0.0 }, if b { 1.0 } else { 0.0 });
+    lerp_f32(a, b, s).round() != 0.0
+}
+
+/// A neutral daytime default: white sun straight down, dim ambient, mid-distance grey fog (on), a
+/// blue gradient sky, and 4 cel bands. Useful as a starting point for authoring and as the value an
 /// empty `LightCurve` samples to. The renderer tunes real values per scene.
 impl Default for LightState {
     fn default() -> Self {
@@ -135,6 +162,7 @@ impl Default for LightState {
             },
             ambient: Vec3::splat(0.1),
             fog: Fog {
+                enabled: true,
                 color: Vec3::splat(0.7),
                 start: 50.0,
                 end: 300.0,
@@ -165,6 +193,7 @@ mod tests {
             },
             ambient: Vec3::new(0.0, 0.0, 0.0),
             fog: Fog {
+                enabled: true,
                 color: Vec3::new(0.0, 0.0, 0.0),
                 start: 0.0,
                 end: 100.0,
@@ -189,6 +218,7 @@ mod tests {
             },
             ambient: Vec3::new(1.0, 1.0, 1.0),
             fog: Fog {
+                enabled: false,
                 color: Vec3::new(1.0, 1.0, 1.0),
                 start: 10.0,
                 end: 200.0,
@@ -235,6 +265,15 @@ mod tests {
         let b = LightState { cel: CelParams { band_count: 3, ..state_b().cel }, ..state_b() };
         assert_eq!(a.lerp(&b, 0.4).cel.band_count, 2);
         assert_eq!(a.lerp(&b, 0.6).cel.band_count, 3);
+    }
+
+    #[test]
+    fn fog_enabled_follows_the_nearer_keyframe() {
+        // state_a has fog on, state_b off: the flag holds to the nearer keyframe (the boolean
+        // analogue of band_count rounding), and the exact midpoint rounds toward the enabled side.
+        assert!(state_a().lerp(&state_b(), 0.4).fog.enabled);
+        assert!(!state_a().lerp(&state_b(), 0.6).fog.enabled);
+        assert!(state_a().lerp(&state_b(), 0.5).fog.enabled);
     }
 
     #[test]
