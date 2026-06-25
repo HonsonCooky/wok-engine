@@ -71,6 +71,8 @@ The applications sit above the engine, each a separate consumer:
 - **the wok editor** (`wok`) - the GUI for authoring content. It composes engine primitives, including the same wok-physics queries the game uses for picking and snapping, and will surface the content scan as its missing-assets and integrity views once the scan exists (today: a disabled page slot reserved for it); it owns no engine logic. Co-developed in the workspace as the reference application (the `wok` binary), and replaceable without the engine noticing.
 - **`<game>`** - all game-specific runtime logic: the actor pool and its fixed-timestep loop (calling wok-physics math), game cameras (calling wok-physics camera math), the player controller, save/load composed over per-crate accessors, multiplayer transport (per `multiplayer-model.md`), and routing of triggers, effects, and audio cues into the engine's systems. Content lives under the game's content folder, produced by the editor; asset source files live alongside, named by slug.
 
+Demo content during co-development: the only content the workspace holds today is taste's demo, which lives in-repo under `taste/assets/` (git-tracked, following the same `assets/` convention as any project) with the editor opening `taste/` to author it; relocating taste and its content to the game's own downstream repo is deferred until the engine stabilizes (decided 2026-06-25).
+
 ## Dependencies
 
 The dependency graph is whatever the crates that exist actually use; a crate's dependencies are not declared before the crate exists. Three rules govern it, enforced by the toolchain rather than by review:
