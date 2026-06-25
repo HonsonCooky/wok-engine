@@ -70,7 +70,9 @@ fn chrome_harness(
         ctx.set_theme(theme);
         let editor_bg = crate::theme::palette(ctx).editor_bg;
         ctx.layer_painter(egui::LayerId::background()).rect_filled(ctx.screen_rect(), 0.0, editor_bg);
-        let _ = chrome(ctx, &model, loaded_scene.as_ref());
+        // No gizmo in the static snapshots: it is a 3D + live-input overlay, verified by a run, not a
+        // PNG. Passing None keeps the chrome PNGs unchanged (the gizmo never enters them).
+        let _ = chrome(ctx, &model, loaded_scene.as_ref(), None);
     })
 }
 

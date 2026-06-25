@@ -28,6 +28,7 @@
 //! single writer, the same as every other action.
 
 use crate::action::Action;
+use crate::gizmo::{self, GizmoView};
 use crate::inspector;
 use crate::loaded::LoadedScene;
 use crate::menu;
@@ -45,7 +46,18 @@ use crate::workspace;
 /// `loaded_scene` is the active scene tab's loaded data (reconciled by the frame loop, `crate::loaded`),
 /// which the Instances nav view lists; it is `None` when no scene tab is active. The model alone cannot
 /// carry it - it is filesystem residency, not pure model state - so it is threaded in separately.
-pub fn chrome(ctx: &egui::Context, model: &Model, loaded_scene: Option<&LoadedScene>) -> (Vec<Action>, egui::Rect) {
+///
+/// `gizmo` is the transform gizmo's draw inputs (the camera and far plane the overlay projects with),
+/// threaded in the same way from the frame loop where the camera and render residency live; `None` when
+/// no scene is open (the static snapshot tests pass `None`, so the gizmo never enters their PNGs). When
+/// present, the world-axis translate gizmo paints over the well beside the inspector, for the same
+/// selection both read from `model.shell.selection()`.
+pub fn chrome(
+    ctx: &egui::Context,
+    model: &Model,
+    loaded_scene: Option<&LoadedScene>,
+    gizmo: Option<GizmoView>,
+) -> (Vec<Action>, egui::Rect) {
     let mut actions = Vec::new();
     // Region order is load-bearing (sharp-edges 2): the nav panel is added first on whichever side it
     // docks, so it claims its full-height strip and the view column fills the rest - the status bar
@@ -64,6 +76,12 @@ pub fn chrome(ctx: &egui::Context, model: &Model, loaded_scene: Option<&LoadedSc
     let editor_rect = ctx.available_rect();
     workspace::editor_area(ctx, &mut actions);
     inspector::floating(ctx, model, loaded_scene, editor_rect, &mut actions);
+    // The transform gizmo's overlay, on the same floating layer as the inspector and over the same
+    // selection. It draws under the inspector window and the menus (a Background-order layer, clipped to
+    // the well); the drag and the hold-key fast path are the frame loop's (`crate::gizmo::update`).
+    if let Some(view) = gizmo {
+        gizmo::draw(ctx, loaded_scene, model.shell.selection(), editor_rect, &view);
+    }
     // Esc clears the selection (editor-design.md: Esc unwinds the selection). Gated on there being one,
     // so it is inert otherwise and never fights for the key when nothing is selected.
     if model.shell.selection().is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
