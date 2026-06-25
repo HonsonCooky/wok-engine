@@ -87,6 +87,15 @@
 //!   over disc samples with no curvature discount (a disc rests on the highest point under it),
 //!   lift-only like every rest here.
 //!
+//! Editor picking adds the one ray query the simulation never needed (the game sweeps shapes; only
+//! the viewport's cursor casts a ray):
+//!
+//! - [`pick`] - [`ray_collider`], the smallest non-negative distance at which a ray enters a
+//!   [`Collider`], over all four variants (the slab method for the boxes, the closed-form entering
+//!   root for the sphere mirroring [`sweep_round`]'s end-sphere math, the radial quadratic plus cap
+//!   slab for the vertical cylinder). It runs over the same [`classify_collider`] output the game
+//!   collides against, so a pick selects the solid the placement actually collides as.
+//!
 //! Determinism (canon contract): identical inputs and `dt` give identical outputs; resolution over
 //! several colliders and the iterative sweep/slide both run sequentially in a defined order, with no
 //! parallel reduction and fixed iteration caps; the collision math is position-independent (it reads
@@ -111,6 +120,7 @@ pub mod collision;
 pub mod cylinder;
 mod geom;
 pub mod motion;
+pub mod pick;
 pub mod slide;
 pub mod smoothing;
 pub mod sweep;
@@ -130,6 +140,7 @@ pub use collider::Collider;
 pub use collision::{Contact, aabb_contact, aabb_overlap, resolve_statics};
 pub use cylinder::Cylinder;
 pub use motion::{Motion, integrate};
+pub use pick::ray_collider;
 pub use slide::{SlideResult, collide_and_slide};
 pub use smoothing::smooth;
 pub use sweep::{SweptHit, sweep_capsule_aabb, sweep_capsule_aabbs, sweep_capsule_collider, sweep_capsule_colliders};
