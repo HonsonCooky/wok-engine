@@ -27,7 +27,7 @@ use glam::{Mat4, Vec3};
 use wok_content::ChunkStore;
 use wok_light::LightState;
 use wok_scene::{
-    Aabb, CHUNK_GRID_DIM, Chunk, ChunkCoord, ContentLayout, Heightmap, Prefab, PrefabRef, Primitive,
+    Aabb, CHUNK_GRID_DIM, Chunk, ChunkCoord, ContentLayout, Heightmap, InstanceId, Prefab, PrefabRef,
     Scene, VisibleItem,
 };
 
@@ -172,7 +172,7 @@ impl RenderScene {
             let origin = Mat4::from_translation(chunk_origin(coord));
             for item in &runtime.visible {
                 if let VisibleItem::Primitive { primitive, transform, .. } = item {
-                    grow(primitive_world_aabb(*primitive, origin * *transform));
+                    grow(wok_physics::world_aabb(*primitive, origin * *transform));
                 }
             }
         }
@@ -180,6 +180,43 @@ impl RenderScene {
             return Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0));
         }
         Aabb::new(min, max)
+    }
+
+    /// Cast a ray (`origin`, and a normalized `dir` - the cursor ray from
+    /// [`FlyCamera::cursor_ray`](crate::camera::FlyCamera::cursor_ray)) against the open scene's
+    /// authored placements, returning the [`InstanceId`] of the nearest one hit, or `None` when the
+    /// ray meets only terrain or empty space (the empty-space deselect). The 3D viewport's
+    /// click-to-select.
+    ///
+    /// It runs over the authored chunks (not the sliced visible items), so every shape of a
+    /// placement's active state is tested - visible placeholders and invisible hitboxes alike -
+    /// against the collider [`classify_collider`](wok_physics::classify_collider) reduces it to, the
+    /// same reduction the game's simulation uses, so a pick agrees with what the placement collides
+    /// as. A mesh-replaced instance, whose visible shapes do not draw, is still selectable by its
+    /// authored footprint. Tolerant like [`build`](Self::build) and [`rederive`](Self::rederive): a
+    /// placement whose prefab or active state is absent is skipped rather than failing the pick.
+    /// Terrain is not a placement, so a ray meeting only terrain returns `None`.
+    pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<InstanceId> {
+        let mut best: Option<(f32, InstanceId)> = None;
+        for chunk in &self.source_chunks {
+            let origin_mat = Mat4::from_translation(chunk_origin(chunk.coord));
+            for placement in &chunk.placements {
+                let Some(prefab) = self.prefabs.get(&placement.prefab) else { continue };
+                let state_name = placement.state.as_deref().unwrap_or(&prefab.default_state);
+                let Some(state) = prefab.states.iter().find(|s| s.name == state_name) else { continue };
+                let placement_mat = origin_mat * placement.transform.to_mat4();
+                for shape in &state.shapes {
+                    let world = placement_mat * shape.transform.to_mat4();
+                    let collider = wok_physics::classify_collider(shape.primitive, world);
+                    if let Some(t) = wok_physics::ray_collider(origin, dir, &collider) {
+                        if best.is_none_or(|(best_t, _)| t < best_t) {
+                            best = Some((t, placement.instance_id));
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(_, id)| id)
     }
 }
 
@@ -301,25 +338,6 @@ fn terrain_bounds(store: &ChunkStore) -> Option<Aabb> {
     (min.x <= max.x).then(|| Aabb::new(min, max))
 }
 
-/// The world-space AABB of a unit primitive under `world`: the eight corners of its unit box
-/// transformed and min/maxed. A conservative cover for the shadow region (not a tight fit), so an
-/// oriented or scaled placement still reports a box that contains it.
-fn primitive_world_aabb(primitive: Primitive, world: Mat4) -> Aabb {
-    let local = primitive.unit_aabb();
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    for &x in &[local.min.x, local.max.x] {
-        for &y in &[local.min.y, local.max.y] {
-            for &z in &[local.min.z, local.max.z] {
-                let corner = world.transform_point3(Vec3::new(x, y, z));
-                min = min.min(corner);
-                max = max.max(corner);
-            }
-        }
-    }
-    Aabb::new(min, max)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,7 +345,7 @@ mod tests {
 
     use wok_scene::{
         Chunk, ChunkCoord, ChunkStreaming, Eagerness, InstanceId, LightStateRef, Placement, Prefab,
-        PrefabState, Scene, Shape, StreamingDefaults, SurfaceTag, Transform, save_prefab, save_scene,
+        PrefabState, Primitive, Scene, Shape, StreamingDefaults, SurfaceTag, Transform, save_prefab, save_scene,
     };
 
     #[allow(clippy::float_cmp)]

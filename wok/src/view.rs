@@ -62,7 +62,7 @@ pub fn chrome(ctx: &egui::Context, model: &Model, loaded_scene: Option<&LoadedSc
     // the central panel consumes it, so the floating inspector can anchor to and clip to it. The
     // inspector is shown after the well so it layers over it; it appears only when a selection resolves.
     let editor_rect = ctx.available_rect();
-    workspace::editor_area(ctx, model, &mut actions);
+    workspace::editor_area(ctx, &mut actions);
     inspector::floating(ctx, model, loaded_scene, editor_rect, &mut actions);
     // Esc clears the selection (editor-design.md: Esc unwinds the selection). Gated on there being one,
     // so it is inert otherwise and never fights for the key when nothing is selected.

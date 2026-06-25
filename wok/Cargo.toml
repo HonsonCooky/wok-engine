@@ -47,7 +47,12 @@ unused_self                       = "allow"
 # (`transform_chunk` -> the runtime arrays the viewport reads), wok-mesh (primitive + terrain meshes and
 # their GPU upload), wok-render (the forward pass into the editor well), and wok-light (the `LightState`
 # the viewport loads and hands the renderer each frame - wok-render consumes it but does not re-export
-# it, so the editor names it directly).
+# it, so the editor names it directly). wok-physics rejoins for the 3D viewport's click-to-select:
+# `ray_collider` casts the cursor ray against each placement's collider - reduced by the shared
+# `classify_collider`, the same reduction the game's simulation uses - so a pick agrees with what the
+# shape collides as, and `world_aabb` replaces the editor's own copy in the shadow-region bounds. An
+# existing workspace crate (wok-scene + glam, both already in the graph), so no new external dependency
+# enters the build.
 [dependencies]
 wok-platform = { path = "../wok-platform" }
 wok-scene = { path = "../wok-scene" }
@@ -55,6 +60,7 @@ wok-content = { path = "../wok-content" }
 wok-mesh = { path = "../wok-mesh" }
 wok-render = { path = "../wok-render" }
 wok-light = { path = "../wok-light" }
+wok-physics = { path = "../wok-physics" }
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true

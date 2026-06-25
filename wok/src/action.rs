@@ -23,6 +23,7 @@
 
 use std::path::PathBuf;
 
+use glam::Vec2;
 use wok_scene::{InstanceId, Transform};
 
 use crate::loaded::LoadedScene;
@@ -66,6 +67,13 @@ pub enum Action {
     /// Clear the selection. Emitted by Esc or a click on empty space, and applied by the frame loop
     /// when it switches to a different scene (the per-scene id no longer applies).
     Deselect,
+    /// A genuine left-click landed in the 3D viewport well, at this position in egui points (window
+    /// space). Resolved by the frame loop - it owns the camera, the render residency, and the well
+    /// rect a cursor-ray pick needs, which the egui- and residency-free [`handle`] cannot - into a
+    /// [`Select`](Action::Select) of the nearest instance under the cursor, or a
+    /// [`Deselect`](Action::Deselect) over empty space or terrain, both applied through this same
+    /// handler. So it never reaches [`handle`] itself; the arm there is an inert guard.
+    ViewportClick(Vec2),
 
     // ---- editing ----
     /// Set the display name of the placement with this instance id, renaming it in the loaded scene.
@@ -154,6 +162,12 @@ pub fn handle(model: &mut Model, loaded: Option<&mut LoadedScene>, action: Actio
         }
         Action::Deselect => {
             model.shell.deselect();
+            Handled::default()
+        }
+        Action::ViewportClick(_) => {
+            // The frame loop resolves a viewport click into Select/Deselect before it reaches the
+            // writer (it owns the camera, the render residency, and the well rect a pick needs; handle
+            // is egui- and residency-free). Reaching here means no pick was resolved, so do nothing.
             Handled::default()
         }
         Action::SetInstanceName(id, name) => {
@@ -324,6 +338,17 @@ mod tests {
         handle(&mut model, None, Action::Select(InstanceId(1)));
         handle(&mut model, None, Action::Select(InstanceId(2)));
         assert_eq!(model.shell.selection(), Some(InstanceId(2)));
+    }
+
+    #[test]
+    fn viewport_click_is_an_inert_no_op_in_the_handler() {
+        // The frame loop resolves a viewport click into Select/Deselect (it owns the camera and render
+        // residency a pick needs); if one ever reaches handle it must leave the model untouched.
+        let mut model = Model::default();
+        handle(&mut model, None, Action::Select(InstanceId(3)));
+        let handled = handle(&mut model, None, Action::ViewportClick(Vec2::new(10.0, 20.0)));
+        assert_eq!(handled, Handled::default());
+        assert_eq!(model.shell.selection(), Some(InstanceId(3)), "handle leaves the selection untouched");
     }
 
     // ---- project lifecycle ----

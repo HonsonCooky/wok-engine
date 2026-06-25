@@ -4565,6 +4565,7 @@ dependencies = [
  "wok-content",
  "wok-light",
  "wok-mesh",
+ "wok-physics",
  "wok-platform",
  "wok-render",
  "wok-scene",

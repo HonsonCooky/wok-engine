@@ -46,7 +46,7 @@ mod workspace;
 
 use action::Action;
 use camera::FlyCamera;
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use gui::Gui;
 use loaded::LoadedScene;
 use model::Model;
@@ -126,6 +126,32 @@ impl Editor {
     }
 }
 
+/// Resolve a viewport click into a selection action. The click is mapped against the SAME well rect
+/// the 3D rendered into (sharp-edges 2 - one shared cursor-to-ray source), the cursor ray is cast, and
+/// the nearest instance under it is picked. No open scene, a degenerate well, or a ray that meets only
+/// terrain or empty space all deselect. The model mutation itself still goes through the single writer
+/// (`Select` / `Deselect` via `action::handle`); this only turns the click into the right one, where
+/// the camera and render residency a pick needs live (not the pure Model). A free function over those
+/// two fields so it borrows them disjointly from the mutable `gui` the frame loop still holds.
+fn resolve_viewport_pick(
+    render_scene: Option<&RenderScene>,
+    camera: &FlyCamera,
+    pos: Vec2,
+    editor_rect: egui::Rect,
+) -> Action {
+    let Some(scene) = render_scene else { return Action::Deselect };
+    let size = Vec2::new(editor_rect.width(), editor_rect.height());
+    if size.x <= 0.0 || size.y <= 0.0 {
+        return Action::Deselect;
+    }
+    let pos_in_rect = pos - Vec2::new(editor_rect.min.x, editor_rect.min.y);
+    let (origin, dir) = camera.cursor_ray(pos_in_rect, size, scene.far_plane());
+    match scene.pick(origin, dir) {
+        Some(id) => Action::Select(id),
+        None => Action::Deselect,
+    }
+}
+
 impl App for Editor {
     fn init(&mut self, platform: &Platform) {
         // The OS owns the title bar, window drag, resize, and the min/max/close buttons; the editor
@@ -192,6 +218,15 @@ impl App for Editor {
         // re-renders the new state. The handler returns the effects it cannot perform itself: persisting
         // the recent-projects list, and saving the open scene (handle stays filesystem-free).
         for action in actions {
+            // A viewport click resolves to a pick here, where the camera and render residency live (not
+            // in the pure Model): it becomes a Select of the nearest instance or a Deselect, then runs
+            // through the single writer like every other action.
+            let action = match action {
+                Action::ViewportClick(pos) => {
+                    resolve_viewport_pick(self.render_scene.as_ref(), &self.camera, pos, editor_rect)
+                }
+                other => other,
+            };
             let handled = action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
             if handled.save_recents {
                 recent::save(&self.model.recents);

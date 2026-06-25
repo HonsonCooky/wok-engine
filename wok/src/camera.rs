@@ -80,6 +80,29 @@ impl FlyCamera {
         let view = Mat4::look_to_rh(self.position, self.forward(), Vec3::Y);
         projection * view
     }
+
+    /// The world-space ray for a cursor click in the viewport: the inverse of [`view_proj`], used by
+    /// the 3D picking (3b). `pos_in_rect` is the click in egui points relative to the well's top-left,
+    /// and `rect_size` is that same well's size - the rect the 3D rendered into, so the ray matches
+    /// what the user clicked (sharp-edges 2: one shared cursor-to-ray source). `far` is the scene's far
+    /// plane, the same one the render projects with, so the unprojection inverts the exact matrix.
+    ///
+    /// The click maps to normalized device coordinates (egui's y runs down, NDC's up, so y flips),
+    /// then two clip points - on the near plane (`z = 0`) and the far plane (`z = 1`, the depth range
+    /// `perspective_rh` maps to, wgpu's convention) - are unprojected through the inverse
+    /// view-projection (`project_point3` is the divide by `w`). The ray runs from the eye along their
+    /// difference, normalized so a pick `t` reads as world distance. The ndc is a ratio of point
+    /// coordinates, so the result is identical whether measured in points or pixels.
+    ///
+    /// [`view_proj`]: Self::view_proj
+    pub fn cursor_ray(&self, pos_in_rect: Vec2, rect_size: Vec2, far: f32) -> (Vec3, Vec3) {
+        let ndc_x = 2.0 * pos_in_rect.x / rect_size.x - 1.0;
+        let ndc_y = 1.0 - 2.0 * pos_in_rect.y / rect_size.y;
+        let inv = self.view_proj(rect_size.x / rect_size.y, far).inverse();
+        let near = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
+        let far_point = inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
+        (self.position, (far_point - near).normalize())
+    }
 }
 
 // ---- framing ----
@@ -330,6 +353,34 @@ mod tests {
         let clip = cam.view_proj(16.0 / 9.0, 400.0).project_point3(target);
         assert!(clip.x.abs() < EPS && clip.y.abs() < EPS, "clip was {clip:?}");
         assert!(clip.z > 0.0 && clip.z < 1.0, "depth should be inside wgpu's 0..1 range: {}", clip.z);
+    }
+
+    // ---- cursor_ray ----
+
+    #[test]
+    fn cursor_ray_through_the_center_points_along_forward() {
+        // A click at the centre of the well unprojects to the camera's central axis, so the ray runs
+        // from the eye straight along forward.
+        let cam = FlyCamera { position: Vec3::new(3.0, 4.0, 5.0), yaw: 0.7, pitch: -0.2 };
+        let size = Vec2::new(800.0, 600.0);
+        let (origin, dir) = cam.cursor_ray(size * 0.5, size, 400.0);
+        assert!(close(origin, cam.position), "the ray starts at the eye");
+        assert!(close(dir, cam.forward()), "a centred click looks along forward: {dir:?}");
+    }
+
+    #[test]
+    fn cursor_ray_inverts_the_projection_for_an_off_center_pixel() {
+        // A world point in front projects to some pixel; the ray cast back through that pixel must aim
+        // straight at it. This pins the ndc mapping, including egui's y-down -> NDC y-up flip.
+        let cam = FlyCamera { position: Vec3::new(1.0, 2.0, -3.0), yaw: 0.4, pitch: -0.3 };
+        let size = Vec2::new(1024.0, 768.0);
+        let far = 500.0;
+        let target = cam.position + cam.forward() * 40.0 + cam.right() * 6.0 + cam.up() * 4.0;
+        let clip = cam.view_proj(size.x / size.y, far).project_point3(target);
+        // Invert cursor_ray's ndc mapping to recover the egui-point pixel (y-down) the target lands on.
+        let pixel = Vec2::new((clip.x + 1.0) * 0.5 * size.x, (1.0 - clip.y) * 0.5 * size.y);
+        let (origin, dir) = cam.cursor_ray(pixel, size, far);
+        assert!(close(dir, (target - origin).normalize()), "the ray aims at the target: {dir:?}");
     }
 
     // ---- look_at ----
