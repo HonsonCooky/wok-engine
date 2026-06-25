@@ -22,8 +22,8 @@ use glam::{Mat4, Vec2, Vec3};
 /// Hard pitch limit, just shy of straight up/down (about 88.9 degrees).
 const PITCH_LIMIT: f32 = 1.55;
 
-/// Vertical field of view and near plane for the projection. The far plane is per-frame data
-/// (fog distance sets render distance, per the HLD), so it is a [`view_proj`] parameter.
+/// Vertical field of view and near plane for the projection. The far plane is per-frame data (the
+/// scene's render distance - its streaming extent, per the HLD), so it is a [`view_proj`] parameter.
 const FOV_Y_RADIANS: f32 = std::f32::consts::FRAC_PI_3;
 const NEAR_PLANE: f32 = 0.1;
 

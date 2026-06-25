@@ -58,7 +58,7 @@ Viewport contexts:
 - Prefab. One prefab in isolation: compose primitive shapes, define named states (default, open, destroyed), set each shape's surface tag and is_hitbox / is_visible flags, and bind a mesh name for when a real mesh arrives.
 
 Data contexts:
-- Lighting. Edit a lighting state (sky gradient, sun, fog, band count, ambient), its animation curves, and the region markers for fog and lighting zones. The 3D view is only a preview.
+- Lighting. Edit a lighting state (sky gradient, sun, fog with an on/off, band count, ambient), its animation curves, and the region markers for fog and lighting zones. The 3D view is only a preview.
 - Playtest insight. A log and trace explorer over the saved run log (tracing output, structured by spans), for reviewing a playtest after the fact.
 - Integrity. The missing-assets queue (the artist's to-build list) and the project-wide deep scan for dead references, orphans, and empty slots, each navigable to its source. The conventions and the scan are an engine concern the editor consumes, not one it owns.
 - Cutscene. A timeline over a finished scene. Deferred: it needs the wok-sequence crate, which is unbuilt.

@@ -60,7 +60,7 @@ A crate earns its boundary by being substantial in scope or independent in shape
 - **`wok-render`** - the renderer: a forward pipeline, a single shadow map pass, lighting passes over wok-light's baked and dynamic data, a parametric gradient sky, fog, and post-process. It consumes wok-scene, wok-anim, wok-light, wok-mesh, and wok-content, and the game supplies the render list each frame. Visual commitments:
   - **Banded lighting, authored per scene.** Lighting quantized into discrete bands with smoothstep transitions and rim light for silhouettes. Band count is an authored per-scene value with no upper clamp: low counts (2-8) read as cel, high counts (16+) read as smooth shading. The current authored look is smooth (32 bands); the band machinery, rim, ambient floor, and fog are the mechanism at any count. Terrain uses the same pipeline.
   - **Alpha cutout transparency only.** No sorted blending; water, glass, smoke, and effects use stylized cutout.
-  - **Fog always on.** Fog distance sets render distance; fog colour drives the sky's horizon.
+  - **Fog is a per-scene lighting config, optionally off.** Render distance is the scene's streaming extent (`load_radius`), independent of fog; the sky horizon is the gradient sky's own colour.
   - **Parametric gradient sky.** A horizon-to-zenith gradient from the lighting state, a sun disc, optional stars and a cloud plane; no sky textures.
   - **One shadow map per frame.** The scene or lighting state declares the active shadow source; baked lights bake shadows in, dynamic lights do not cast. Shadow accuracy earns extra Level 3 coverage.
 

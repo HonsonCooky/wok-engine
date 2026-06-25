@@ -28,7 +28,7 @@ use wok_content::ChunkStore;
 use wok_light::LightState;
 use wok_scene::{
     Aabb, CHUNK_GRID_DIM, Chunk, ChunkCoord, ContentLayout, Heightmap, Prefab, PrefabRef, Primitive,
-    VisibleItem,
+    Scene, VisibleItem,
 };
 
 use crate::camera::FlyCamera;
@@ -39,6 +39,10 @@ use crate::render::Gpu;
 /// the shared edge). wok-scene deliberately does not bake the chunk size into ChunkCoord, so this
 /// composition is application policy (the same constant taste derives).
 pub const CHUNK_SIZE_M: f32 = (CHUNK_GRID_DIM - 1) as f32;
+
+/// Render distance used when a scene's manifest cannot be read (the streaming extent is unknown): a
+/// few chunks out, enough to frame the in-memory content the viewport still draws.
+const FALLBACK_RENDER_DISTANCE: f32 = CHUNK_SIZE_M * 3.0;
 
 /// World-space origin of a chunk: its grid coordinate times the chunk size.
 pub fn chunk_origin(coord: ChunkCoord) -> Vec3 {
@@ -56,6 +60,11 @@ pub struct RenderScene {
     /// The scene's light state; the renderer reads it each frame. Loaded at build (a missing or
     /// malformed state falls back to a neutral default rather than failing the viewport).
     pub light: LightState,
+    /// The scene's render distance in metres - its streaming extent (`load_radius` chunks), read
+    /// from the manifest at build. The far plane sits here (see [`far_plane`](Self::far_plane)); it
+    /// no longer derives from fog, which may be off. Persists across a re-derive (the manifest does
+    /// not change without a scene reload).
+    render_distance: f32,
     /// The runtime arrays the viewport draws: visible items (re-derived on edit) and, at build time,
     /// the terrain mesh per chunk (consumed once to upload the GPU terrain, then dropped on a
     /// re-derive). The renderer reads `visible` from here and the terrain from the GPU cache.
@@ -79,7 +88,13 @@ impl RenderScene {
     pub fn build(root: &Path, name: &str, chunks: &[Chunk]) -> RenderScene {
         let layout = ContentLayout::new(root);
         let prefabs = load_prefabs(&layout);
-        let light = load_light(&layout, name);
+        // Read the manifest once for the two things the renderer needs from it - the default
+        // lighting name and the streaming extent (the render distance) - tolerating its absence.
+        let manifest = load_manifest(&layout, name);
+        let light = load_light(&layout, manifest.as_ref());
+        let render_distance = manifest
+            .as_ref()
+            .map_or(FALLBACK_RENDER_DISTANCE, |m| m.default_streaming.render_distance());
 
         let mut store = ChunkStore::new();
         for chunk in chunks {
@@ -95,6 +110,7 @@ impl RenderScene {
             name: name.to_owned(),
             prefabs,
             light,
+            render_distance,
             store,
             terrain_bounds,
             source_chunks: chunks.to_vec(),
@@ -129,9 +145,12 @@ impl RenderScene {
         FlyCamera { position: origin + Vec3::new(half, ground + 12.0, south), yaw: 0.0, pitch: -0.15 }
     }
 
-    /// Fog distance sets render distance (HLD); the far plane sits past full occlusion.
+    /// The far clip distance: the scene's streaming extent (`load_radius` chunks, the farthest
+    /// anything loads), floored so a degenerate zero-radius scene still yields a sane projection.
+    /// Independent of fog now (HLD): a fog-off scene gets a clean cut here, and a fog-on scene
+    /// saturates before it just as it did when the plane was fog-derived.
     pub fn far_plane(&self) -> f32 {
-        (self.light.fog.end * 1.2).max(50.0)
+        self.render_distance.max(50.0)
     }
 
     /// World-space bounds of everything the loaded chunks draw - the cached terrain bounds plus the
@@ -221,16 +240,26 @@ fn load_prefabs(layout: &ContentLayout) -> HashMap<PrefabRef, Prefab> {
     prefabs
 }
 
-/// Load the scene's default light state: read the manifest for its `default_lighting` name, then that
-/// state under `assets/lighting/`. A missing or malformed manifest or state falls back to a neutral
-/// daytime default, so the viewport always has lighting and never fails to open over a content gap.
-fn load_light(layout: &ContentLayout, scene: &str) -> LightState {
-    let manifest = match wok_scene::load_scene(layout.scene_json(scene)) {
-        Ok(manifest) => manifest,
+/// Read the scene manifest (`scene.json`). The build reads it once for the two things the renderer
+/// needs - the default lighting name and the streaming extent (the render distance) - and tolerates
+/// its absence: a missing or malformed manifest returns `None`, and the caller falls back to a
+/// neutral light state and a default render distance so the viewport still opens over a content gap.
+fn load_manifest(layout: &ContentLayout, scene: &str) -> Option<Scene> {
+    match wok_scene::load_scene(layout.scene_json(scene)) {
+        Ok(manifest) => Some(manifest),
         Err(err) => {
-            eprintln!("wok: scene manifest did not load for lighting, using default: {err}");
-            return LightState::default();
+            eprintln!("wok: scene manifest did not load, using defaults: {err}");
+            None
         }
+    }
+}
+
+/// The scene's default light state: read `manifest`'s `default_lighting` name, then that state under
+/// `assets/lighting/`. A missing manifest or a missing/malformed state falls back to a neutral
+/// daytime default, so the viewport always has lighting and never fails to open over a content gap.
+fn load_light(layout: &ContentLayout, manifest: Option<&Scene>) -> LightState {
+    let Some(manifest) = manifest else {
+        return LightState::default();
     };
     let name = manifest.default_lighting.as_str();
     match wok_light::load_light_state(layout.lighting(name)) {
@@ -372,6 +401,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::float_cmp)]
     #[test]
     fn build_derives_the_visible_items_and_a_finite_shadow_region() {
         let root = unique_temp_root();
@@ -386,7 +416,10 @@ mod tests {
         let (_, runtime) = scene.store.iter_loaded().next().expect("the one chunk is loaded");
         assert_eq!(runtime.visible.len(), 1, "the block prefab's one visible shape");
         assert!(scene.scene_bounds().min.is_finite() && scene.scene_bounds().max.is_finite());
+        // The far plane is the streaming extent (seed_content's load_radius 3 x 128m), not derived
+        // from fog - the decoupling.
         assert!(scene.far_plane() >= 50.0);
+        assert_eq!(scene.far_plane(), 3.0 * CHUNK_SIZE_M);
         // The god-cam spawns above the scene, finite and looking down a little.
         let cam = scene.spawn_camera();
         assert!(cam.position.is_finite() && cam.pitch < 0.0);
