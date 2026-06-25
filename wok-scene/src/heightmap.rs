@@ -29,6 +29,11 @@ pub const CHUNK_GRID_DIM: usize = 129;
 /// Total samples in a chunk grid (`CHUNK_GRID_DIM` squared); the length both grids must have.
 pub const CHUNK_GRID_LEN: usize = CHUNK_GRID_DIM * CHUNK_GRID_DIM;
 
+/// A chunk's side length in metres. The grid is `CHUNK_GRID_DIM` samples at 1m spacing, so the
+/// span is one less than the sample count (the last sample is the shared edge with the next
+/// chunk): 128m. The engine's canonical chunk size; streaming extents derive from it.
+pub const CHUNK_SIZE_M: f32 = (CHUNK_GRID_DIM - 1) as f32;
+
 /// Lowest height a raw `0` maps to, in metres.
 pub const HEIGHT_MIN_M: f32 = -32.0;
 

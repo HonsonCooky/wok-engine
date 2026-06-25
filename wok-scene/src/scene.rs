@@ -32,6 +32,16 @@ pub struct StreamingDefaults {
     pub default_eagerness: crate::chunk::Eagerness,
 }
 
+impl StreamingDefaults {
+    /// The scene's render distance in metres: the streaming extent, `load_radius` chunks out at the
+    /// engine's [`CHUNK_SIZE_M`](crate::CHUNK_SIZE_M) chunk size. This is the far bound of what the
+    /// scene loads, so it is the natural far-plane distance - there is nothing to draw past it - and
+    /// it is independent of fog: a scene may run with fog off and still bound its draw here.
+    pub fn render_distance(&self) -> f32 {
+        self.load_radius as f32 * crate::CHUNK_SIZE_M
+    }
+}
+
 /// The scene manifest.
 ///
 /// `next_instance_id` is the per-scene monotonic counter that `allocate_instance_id` advances.
@@ -114,6 +124,14 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: StreamingDefaults = serde_json::from_str(&json).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn render_distance_is_load_radius_times_chunk_size() {
+        let s = StreamingDefaults { load_radius: 4, default_eagerness: Eagerness::Eager };
+        assert_eq!(s.render_distance(), 4.0 * crate::CHUNK_SIZE_M);
+        assert_eq!(s.render_distance(), 512.0); // 4 chunks x 128m
     }
 
     // ---- Scene ----

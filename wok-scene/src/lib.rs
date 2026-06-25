@@ -34,7 +34,8 @@ pub mod watch;
 pub use chunk::{Chunk, ChunkCoord, ChunkStreaming, Eagerness, Placement};
 pub use error::{LoadError, SaveError};
 pub use heightmap::{
-    CHUNK_GRID_DIM, CHUNK_GRID_LEN, HEIGHT_MAX_M, HEIGHT_MIN_M, Heightmap, HeightmapError,
+    CHUNK_GRID_DIM, CHUNK_GRID_LEN, CHUNK_SIZE_M, HEIGHT_MAX_M, HEIGHT_MIN_M, Heightmap,
+    HeightmapError,
 };
 pub use heightmap_io::{load_heightmap, save_heightmap};
 pub use io::{load_chunk, load_prefab, load_scene, save_chunk, save_prefab, save_scene};
