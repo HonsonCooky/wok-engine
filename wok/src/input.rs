@@ -192,6 +192,7 @@ mod tests {
         InputState {
             keys_held: HashSet::new(),
             keys_pressed: HashSet::new(),
+            keys_repeating: HashSet::new(),
             keys_released: HashSet::new(),
             mouse_pos: (0.0, 0.0),
             mouse_delta: (0.0, 0.0),

@@ -23,10 +23,11 @@
 //!   while `f` is held - see [`Outcome::consumed_scroll`]); a scroll with the cursor still holds the
 //!   XZ, so the placement rises and lowers straight up in world space, not along the view (which a
 //!   re-read of the cursor on the new height plane would pull toward the camera).
-//! - Rotate (`w` / `e` / `r`): keyboard-only discrete taps, no mouse and no chords. Each press turns the
-//!   selection 5deg about a world axis - W pitch (X), E yaw (Y), R roll (Z) - reversed with Shift. One
-//!   tap is one committed step (not a hold, no Esc-cancel); the press edge swallows OS auto-repeat, so
-//!   holding a key does not spin - large turns are repeated taps or the inspector's Rot fields.
+//! - Rotate (`w` / `e` / `r`): keyboard-only discrete taps, no mouse and no chords. Each step turns the
+//!   selection 5deg about a world axis - W pitch (X), E yaw (Y), R roll (Z) - reversed with Shift. A key
+//!   fires on its press edge or an OS auto-repeat while held, so a quick tap is one committed step and a
+//!   hold repeats at the OS rate after the OS initial delay (the tap-vs-hold split comes free from that
+//!   delay). Not a hold and not cancellable - each step is committed live.
 //! - Scale (`s`): held + mouse, the remaining hold op - no axis scales uniformly, `x` / `y` / `z`
 //!   scales that one component, from raw horizontal mouse motion.
 //!
@@ -34,8 +35,8 @@
 //! chords and no Alt on move (the Voyager cannot reach them; a reachable snap-off toggle is a later
 //! bite). A hold ends on op-key-up (the edit is already committed) and Esc cancels it (restores the
 //! captured transform, keeps the selection); a rotate tap is immediate, with nothing to cancel. Keys
-//! read through `char_held`, the rotate taps through `char_pressed`, so they are rebindable later (table
-//! parked). Every change routes through the edit seam: [`update`] returns an
+//! read through `char_held`, the rotate taps through `char_pressed` / `char_repeating`, so they are
+//! rebindable later (table parked). Every change routes through the edit seam: [`update`] returns an
 //! [`Action::SetInstanceTransform`](crate::action::Action) the frame loop applies through
 //! `crate::action::handle`, exactly as the inspector's fields do; [`LoadedScene::set_transform`] no-ops
 //! an unchanged transform, so emitting the full transform every held frame is free.
@@ -392,10 +393,11 @@ fn current_op(f: &Inputs) -> Option<Op> {
 }
 
 /// A discrete rotate tap this frame, if any: one [`ROTATE_STEP_DEG`] step about the world axis named by
-/// a W / E / R press (pitch / yaw / roll), reversed with Shift. Keyboard-only and one-shot - no hold,
-/// no cancel; the press edge (`char_pressed`, OS auto-repeat swallowed) makes one tap exactly one step,
-/// so holding a key does not spin. `None` when no rotate key edged this frame or the selection or its
-/// placement does not resolve. The caller has already gated it (`hold_allowed`).
+/// a W / E / R key (pitch / yaw / roll), reversed with Shift. Keyboard-only, no mouse and no chords. A
+/// key fires on its press edge or an OS auto-repeat while held, so a quick tap is one step and a hold
+/// repeats at the OS rate after the OS initial delay (Shift is read each fire, so it reverses mid-hold).
+/// `None` when no rotate key fired this frame or the selection or its placement does not resolve. The
+/// caller has already gated it (`hold_allowed`).
 fn rotate_tap(f: &Inputs) -> Option<Action> {
     let axis = tapped_axis(f)?;
     let id = f.selection?;
@@ -404,18 +406,25 @@ fn rotate_tap(f: &Inputs) -> Option<Action> {
     Some(Action::SetInstanceTransform(id, rotate_step(base, axis, degrees)))
 }
 
-/// The world axis a rotate tap names this frame (W pitch X, E yaw Y, R roll Z; first match wins when
-/// several edge the same frame), or `None` when no rotate key was pressed.
+/// The world axis a rotate tap fires this frame (W pitch X, E yaw Y, R roll Z; first match wins when
+/// several fire the same frame), or `None` when no rotate key did. A key fires on its press edge or an
+/// OS auto-repeat (`char_pressed || char_repeating`): a quick tap is one step, and holding a key spins
+/// at the OS repeat rate after the OS initial delay (which gives the tap-vs-hold split for free).
 fn tapped_axis(f: &Inputs) -> Option<Axis> {
-    if f.input.char_pressed(ROTATE_PITCH_KEY) {
+    if rotate_key_fired(f, ROTATE_PITCH_KEY) {
         Some(Axis::X)
-    } else if f.input.char_pressed(ROTATE_YAW_KEY) {
+    } else if rotate_key_fired(f, ROTATE_YAW_KEY) {
         Some(Axis::Y)
-    } else if f.input.char_pressed(ROTATE_ROLL_KEY) {
+    } else if rotate_key_fired(f, ROTATE_ROLL_KEY) {
         Some(Axis::Z)
     } else {
         None
     }
+}
+
+/// Whether a rotate key steps this frame: its press edge, or an OS auto-repeat while held.
+fn rotate_key_fired(f: &Inputs, key: char) -> bool {
+    f.input.char_pressed(key) || f.input.char_repeating(key)
 }
 
 /// The world-axis constraint for an op this frame: the X / Y / Z key for scale (first match wins when

@@ -143,6 +143,7 @@ mod tests {
         InputState {
             keys_held: held.iter().map(|s| Key::Character((*s).into())).collect(),
             keys_pressed,
+            keys_repeating: HashSet::new(),
             keys_released: HashSet::new(),
             mouse_pos: (0.0, 0.0),
             mouse_delta: (0.0, 0.0),

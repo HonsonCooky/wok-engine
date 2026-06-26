@@ -7,6 +7,10 @@ use winit::keyboard::{Key, NamedKey};
 pub struct InputState {
     pub keys_held: HashSet<Key>,
     pub keys_pressed: HashSet<Key>,
+    /// Keys the OS auto-repeated this frame (a held key past the initial repeat delay). Kept separate
+    /// from `keys_pressed`, which stays a clean one-per-press edge so menus and shortcuts never
+    /// double-fire; hold-to-repeat actions read the two together (press-or-repeat). Cleared each frame.
+    pub keys_repeating: HashSet<Key>,
     pub keys_released: HashSet<Key>,
     pub mouse_pos: (f64, f64),
     /// Cursor-position-derived delta. Goes to zero when the cursor is locked. Use
@@ -61,6 +65,26 @@ impl InputState {
         })
     }
 
+    /// Was a printable character key OS-auto-repeated this frame (a held key past the initial delay)?
+    /// Separate from [`char_pressed`](Self::char_pressed), which stays a clean one-per-press edge: a
+    /// hold-to-repeat action fires on `char_pressed(k) || char_repeating(k)`, so a quick tap (released
+    /// before the first repeat) is one step and a hold spins at the OS repeat rate after the OS delay.
+    /// Same case-insensitive match as [`char_pressed`](Self::char_pressed).
+    #[must_use]
+    pub fn char_repeating(&self, ch: char) -> bool {
+        self.keys_repeating.iter().any(|k| match k {
+            Key::Character(s) => s.chars().any(|c| c.eq_ignore_ascii_case(&ch)),
+            _ => false,
+        })
+    }
+
+    /// Was this named key OS-auto-repeated this frame? The named-key counterpart to
+    /// [`char_repeating`](Self::char_repeating).
+    #[must_use]
+    pub fn key_repeating(&self, key: NamedKey) -> bool {
+        self.keys_repeating.contains(&Key::Named(key))
+    }
+
     #[must_use]
     pub fn mouse_held(&self, button: MouseButton) -> bool {
         self.mouse_buttons_held.contains(&button)
@@ -94,6 +118,7 @@ pub struct GamepadState {
 pub struct InputCollector {
     keys_held: HashSet<Key>,
     keys_pressed: HashSet<Key>,
+    keys_repeating: HashSet<Key>,
     keys_released: HashSet<Key>,
     mouse_pos: (f64, f64),
     prev_mouse_pos: (f64, f64),
@@ -119,6 +144,7 @@ impl InputCollector {
         Self {
             keys_held: HashSet::new(),
             keys_pressed: HashSet::new(),
+            keys_repeating: HashSet::new(),
             keys_released: HashSet::new(),
             mouse_pos: (0.0, 0.0),
             prev_mouse_pos: (0.0, 0.0),
@@ -137,7 +163,7 @@ impl InputCollector {
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
-                self.key_input(event.logical_key.clone(), event.state);
+                self.key_input(event.logical_key.clone(), event.state, event.repeat);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = (position.x, position.y);
@@ -166,11 +192,17 @@ impl InputCollector {
     }
 
     /// One keyboard transition, split from the winit event so the edge/held logic is unit-testable
-    /// (winit's `KeyEvent` carries a private platform field and cannot be built in a test). A press
-    /// edges `keys_pressed` only when the key was not already held - which is what swallows OS
-    /// auto-repeat - while a release always drops the held entry and edges `keys_released`.
-    fn key_input(&mut self, key: Key, state: ElementState) {
+    /// (winit's `KeyEvent` carries a private platform field and cannot be built in a test). `repeat` is
+    /// winit's OS-auto-repeat flag. A first press (`repeat` false) edges `keys_pressed` and marks the
+    /// key held; an OS repeat (`repeat` true) edges only `keys_repeating`, leaving `keys_pressed` a
+    /// clean one-per-press edge (so menus and shortcuts never double-fire) while hold-to-repeat actions
+    /// can read the repeat. A release drops the held entry and edges `keys_released`. The held-set
+    /// guard also swallows any stray non-repeat press of an already-held key.
+    fn key_input(&mut self, key: Key, state: ElementState, repeat: bool) {
         match state {
+            ElementState::Pressed if repeat => {
+                self.keys_repeating.insert(key);
+            }
             ElementState::Pressed => {
                 if self.keys_held.insert(key.clone()) {
                     self.keys_pressed.insert(key);
@@ -277,6 +309,7 @@ impl InputCollector {
         let state = InputState {
             keys_held: self.keys_held.clone(),
             keys_pressed: self.keys_pressed.clone(),
+            keys_repeating: self.keys_repeating.clone(),
             keys_released: self.keys_released.clone(),
             mouse_pos: self.mouse_pos,
             mouse_delta,
@@ -290,6 +323,7 @@ impl InputCollector {
 
         // Clear per-frame state
         self.keys_pressed.clear();
+        self.keys_repeating.clear();
         self.keys_released.clear();
         self.mouse_buttons_pressed.clear();
         self.mouse_buttons_released.clear();
@@ -319,7 +353,7 @@ mod tests {
     #[test]
     fn a_press_edges_pressed_once_then_the_key_is_only_held() {
         let mut c = InputCollector::new();
-        c.key_input(key("w"), ElementState::Pressed);
+        c.key_input(key("w"), ElementState::Pressed, false);
 
         let frame = c.snapshot();
         assert!(frame.keys_pressed.contains(&key("w")), "the press frame edges pressed");
@@ -331,16 +365,24 @@ mod tests {
     }
 
     #[test]
-    fn os_auto_repeat_never_re_edges_a_held_key() {
+    fn os_auto_repeat_populates_repeating_not_pressed() {
         let mut c = InputCollector::new();
-        c.key_input(key("w"), ElementState::Pressed);
+        c.key_input(key("w"), ElementState::Pressed, false);
         let _ = c.snapshot();
 
-        // Holding a key makes the OS deliver further Pressed events; they must not edge again.
-        c.key_input(key("w"), ElementState::Pressed);
+        // Holding a key makes the OS deliver repeat events (repeat = true): they surface as
+        // keys_repeating for hold-to-repeat, but never re-edge keys_pressed, so menus and shortcuts do
+        // not double-fire. The key stays held throughout.
+        c.key_input(key("w"), ElementState::Pressed, true);
         let frame = c.snapshot();
         assert!(frame.keys_pressed.is_empty(), "a repeat is not a new press");
-        assert!(frame.keys_held.contains(&key("w")));
+        assert!(!frame.char_pressed('w'), "and char_pressed stays a clean one-per-press edge");
+        assert!(frame.keys_repeating.contains(&key("w")), "the repeat edges keys_repeating");
+        assert!(frame.char_repeating('w'), "and char_repeating, case-insensitively");
+        assert!(frame.keys_held.contains(&key("w")), "the key is still held");
+
+        // The repeating edge lasts exactly one frame, like pressed.
+        assert!(!c.snapshot().char_repeating('w'), "the repeat edge clears next frame");
     }
 
     #[test]
@@ -349,7 +391,7 @@ mod tests {
         // for exactly one frame, char_held tracks the key while it is down, and both match the typed
         // letter regardless of case (shift / caps lock).
         let mut c = InputCollector::new();
-        c.key_input(key("r"), ElementState::Pressed);
+        c.key_input(key("r"), ElementState::Pressed, false);
 
         let frame = c.snapshot();
         assert!(frame.char_pressed('r'), "the press frame edges char_pressed");
@@ -360,17 +402,17 @@ mod tests {
         assert!(!next.char_pressed('r'), "the pressed edge lasts exactly one frame");
         assert!(next.char_held('R'), "held persists until release, case-insensitively");
 
-        c.key_input(key("r"), ElementState::Released);
+        c.key_input(key("r"), ElementState::Released, false);
         assert!(!c.snapshot().char_held('r'), "held clears on release");
     }
 
     #[test]
     fn a_release_edges_released_for_one_frame_and_clears_held() {
         let mut c = InputCollector::new();
-        c.key_input(Key::Named(NamedKey::Space), ElementState::Pressed);
+        c.key_input(Key::Named(NamedKey::Space), ElementState::Pressed, false);
         let _ = c.snapshot();
 
-        c.key_input(Key::Named(NamedKey::Space), ElementState::Released);
+        c.key_input(Key::Named(NamedKey::Space), ElementState::Released, false);
         let frame = c.snapshot();
         assert!(frame.key_released(NamedKey::Space), "the release frame edges released");
         assert!(!frame.key_held(NamedKey::Space), "held clears on release");
