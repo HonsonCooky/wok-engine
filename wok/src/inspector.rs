@@ -14,18 +14,20 @@
 //! Identity (Name) and the linear transform (Pos, Scale) edit through the same single-writer edit seam
 //! (`crate::action`, `crate::loaded`): an edit dirties the scene and persists on Save. Name is a
 //! `TextEdit` committing a rename (`SetInstanceName`) on blur or Enter; Pos and Scale are `DragValue`s
-//! emitting `SetInstanceTransform` on change - the precise authoring path, exact typed or dragged values
-//! with no grid snap. Rotation is a READ-ONLY orientation readout (its YXZ Euler degrees): the W / E / R
-//! rotate taps (`crate::gizmo`) spin the placement's quaternion, which has no clean per-axis Euler once
-//! it is compound, so the row reports orientation rather than editing it - single-axis spins read clean,
-//! compound shows the true value as honest feedback. Rotation is authored via the taps, not here.
+//! emitting `SetInstanceTransform` on change - the precise authoring path. The TRANSFORM section is laid
+//! out for a steady panel: Position is three even-spaced editable X/Y/Z cells; Scale is a single value
+//! when uniform (the common case, editing all three together) and an even X/Y/Z triplet otherwise; and
+//! every number is fixed at two decimals in a monospace cell, so the panel never resizes as values
+//! change. Rotation is a READ-ONLY axis-angle readout (`<angle>deg about (x, y, z)`): the W / E / R
+//! rotate taps (`crate::gizmo`) spin the placement's quaternion, which axis-angle shows readably (the
+//! Euler readout it replaces was lossy and ambiguous, the source of the messy numbers) - a single-axis
+//! spin reads a clean angle, a compound one reads honestly. Rotation is authored via the taps, not here.
 
 use glam::{Quat, Vec3};
 
 use wok_scene::{InstanceId, Transform};
 
 use crate::action::Action;
-use crate::euler::euler_xyz_degrees;
 use crate::loaded::LoadedScene;
 use crate::model::Model;
 use crate::theme;
@@ -49,17 +51,25 @@ const AXIS_X: egui::Color32 = egui::Color32::from_rgb(0xd8, 0x53, 0x4a);
 const AXIS_Y: egui::Color32 = egui::Color32::from_rgb(0x5b, 0xbd, 0x5b);
 const AXIS_Z: egui::Color32 = egui::Color32::from_rgb(0x4a, 0x86, 0xd8);
 
+/// The axis letters and their tints, in X/Y/Z order - the per-component cells of the Pos and Scale rows.
+const AXES: [(&str, egui::Color32); 3] = [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AXIS_Z)];
+
 /// `DragValue` drag sensitivity for the linear transform fields (Pos and Scale), in units per point of
 /// pointer travel. Fine on purpose: the inspector is the precise path, so a drag nudges by hundredths
-/// and a typed value is the way to jump far. No grid snap here (the 1m / 5deg snapping is the future
-/// viewport-gizmo bite).
+/// and a typed value is the way to jump far. No grid snap here (the 1m / 5deg snapping is the gizmo's).
 const LINEAR_DRAG_SPEED: f64 = 0.01;
 
-/// The most decimal places the transform readouts show: the Pos / Scale `DragValue`s, and the read-only
-/// Rot row's degrees (via [`fmt_deg`]). Caps the float noise the Euler decomposition leaves in the Rot
-/// readout so it reads clean, while still showing typed precision to three places on Pos / Scale.
-/// Display only - the stored transform keeps full `f32` precision.
-const MAX_DECIMALS: usize = 3;
+/// Decimal places for every TRANSFORM number, fixed (not a max), so the panel width never changes as
+/// values change. Display only - the stored transform keeps full `f32` precision.
+const DECIMALS: usize = 2;
+
+/// The leading-label width (points) of a TRANSFORM row, so the value cells line up across Pos / Rot /
+/// Scale whatever the label's length.
+const ROW_LABEL_WIDTH: f32 = 38.0;
+
+/// Half the smallest 2dp step: a value within this of zero rounds to `0.00`, so [`fmt2`] folds it to a
+/// clean unsigned zero (no stray `-0.00`) and the axis-angle readout treats it as identity.
+const ZERO_FOLD: f32 = 0.005;
 
 /// The boundary line that closes the inspector, **verbatim** (editor-design.md / handoff view 1): the
 /// editor authors space, physical properties, and identity only - never a gameplay property bag - so
@@ -107,17 +117,15 @@ pub fn floating(
                 ui.end_row();
             });
 
-            // TRANSFORM: position and scale as editable X/Y/Z DragValue triplets (an edit folds the
-            // changed field into the whole transform and emits SetInstanceTransform through the same seam
-            // the Name field uses), and rotation as a read-only X/Y/Z orientation readout (YXZ Euler
-            // degrees) - rotation is authored via the W/E/R gizmo taps, so the inspector only reports it.
+            // TRANSFORM: Position (even editable X/Y/Z cells) and Scale (one value when uniform, else the
+            // X/Y/Z triplet) commit through the edit seam the Name field uses; Rotation is a read-only
+            // axis-angle readout (authored via the W/E/R gizmo taps). Each row is its own labelled line so
+            // the value cells stay even and fixed-width - the panel does not resize as values change.
             section(ui, "TRANSFORM");
             let t = placement.transform;
-            egui::Grid::new("inspector_transform").num_columns(7).spacing([6.0, 4.0]).show(ui, |ui| {
-                vec3_row(ui, "Pos", id, t.translation, |v| Transform { translation: v, ..t }, actions);
-                rot_row(ui, t.rotation);
-                vec3_row(ui, "Scale", id, t.scale, |v| Transform { scale: v, ..t }, actions);
-            });
+            pos_row(ui, id, t, actions);
+            rot_row(ui, t.rotation);
+            scale_row(ui, id, t, actions);
 
             ui.add_space(8.0);
             ui.label(egui::RichText::new(BOUNDARY).small().italics().color(p.text_dim));
@@ -161,101 +169,154 @@ fn name_edit(ui: &mut egui::Ui, id: InstanceId, current: &str, actions: &mut Vec
     }
 }
 
-/// One linear transform row (Pos or Scale) in the TRANSFORM grid: the dim row label, then three
-/// axis-tinted letter + `DragValue` pairs over the components of `value`. On any field's change it folds
-/// the edited vector back into the whole transform through `rebuild` and emits a single
-/// [`Action::SetInstanceTransform`]; an untouched row emits nothing. The values bind to the stored
-/// component each frame (no scratch needed - a linear component has one display), so a live drag tracks
-/// the placement as the frame loop applies it. Ends the grid row.
-fn vec3_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    id: InstanceId,
-    value: Vec3,
-    rebuild: impl Fn(Vec3) -> Transform,
-    actions: &mut Vec<Action>,
-) {
-    let p = theme::palette(ui.ctx());
-    ui.label(egui::RichText::new(label).color(p.text_dim));
+/// One TRANSFORM row's leading label (Pos / Rot / Scale): a dim cell of fixed width, so the value cells
+/// line up across the rows whatever the label's length.
+fn row_label(ui: &mut egui::Ui, label: &str) {
+    let dim = theme::palette(ui.ctx()).text_dim;
+    let size = egui::vec2(ROW_LABEL_WIDTH, ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.label(egui::RichText::new(label).color(dim));
+    });
+}
+
+/// Lay out a vector's three components as even-width editable cells across the row's remaining width -
+/// each an axis-tinted letter and a monospace fixed-2dp `DragValue` hugging it - and return the edited
+/// vector with whether any cell changed. Even cells (and fixed decimals) keep the panel width steady as
+/// the values change. Shared by the Pos row and the non-uniform Scale row.
+fn axis_cells(ui: &mut egui::Ui, value: Vec3) -> (Vec3, bool) {
+    let gap = ui.spacing().item_spacing.x;
+    let size = egui::vec2((ui.available_width() - 2.0 * gap) / 3.0, ui.spacing().interact_size.y);
     let mut v = value;
     let mut changed = false;
-    for (i, (letter, color)) in [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AXIS_Z)].iter().enumerate() {
-        ui.label(egui::RichText::new(*letter).strong().color(*color));
-        let dv = egui::DragValue::new(&mut v[i]).speed(LINEAR_DRAG_SPEED).max_decimals(MAX_DECIMALS);
-        changed |= ui.add(dv).changed();
+    for (i, (letter, color)) in AXES.iter().enumerate() {
+        ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.label(egui::RichText::new(*letter).strong().color(*color));
+            ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+            let dv = egui::DragValue::new(&mut v[i]).speed(LINEAR_DRAG_SPEED).fixed_decimals(DECIMALS);
+            changed |= ui.add(dv).changed();
+        });
     }
-    if changed {
-        actions.push(Action::SetInstanceTransform(id, rebuild(v)));
-    }
-    ui.end_row();
+    (v, changed)
 }
 
-/// The rotation row in the TRANSFORM grid: the same axis-tinted X/Y/Z triplet, but a READ-ONLY readout
-/// of the placement's orientation rather than an editable field. Rotation is authored by the gizmo's
-/// W / E / R taps (`crate::gizmo`), which spin the stored quaternion; a compound quaternion has no clean
-/// per-axis Euler, so the inspector reports the orientation instead of editing it. The display is the
-/// quaternion decomposed to `[X, Y, Z]` YXZ Euler degrees ([`euler_xyz_degrees`]), each tidied
-/// ([`tidy_zero`] folds the decomposition's sub-milli noise and signed zeros to a clean `0`) and shown
-/// to [`MAX_DECIMALS`] with trailing zeros trimmed ([`fmt_deg`]) - so a single-axis spin reads a clean
-/// multiple of 5 and a compound one reads its true (non-round) value. Ends the grid row.
+/// The Position row: the three translation components as even editable cells, committed through the edit
+/// seam as a whole transform on any change.
+fn pos_row(ui: &mut egui::Ui, id: InstanceId, t: Transform, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        row_label(ui, "Pos");
+        let (v, changed) = axis_cells(ui, t.translation);
+        if changed {
+            actions.push(Action::SetInstanceTransform(id, Transform { translation: v, ..t }));
+        }
+    });
+}
+
+/// The Scale row: a single editable value when the scale is uniform (the common case - editing it sets
+/// all three components together), else the even X/Y/Z editable cells. Committed through the edit seam.
+fn scale_row(ui: &mut egui::Ui, id: InstanceId, t: Transform, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        row_label(ui, "Scale");
+        if is_uniform(t.scale) {
+            let mut s = t.scale.x;
+            let changed = ui
+                .scope(|ui| {
+                    ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+                    let dv = egui::DragValue::new(&mut s).speed(LINEAR_DRAG_SPEED).fixed_decimals(DECIMALS);
+                    ui.add(dv).changed()
+                })
+                .inner;
+            if changed {
+                actions.push(Action::SetInstanceTransform(id, Transform { scale: Vec3::splat(s), ..t }));
+            }
+        } else {
+            let (v, changed) = axis_cells(ui, t.scale);
+            if changed {
+                actions.push(Action::SetInstanceTransform(id, Transform { scale: v, ..t }));
+            }
+        }
+    });
+}
+
+/// The Rotation row: a READ-ONLY axis-angle readout of the placement's quaternion (authored by the
+/// gizmo's W / E / R taps). Axis-angle, not Euler, because Euler is lossy and ambiguous (the source of
+/// the old messy numbers); a single-axis spin reads a clean angle about a unit axis, a compound one
+/// reads honestly. Dim and monospace, laid over two lines - the angle then the axis tuple - so the tuple
+/// never breaks mid-way and the panel width stays steady.
 fn rot_row(ui: &mut egui::Ui, rotation: Quat) {
-    let p = theme::palette(ui.ctx());
-    let deg = euler_xyz_degrees(rotation).map(tidy_zero);
-    ui.label(egui::RichText::new("Rot").color(p.text_dim));
-    for (i, (letter, color)) in [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AXIS_Z)].iter().enumerate() {
-        ui.label(egui::RichText::new(*letter).strong().color(*color));
-        ui.label(egui::RichText::new(fmt_deg(deg[i])).color(p.text));
-    }
-    ui.end_row();
+    let dim = theme::palette(ui.ctx()).text_dim;
+    let text = axis_angle_text(rotation);
+    ui.horizontal(|ui| {
+        row_label(ui, "Rot");
+        ui.vertical(|ui| {
+            // Break before the axis tuple ("<angle>deg about" then "(x, y, z)"), so the tuple stays whole.
+            let (angle, axis) = text.split_once(" (").unwrap_or((text.as_str(), ""));
+            ui.label(egui::RichText::new(angle).monospace().color(dim));
+            if !axis.is_empty() {
+                ui.label(egui::RichText::new(format!("({axis}")).monospace().color(dim));
+            }
+        });
+    });
 }
 
-/// Tidy a rotation degree for display: a magnitude below a thousandth (the float noise a `Quat -> Euler`
-/// decomposition leaves, and a signed zero) reads as a clean positive `0.0`. Applied only to the
-/// canonical decomposition that seeds the Rot fields, never to a value mid-edit, so it cleans the
-/// readout without ever snapping what the user is dragging or typing. (The linear Pos / Scale fields
-/// store their values cleanly and need no such tidy.)
-fn tidy_zero(v: f32) -> f32 {
-    if v.abs() < 1e-3 { 0.0 } else { v }
+/// Whether all three components are equal - the uniform-scale case the Scale row shows as one value.
+/// Exact equality is intended: a uniform scale is authored via one value (set as `splat`), so its
+/// components are bit-equal; a scale that merely sits close is genuinely non-uniform and shows the
+/// triplet, never silently collapsed to one editable value that would rewrite the other two.
+#[allow(clippy::float_cmp)]
+fn is_uniform(v: Vec3) -> bool {
+    v.x == v.y && v.y == v.z
 }
 
-/// Format a rotation degree for the read-only Rot readout: up to [`MAX_DECIMALS`] places with trailing
-/// zeros (and a bare decimal point) trimmed, so a single-axis spin reads `45` rather than `45.000`
-/// while a compound one keeps its true `13.752`. Pairs with [`tidy_zero`], which has already folded
-/// near-zero noise to a clean `0`. An integer's own zeros sit left of the point, so the trim leaves them.
-fn fmt_deg(v: f32) -> String {
-    let s = format!("{:.*}", MAX_DECIMALS, v);
-    s.trim_end_matches('0').trim_end_matches('.').to_owned()
+/// Format a transform number at fixed [`DECIMALS`] places, folding a value that rounds to zero to a
+/// clean unsigned `0` (so a near-zero never reads `-0.00`). Display only - the stored f32 keeps full
+/// precision. Used by the read-only axis-angle readout; the editable `DragValue`s fix their own decimals.
+fn fmt2(v: f32) -> String {
+    let v = if v.abs() < ZERO_FOLD { 0.0 } else { v };
+    format!("{:.*}", DECIMALS, v)
+}
+
+/// The read-only rotation readout: the placement's quaternion as `<angle>deg about (x, y, z)` at fixed
+/// 2dp, the axis being the unit rotation axis. A near-zero angle (identity, or `to_axis_angle`'s
+/// degenerate fallback) reads `0.00deg about (0.00, 0.00, 0.00)` rather than an arbitrary axis. Pure, so
+/// the format is unit tested.
+fn axis_angle_text(rotation: Quat) -> String {
+    let (axis, angle) = rotation.to_axis_angle();
+    let deg = angle.to_degrees();
+    let axis = if deg.abs() < ZERO_FOLD { Vec3::ZERO } else { axis };
+    format!("{}deg about ({}, {}, {})", fmt2(deg), fmt2(axis.x), fmt2(axis.y), fmt2(axis.z))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn approx(actual: [f32; 3], expected: [f32; 3]) {
-        for (a, e) in actual.iter().zip(expected.iter()) {
-            assert!((a - e).abs() < 1e-3, "got {actual:?}, expected {expected:?}");
-        }
+    #[test]
+    fn fmt2_formats_at_two_decimals_and_folds_negative_zero() {
+        // Every TRANSFORM number is fixed at 2dp; a value that rounds to zero reads a clean unsigned
+        // 0.00 (never a stray -0.00), and other values round to 2 places.
+        assert_eq!(fmt2(1.5), "1.50");
+        assert_eq!(fmt2(-3.0), "-3.00");
+        assert_eq!(fmt2(12.0), "12.00");
+        assert_eq!(fmt2(0.0), "0.00");
+        assert_eq!(fmt2(-0.001), "0.00", "a near-zero folds, so it never reads -0.00");
+        assert_eq!(fmt2(0.126), "0.13", "rounds to 2dp");
     }
 
     #[test]
-    fn tidy_zero_reads_noise_and_signed_zero_as_clean_zero() {
-        // The Rot seed runs through this so the decomposition's float noise and a signed zero read as a
-        // clean positive 0.0, while real angles pass through. Bit-compared on the zeros so the
-        // positive-zero is exact (a plain `== 0.0` would also accept `-0.0`).
-        assert_eq!(tidy_zero(-0.0).to_bits(), 0.0_f32.to_bits());
-        assert_eq!(tidy_zero(0.0004).to_bits(), 0.0_f32.to_bits());
-        approx([tidy_zero(45.0), tidy_zero(-3.0), tidy_zero(0.0)], [45.0, -3.0, 0.0]);
+    fn axis_angle_text_reads_the_quaternion_readably() {
+        // The read-only rotation readout: a single-axis spin reads a clean angle about a unit axis, and
+        // identity reads a zero angle about a zero axis (not to_axis_angle's arbitrary fallback).
+        assert_eq!(axis_angle_text(Quat::from_rotation_y(45.0_f32.to_radians())), "45.00deg about (0.00, 1.00, 0.00)");
+        assert_eq!(axis_angle_text(Quat::from_rotation_x(90.0_f32.to_radians())), "90.00deg about (1.00, 0.00, 0.00)");
+        assert_eq!(axis_angle_text(Quat::IDENTITY), "0.00deg about (0.00, 0.00, 0.00)");
     }
 
     #[test]
-    fn fmt_deg_trims_to_a_clean_readout() {
-        // The read-only Rot readout: a clean spin drops its trailing zeros, a compound one keeps its
-        // value to MAX_DECIMALS, an integer keeps its own zeros, and a tidied zero reads "0".
-        assert_eq!(fmt_deg(45.0), "45");
-        assert_eq!(fmt_deg(-3.0), "-3");
-        assert_eq!(fmt_deg(13.752), "13.752");
-        assert_eq!(fmt_deg(13.75), "13.75");
-        assert_eq!(fmt_deg(100.0), "100");
-        assert_eq!(fmt_deg(0.0), "0");
+    fn is_uniform_detects_equal_scale_components() {
+        // The Scale row shows one value when uniform, the X/Y/Z triplet otherwise.
+        assert!(is_uniform(Vec3::splat(1.5)));
+        assert!(is_uniform(Vec3::ONE));
+        assert!(!is_uniform(Vec3::new(1.0, 2.0, 1.0)));
+        assert!(!is_uniform(Vec3::new(1.0, 1.0, 1.5)));
     }
 }

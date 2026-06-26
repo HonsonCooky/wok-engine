@@ -335,9 +335,10 @@ fn chrome_instances_flat_snapshot() {
 /// An instance selected from the tree: "the landmark oak" (id 1) is selected directly on the model,
 /// so its row in the grouped tree carries the full-bleed accent highlight and the floating inspector
 /// shows it - IDENTITY (the editable Name field showing the current name, the `oak_tree` prefab, the
-/// `0x00000001` id) and TRANSFORM (the editable Pos and Scale DragValues, and the read-only Rot readout
-/// - the seeded 45-degree yaw reading a clean 0 / 45 / 0 - all X/Y/Z axis-tinted), closing on the
-/// boundary line. The Name is now a `TextEdit`, not a label; the scene is
+/// `0x00000001` id) and TRANSFORM (Position as even editable X/Y/Z cells, the read-only axis-angle
+/// Rotation reading "45.00deg about (0.00, 1.00, 0.00)" for the seeded yaw, and the uniform Scale as a
+/// single 1.50 value, all fixed at 2dp), closing on the boundary line. The Name is a `TextEdit`; the
+/// scene is
 /// unedited, so the status bar shows no save dot - the dirty state is `chrome_instances_dirty`. Built
 /// by setting the selection directly (not by faking a row click), the counterpart to the grouped
 /// snapshot's deselected / no-inspector state (sharp-edges 3: build the state on the model). Dark
