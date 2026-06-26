@@ -1,18 +1,14 @@
-//! The editor's Euler-angle convention for rotations, shared by the inspector's Rot fields and the
-//! gizmo's W / E / R rotate taps so both decompose and recompose a quaternion the same way.
+//! The editor's Euler-angle decomposition for rotations: a placement's quaternion read out as per-axis
+//! `[X, Y, Z]` degrees for the inspector's read-only Rot row.
 //!
-//! A placement stores its rotation as a [`Quat`]; the editor edits it as per-axis degrees. The
-//! convention is `YXZ` (lifted from the prior editor's inspector): `Quat::to_euler(YXZ)` yields
+//! The convention is `YXZ` (lifted from the prior editor's inspector): `Quat::to_euler(YXZ)` yields
 //! `(yaw, pitch, roll)` - rotation about (Y, X, Z) - which [`euler_xyz_degrees`] reorders to the
-//! `[X, Y, Z]` triplet the UI shows, and [`quat_from_euler_xyz_degrees`] feeds back exactly inverted.
-//! Sharing one decompose/recompose keeps a rotate tap editing the same numbers the inspector displays,
-//! so a tap nudges one dial and the readout stays clean multiples of the step - rather than smearing
-//! across all three axes, which composing world-axis quaternions and reading the canonical Euler back
-//! would do once more than one axis is involved.
-//!
-//! A quaternion has many Euler decompositions; recomposing then re-decomposing only agrees within the
-//! principal range (pitch in `(-90, 90)`). At gimbal lock (pitch = +/-90deg) the YXZ split is singular
-//! and Y/Z can flip - the inspector and the taps share this limitation.
+//! `[X, Y, Z]` triplet the UI shows and converts to degrees. Rotation is authored by the gizmo's
+//! W / E / R taps, which spin the quaternion about a world axis (`crate::gizmo`), not edited through
+//! these degrees - so this is a one-way readout: a single-axis spin reads a clean multiple of the step,
+//! while a compound quaternion has no clean per-axis Euler (and at gimbal lock, pitch = +/-90deg, the
+//! YXZ split is singular and Y/Z fold together), shown as honest orientation feedback rather than a
+//! round value. Pure, so the axis mapping is unit tested.
 
 use glam::{EulerRot, Quat};
 
@@ -22,14 +18,6 @@ use glam::{EulerRot, Quat};
 pub(crate) fn euler_xyz_degrees(rotation: Quat) -> [f32; 3] {
     let (yaw, pitch, roll) = rotation.to_euler(EulerRot::YXZ);
     [pitch.to_degrees(), yaw.to_degrees(), roll.to_degrees()]
-}
-
-/// The inverse of [`euler_xyz_degrees`]: rebuild a quaternion from `[X, Y, Z]` Euler degrees in the
-/// editor's `YXZ` order. The triplet is `[pitch, yaw, roll]` (about X, Y, Z), fed back as
-/// `from_euler(YXZ, yaw, pitch, roll)` in radians - exactly undoing the display decomposition. Pure, so
-/// the round trip is unit tested.
-pub(crate) fn quat_from_euler_xyz_degrees(xyz: [f32; 3]) -> Quat {
-    Quat::from_euler(EulerRot::YXZ, xyz[1].to_radians(), xyz[0].to_radians(), xyz[2].to_radians())
 }
 
 #[cfg(test)]
@@ -54,28 +42,5 @@ mod tests {
     #[test]
     fn euler_xyz_degrees_of_identity_is_zero() {
         approx(euler_xyz_degrees(Quat::IDENTITY), [0.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn quat_from_euler_degrees_inverts_the_display_decomposition() {
-        // Recomposing the held degrees must be the exact inverse of the Quat -> Euler display, or even a
-        // no-op edit would drift the rotation. Holds for each single axis and a combined rotation,
-        // within the principal YXZ range (pitch in (-90, 90)).
-        for e in [[0.0, 0.0, 0.0], [30.0, 0.0, 0.0], [0.0, 45.0, 0.0], [0.0, 0.0, 60.0], [10.0, 20.0, 30.0]] {
-            approx(euler_xyz_degrees(quat_from_euler_xyz_degrees(e)), e);
-        }
-    }
-
-    #[test]
-    fn editing_one_euler_axis_leaves_the_others_intact() {
-        // Changing one axis, recomposing to a quaternion, then re-decomposing returns the other two axes
-        // unscrambled - what lets a rotate tap (and the inspector's scratch) keep an edit local to its
-        // axis. Each axis in turn is set to a fresh value over a non-trivial starting rotation.
-        let start = [10.0, 20.0, 30.0];
-        for axis in 0..3 {
-            let mut edited = start;
-            edited[axis] = 55.0;
-            approx(euler_xyz_degrees(quat_from_euler_xyz_degrees(edited)), edited);
-        }
     }
 }

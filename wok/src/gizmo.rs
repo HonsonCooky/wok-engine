@@ -23,12 +23,13 @@
 //!   while `f` is held - see [`Outcome::consumed_scroll`]); a scroll with the cursor still holds the
 //!   XZ, so the placement rises and lowers straight up in world space, not along the view (which a
 //!   re-read of the cursor on the new height plane would pull toward the camera).
-//! - Rotate (`w` / `e` / `r`): keyboard-only discrete taps, no mouse and no chords. Each step nudges one
-//!   Euler dial 5deg onto the grid - W pitch (X), E yaw (Y), R roll (Z) - reversed with Shift, editing
-//!   the same YXZ degrees the inspector shows (`crate::euler`) so the readout stays clean multiples of 5
-//!   and the other two axes are left alone. A key fires on its press edge or an OS auto-repeat while
-//!   held, so a quick tap is one committed step and a hold repeats at the OS rate after the OS initial
-//!   delay. Not a hold and not cancellable - each step is committed live.
+//! - Rotate (`w` / `e` / `r`): keyboard-only discrete taps, no mouse and no chords. Each step spins the
+//!   selection 5deg about a world axis - W pitch (X), E yaw (Y), R roll (Z) - reversed with Shift. A
+//!   relative quaternion compose, so it is gimbal-lock-free: holding W pitches through 90deg and beyond
+//!   rather than sticking (the inspector reports the resulting orientation read-only - compound spins
+//!   have no clean per-axis Euler). A key fires on its press edge or an OS auto-repeat while held, so a
+//!   quick tap is one committed step and a hold repeats at the OS rate after the OS initial delay. Not a
+//!   hold and not cancellable - each step is committed live.
 //! - Scale (`s`): held + mouse, the remaining hold op - no axis scales uniformly, `x` / `y` / `z`
 //!   scales that one component, from raw horizontal mouse motion.
 //!
@@ -58,7 +59,6 @@ use wok_scene::{InstanceId, Transform};
 
 use crate::action::Action;
 use crate::camera::FlyCamera;
-use crate::euler::{euler_xyz_degrees, quat_from_euler_xyz_degrees};
 use crate::loaded::LoadedScene;
 use crate::render_scene::RenderScene;
 
@@ -86,8 +86,8 @@ const TRANSLATE_SNAP_M: f32 = 1.0;
 /// Scale exponent per point of raw horizontal mouse motion (the held + mouse scale op).
 const SCALE_PER_PX: f32 = 0.005;
 
-/// An axis named by an X / Y / Z key: scale's optional component chord, and the component a rotate tap
-/// steps (W -> X, E -> Y, R -> Z).
+/// A world axis named by an X / Y / Z key: the world axis a rotate tap spins about (W -> X, E -> Y,
+/// R -> Z), and scale's optional component chord.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Axis {
     X,
@@ -96,8 +96,16 @@ enum Axis {
 }
 
 impl Axis {
-    /// The component index the axis drives (X=0, Y=1, Z=2): the scale component, or the Euler degree a
-    /// rotate tap steps.
+    /// The unit world direction of the axis - the rotate tap's spin axis.
+    fn unit(self) -> Vec3 {
+        match self {
+            Axis::X => Vec3::X,
+            Axis::Y => Vec3::Y,
+            Axis::Z => Vec3::Z,
+        }
+    }
+
+    /// The scale component index the axis drives (X=0, Y=1, Z=2).
     fn index(self) -> usize {
         match self {
             Axis::X => 0,
@@ -387,26 +395,25 @@ fn current_op(f: &Inputs) -> Option<Op> {
     }
 }
 
-/// A discrete rotate tap this frame, if any: one [`ROTATE_STEP_DEG`] step on the Euler axis named by a
-/// W / E / R key (X pitch / Y yaw / Z roll), reversed with Shift. It edits the same YXZ Euler degrees
-/// the inspector shows ([`stepped_rotation`]), so a tap nudges one dial onto the 5deg grid and leaves
-/// the other two - the readout stays clean multiples of the step. Keyboard-only, no mouse and no chords;
-/// a key fires on its press edge or an OS auto-repeat while held, so a quick tap is one step and a hold
-/// repeats at the OS rate after the OS initial delay (Shift is read each fire, so it reverses mid-hold).
-/// `None` when no rotate key fired this frame or the selection or its placement does not resolve. The
-/// caller has already gated it (`hold_allowed`).
+/// A discrete rotate tap this frame, if any: one [`ROTATE_STEP_DEG`] step about the world axis named by
+/// a W / E / R key (X pitch / Y yaw / Z roll), reversed with Shift. The step is a relative quaternion
+/// spin ([`rotate_step`]), so it is gimbal-lock-free - holding W pitches through 90deg and beyond rather
+/// than sticking (the inspector reports the resulting orientation read-only). Keyboard-only, no mouse and
+/// no chords; a key fires on its press edge or an OS auto-repeat while held, so a quick tap is one step
+/// and a hold repeats at the OS rate after the OS initial delay (Shift is read each fire, so it reverses
+/// mid-hold). `None` when no rotate key fired this frame or the selection or its placement does not
+/// resolve. The caller has already gated it (`hold_allowed`).
 fn rotate_tap(f: &Inputs) -> Option<Action> {
     let axis = tapped_axis(f)?;
     let id = f.selection?;
     let base = f.loaded.placement(id)?.transform;
-    let sign = if f.input.key_held(NamedKey::Shift) { -1.0 } else { 1.0 };
-    let rotation = stepped_rotation(base.rotation, axis.index(), sign);
-    Some(Action::SetInstanceTransform(id, Transform { rotation, ..base }))
+    let degrees = if f.input.key_held(NamedKey::Shift) { -ROTATE_STEP_DEG } else { ROTATE_STEP_DEG };
+    Some(Action::SetInstanceTransform(id, rotate_step(base, axis, degrees)))
 }
 
-/// The axis a rotate tap fires this frame (W -> X pitch, E -> Y yaw, R -> Z roll; first match wins when
-/// several fire the same frame), or `None` when no rotate key did. A key fires on its press edge or an
-/// OS auto-repeat (`char_pressed || char_repeating`): a quick tap is one step, and holding a key spins
+/// The world axis a rotate tap fires this frame (W -> X pitch, E -> Y yaw, R -> Z roll; first match wins
+/// when several fire the same frame), or `None` when no rotate key did. A key fires on its press edge or
+/// an OS auto-repeat (`char_pressed || char_repeating`): a quick tap is one step, and holding a key spins
 /// at the OS repeat rate after the OS initial delay (which gives the tap-vs-hold split for free).
 fn tapped_axis(f: &Inputs) -> Option<Axis> {
     if rotate_key_fired(f, ROTATE_PITCH_KEY) {
@@ -492,16 +499,13 @@ fn rest_y(floor: f32, base_y: f32, aabb_min_y: f32) -> f32 {
     floor + (base_y - aabb_min_y)
 }
 
-/// Step one Euler `axis` (0=X, 1=Y, 2=Z) of `rotation` onto the [`ROTATE_STEP_DEG`] grid in `sign`'s
-/// direction (the W / E / R taps; `sign` is -1 with Shift), leaving the other two axes. Decomposes to
-/// the editor's YXZ Euler degrees ([`euler_xyz_degrees`], shared with the inspector), snaps the tapped
-/// component to the grid and adds one signed step, then recomposes ([`quat_from_euler_xyz_degrees`]) -
-/// so the inspector's readout stays clean multiples of the step rather than smearing across axes. Pure
-/// so the per-axis stepping is unit tested.
-fn stepped_rotation(rotation: Quat, axis: usize, sign: f32) -> Quat {
-    let mut deg = euler_xyz_degrees(rotation);
-    deg[axis] = snap(deg[axis], ROTATE_STEP_DEG) + sign * ROTATE_STEP_DEG;
-    quat_from_euler_xyz_degrees(deg)
+/// Spin `base` by `degrees` about world `axis`, pre-multiplied so the spin is about the world axis
+/// regardless of the placement's current heading (the W / E / R taps, +/-[`ROTATE_STEP_DEG`]). A
+/// relative quaternion compose, so it is gimbal-lock-free - successive taps keep turning past 90deg
+/// rather than sticking. The non-rotation fields pass through. Pure so the step is unit tested.
+fn rotate_step(base: Transform, axis: Axis, degrees: f32) -> Transform {
+    let rotation = Quat::from_axis_angle(axis.unit(), degrees.to_radians()) * base.rotation;
+    Transform { rotation, ..base }
 }
 
 /// The world point where the ray `origin + t*dir` meets the horizontal plane `y = height`, or `None`
@@ -537,24 +541,32 @@ mod tests {
     }
 
     #[test]
-    fn stepped_rotation_steps_one_euler_axis_onto_the_5deg_grid() {
-        // W / E / R taps edit per-axis YXZ Euler degrees (shared with the inspector), so a tap nudges one
-        // dial by 5deg onto the grid and leaves the other two. Asserted by decomposing the result back.
+    fn rotate_step_spins_5deg_about_the_world_axis_premultiplied() {
+        // W / E / R taps spin 5deg about world X / Y / Z; +5 unshifted, -5 with Shift; pre-multiplied so
+        // the spin is about the world axis regardless of the placement's heading (gimbal-lock-free).
         assert_eq!(ROTATE_STEP_DEG, 5.0, "a tap is the 5deg canon step");
-        let approx = |q: Quat, e: [f32; 3]| {
-            let got = euler_xyz_degrees(q);
-            assert!((0..3).all(|i| (got[i] - e[i]).abs() < 1e-2), "got {got:?}, expected {e:?}");
-        };
-        let base = quat_from_euler_xyz_degrees([10.0, 20.0, 30.0]);
-        // W (axis 0) +5 -> X 15, Y/Z preserved; Shift (sign -1) -> X 5.
-        approx(stepped_rotation(base, 0, 1.0), [15.0, 20.0, 30.0]);
-        approx(stepped_rotation(base, 0, -1.0), [5.0, 20.0, 30.0]);
-        // E (axis 1) and R (axis 2) hit Y and Z, leaving the others.
-        approx(stepped_rotation(base, 1, 1.0), [10.0, 25.0, 30.0]);
-        approx(stepped_rotation(base, 2, 1.0), [10.0, 20.0, 35.0]);
-        // An off-grid start snaps onto the 5deg grid in the tapped direction (12.3 -> 10 -> +5 = 15).
-        let off = quat_from_euler_xyz_degrees([12.3, 20.0, 30.0]);
-        approx(stepped_rotation(off, 0, 1.0), [15.0, 20.0, 30.0]);
+        let v = Vec3::new(0.3, 0.5, 0.8);
+        // E: +5deg about world Y; Shift+W: -5deg about world X.
+        let yaw = rotate_step(Transform::IDENTITY, Axis::Y, ROTATE_STEP_DEG).rotation;
+        assert!((yaw * v - Quat::from_rotation_y(ROTATE_STEP_DEG.to_radians()) * v).length() < EPS, "E yaws +5 about Y");
+        let pitch = rotate_step(Transform::IDENTITY, Axis::X, -ROTATE_STEP_DEG).rotation;
+        assert!((pitch * v - Quat::from_rotation_x(-ROTATE_STEP_DEG.to_radians()) * v).length() < EPS, "Shift+W pitches -5");
+        // Pre-multiplied: from a turned base, the world-axis spin composes on the world (left) side.
+        let base = Transform { rotation: Quat::from_rotation_y(1.0), ..Transform::IDENTITY };
+        let rolled = rotate_step(base, Axis::Z, ROTATE_STEP_DEG).rotation;
+        let world = Quat::from_rotation_z(ROTATE_STEP_DEG.to_radians()) * base.rotation;
+        assert!((rolled * v - world * v).length() < EPS, "roll pre-multiplies about world Z");
+        // Successive taps keep turning past 90deg (gimbal-lock-free): 19 pitch taps compose to a clean
+        // 95deg about world X, where the old Euler decompose would stick or bounce near 90.
+        let mut t = Transform::IDENTITY;
+        for _ in 0..19 {
+            t = rotate_step(t, Axis::X, ROTATE_STEP_DEG);
+        }
+        let ninety_five = Quat::from_rotation_x(95.0_f32.to_radians());
+        assert!((t.rotation * v - ninety_five * v).length() < EPS, "19 x 5deg = a clean 95deg about X, no stick");
+        // The non-rotation fields pass through.
+        let scaled = Transform { scale: Vec3::splat(2.0), ..Transform::IDENTITY };
+        assert_eq!(rotate_step(scaled, Axis::Y, ROTATE_STEP_DEG).scale, Vec3::splat(2.0), "scale untouched");
     }
 
     #[test]
