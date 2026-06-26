@@ -28,7 +28,7 @@ use wok_content::ChunkStore;
 use wok_light::LightState;
 use wok_scene::{
     Aabb, CHUNK_GRID_DIM, Chunk, ChunkCoord, ContentLayout, Heightmap, InstanceId, Prefab, PrefabRef,
-    Scene, VisibleItem,
+    Primitive, Scene, VisibleItem,
 };
 
 use crate::camera::FlyCamera;
@@ -245,9 +245,51 @@ impl RenderScene {
     /// the cached heightmaps, a stepped sample precise enough for snapping (the inspector is the exact
     /// path). Returns `origin + dir * t` for the winning `t`.
     pub fn surface_ray(&self, origin: Vec3, dir: Vec3, exclude: InstanceId) -> Option<Vec3> {
-        // Nearest prefab-collider hit, skipping the moving instance. The traversal mirrors `pick`'s but
-        // tracks the nearest distance rather than the instance, and drops the dragged one.
+        // Nearest prefab-collider hit, skipping the moving instance.
         let mut best: Option<f32> = None;
+        self.for_each_excluded_shape(exclude, |primitive, world| {
+            let collider = wok_physics::classify_collider(primitive, world);
+            if let Some(t) = wok_physics::ray_collider(origin, dir, &collider) {
+                best = Some(best.map_or(t, |b| b.min(t)));
+            }
+        });
+        // Terrain, no farther than the nearest collider. A hit within that range is necessarily the
+        // nearer (or equal), so it wins outright.
+        let march_to = best.unwrap_or_else(|| self.far_plane());
+        if let Some(t) = ray_heightfield(origin, dir, march_to, |x, z| self.terrain_height_at(x, z)) {
+            best = Some(t);
+        }
+        best.map(|t| origin + dir * t)
+    }
+
+    /// World height of the surface (terrain or a prefab top) at the vertical column over world
+    /// `(x, z)`, or `None` when nothing is there. The surface-snap move rests the instance here after
+    /// snapping its XZ to the grid, so it sits on the surface at the grid point rather than the
+    /// unsnapped cursor hit. The highest surface in the column wins (rest on top of a stack); `exclude`
+    /// (the moving instance) is skipped.
+    ///
+    /// Terrain is sampled directly. Each prefab top is read by a short downward ray cast from just
+    /// above that shape's own bounds, so its first entry is the shape's true top at the column (a
+    /// sphere or cylinder rests at its real height) and no global scene height or terrain march range
+    /// is needed.
+    pub fn surface_height_at(&self, x: f32, z: f32, exclude: InstanceId) -> Option<f32> {
+        let mut best = self.terrain_height_at(x, z);
+        self.for_each_excluded_shape(exclude, |primitive, world| {
+            let above = wok_physics::world_aabb(primitive, world).max.y + 1.0;
+            let collider = wok_physics::classify_collider(primitive, world);
+            if let Some(t) = wok_physics::ray_collider(Vec3::new(x, above, z), Vec3::NEG_Y, &collider) {
+                let top = above - t;
+                best = Some(best.map_or(top, |b| b.max(top)));
+            }
+        });
+        best
+    }
+
+    /// Visit each authored shape (its primitive and world transform) of every placement except
+    /// `exclude`, the shared traversal behind the surface queries. The dragged instance is skipped so
+    /// it never snaps to itself. (`pick` keeps its own copy: it includes every instance and tracks the
+    /// id.)
+    fn for_each_excluded_shape(&self, exclude: InstanceId, mut visit: impl FnMut(Primitive, Mat4)) {
         for chunk in &self.source_chunks {
             let origin_mat = Mat4::from_translation(chunk_origin(chunk.coord));
             for placement in &chunk.placements {
@@ -259,21 +301,10 @@ impl RenderScene {
                 let Some(state) = prefab.states.iter().find(|s| s.name == state_name) else { continue };
                 let placement_mat = origin_mat * placement.transform.to_mat4();
                 for shape in &state.shapes {
-                    let world = placement_mat * shape.transform.to_mat4();
-                    let collider = wok_physics::classify_collider(shape.primitive, world);
-                    if let Some(t) = wok_physics::ray_collider(origin, dir, &collider) {
-                        best = Some(best.map_or(t, |b| b.min(t)));
-                    }
+                    visit(shape.primitive, placement_mat * shape.transform.to_mat4());
                 }
             }
         }
-        // Terrain, no farther than the nearest collider. A hit within that range is necessarily the
-        // nearer (or equal), so it wins outright.
-        let march_to = best.unwrap_or_else(|| self.far_plane());
-        if let Some(t) = ray_heightfield(origin, dir, march_to, |x, z| self.terrain_height_at(x, z)) {
-            best = Some(t);
-        }
-        best.map(|t| origin + dir * t)
     }
 
     /// World terrain height at world `(x, z)`, or `None` off the loaded terrain (no chunk there, or one
@@ -612,6 +643,31 @@ mod tests {
             scene.surface_ray(Vec3::new(50.0, 10.0, 50.0), Vec3::NEG_Y, InstanceId(0)).expect("hits the terrain");
         assert!((on_ground - Vec3::new(50.0, 0.0, 50.0)).length() < 0.05, "on the ground: {on_ground:?}");
         assert!(scene.surface_ray(Vec3::new(50.0, 10.0, 50.0), Vec3::Y, InstanceId(0)).is_none(), "sky is empty");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn surface_height_at_returns_the_top_of_the_column_and_skips_the_excluded() {
+        // The re-sample the surface-snap move uses after snapping XZ: the highest surface in the
+        // column, with the moving instance excluded.
+        let root = unique_temp_root();
+        let _ = std::fs::remove_dir_all(&root);
+        seed_content(&root, "village");
+        save_flat_heightmap(&root, "village", ChunkCoord::new(0, 0), 0.0);
+        let placed = Transform { translation: Vec3::new(10.0, 0.0, 10.0), ..Transform::IDENTITY };
+        let scene = RenderScene::build(&root, "village", &[one_block(placed)]);
+
+        // Over the block: the top of its unit cube at y = 0.5 (above the terrain at 0).
+        let on_block = scene.surface_height_at(10.0, 10.0, InstanceId(99)).expect("a surface in the column");
+        assert!((on_block - 0.5).abs() < 0.05, "block top: {on_block}");
+        // Excluding the block (the instance being moved): the terrain beneath it.
+        let under = scene.surface_height_at(10.0, 10.0, InstanceId(0)).expect("terrain under the block");
+        assert!(under.abs() < 0.05, "ground under: {under}");
+        // Empty ground: the terrain height; off the terrain and under no prefab: nothing.
+        let ground = scene.surface_height_at(50.0, 50.0, InstanceId(0)).expect("terrain");
+        assert!(ground.abs() < 0.05, "ground: {ground}");
+        assert!(scene.surface_height_at(-500.0, -500.0, InstanceId(0)).is_none(), "the void is empty");
 
         let _ = std::fs::remove_dir_all(&root);
     }

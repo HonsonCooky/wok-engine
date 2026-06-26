@@ -9,18 +9,23 @@
 //! The grammar ([`update`], driven from the frame loop where the camera, the render residency, and the
 //! raw input live):
 //! - Move onto the surface (`g`): the placement follows the cursor onto whatever lies under it -
-//!   resting on the terrain or climbing onto a prefab beneath - by snapping its translation to the
-//!   nearest surface the cursor ray meets
-//!   ([`RenderScene::surface_ray`](crate::render_scene::RenderScene::surface_ray)). The object goes to
-//!   the cursor's surface point (translation = the hit).
+//!   resting on the terrain or climbing onto a prefab beneath. The cursor ray's surface hit
+//!   ([`RenderScene::surface_ray`](crate::render_scene::RenderScene::surface_ray)) gives the XZ,
+//!   snapped to the 1m grid; the placement then rests on the surface at that grid column
+//!   ([`RenderScene::surface_height_at`](crate::render_scene::RenderScene::surface_height_at)), so it
+//!   rides the ground and prefabs but lands on grid lines.
 //! - Move free (`f`): the placement slides in the horizontal plane at its current height (the cursor
-//!   ray meets `y = translation.y`), and the scroll wheel steps that height instead of dollying the
-//!   camera (the frame loop gates the dolly off while `f` is held - see [`Outcome::consumed_scroll`]).
+//!   ray meets `y = translation.y`), snapped to the 1m grid. The scroll wheel steps the height by 1m
+//!   of world vertical per notch instead of dollying the camera (the frame loop gates the dolly off
+//!   while `f` is held - see [`Outcome::consumed_scroll`]); a scroll with the cursor still holds the
+//!   XZ, so the placement rises and lowers straight up in world space, not along the view (which a
+//!   re-read of the cursor on the new height plane would pull toward the camera).
 //! - Rotate (`r`) and scale (`s`): unchanged - no axis or `x` / `y` / `z` constrains to a world axis,
 //!   from raw horizontal mouse motion (5deg snap on rotate, Alt for fine).
 //!
-//! There are no axis chords and no Alt on move (the Voyager cannot reach them); the surface snap is the
-//! snap, so there is no 1m grid. Esc cancels (restores the captured transform, keeps the selection);
+//! Move snaps to a 1m grid by default (sub-grid precision stays on the inspector); there are no axis
+//! chords and no Alt on move (the Voyager cannot reach them; a reachable snap-off toggle is a later
+//! bite). Esc cancels (restores the captured transform, keeps the selection);
 //! op-key-up commits. Keys read through `char_held`, so they are rebindable later (table parked). Every
 //! change routes through the edit seam: [`update`] returns an
 //! [`Action::SetInstanceTransform`](crate::action::Action) the frame loop applies through
@@ -54,12 +59,14 @@ const MOVE_FREE_KEY: char = 'f';
 const ROTATE_KEY: char = 'r';
 const SCALE_KEY: char = 's';
 
-/// Height step per scroll notch for the free move (`f` + wheel), in metres; positive scroll raises.
-/// Coarse for now (the inspector is the exact path), tune later.
-const MOVE_Y_STEP_M: f32 = 0.25;
+/// World-vertical height step per scroll notch for the free move (`f` + wheel), in metres; positive
+/// scroll raises. A clean 1m, matching the translate grid; sub-grid height stays on the inspector.
+const MOVE_Y_STEP_M: f32 = 1.0;
 
-/// Rotate snap (canon: 5deg steps); Alt disables it per hold. Move has no grid (the surface snap is the
-/// snap) and scale has no grid, so only rotate snaps.
+/// Translate grid (canon: 1m): the default snap for both moves' XZ; sub-grid precision is the
+/// inspector's (no Alt fine-modifier - unreachable on the Voyager). Rotate snaps to 5deg steps (Alt
+/// disables it per hold); scale has no grid.
+const TRANSLATE_SNAP_M: f32 = 1.0;
 const ROTATE_SNAP_DEG: f32 = 5.0;
 /// Hold sensitivities: degrees of rotation and scale exponent per point of raw horizontal mouse motion.
 const ROTATE_DEG_PER_PX: f32 = 0.5;
@@ -294,24 +301,40 @@ fn target(hold: &Hold, f: &Inputs) -> Option<Transform> {
     }
 }
 
-/// Surface-snap move (`g`): rest the placement on the nearest surface the cursor ray meets - the
-/// terrain or a prefab beneath, never the moving instance itself. `None` (hold position) when the
-/// cursor is gone or the ray meets only sky.
+/// Surface-snap move (`g`): rest the placement on the surface under the cursor, snapped to the 1m grid.
+/// The cursor ray's surface hit (terrain or a prefab beneath, never the moving instance) gives the XZ;
+/// snapping it to the grid, the placement rests on the surface at that grid column - so it rides the
+/// ground and prefabs but lands on grid lines. `None` (hold position) when the cursor is gone or the
+/// ray meets only sky; a snapped column with no surface (just off an edge) keeps the cursor hit's
+/// height so the move still lands rather than stalling.
 fn target_surface(hold: &Hold, f: &Inputs) -> Option<Transform> {
     let base = f.loaded.placement(hold.id)?.transform;
     let (origin, dir) = cursor_ray(f, f.cursor?);
     let hit = f.scene.surface_ray(origin, dir, hold.id)?;
-    Some(Transform { translation: hit, ..base })
+    let x = snap(hit.x, TRANSLATE_SNAP_M);
+    let z = snap(hit.z, TRANSLATE_SNAP_M);
+    let y = f.scene.surface_height_at(x, z, hold.id).unwrap_or(hit.y);
+    Some(Transform { translation: Vec3::new(x, y, z), ..base })
 }
 
-/// Free move (`f`): slide in the horizontal plane at the live height, the scroll wheel stepping that
-/// height. `None` (hold position) when the cursor is gone or the ray runs parallel to the plane.
+/// Free move (`f`): slide in the horizontal plane at the live height (cursor ray vs the plane, XZ
+/// snapped to the 1m grid), the scroll wheel stepping the height by 1m of world vertical per notch.
+/// The two are decoupled: XZ is re-read from the cursor only when the cursor actually moved, so a
+/// scroll-only frame holds XZ and the placement rises and lowers straight up in world space - rather
+/// than re-reading the cursor on the new height plane, which on an angled camera would pull XZ toward
+/// the eye and read as moving closer. `None` (hold position) when a cursor move's ray runs parallel to
+/// the plane or the cursor is gone.
 fn target_free(hold: &Hold, f: &Inputs) -> Option<Transform> {
     let base = f.loaded.placement(hold.id)?.transform;
     let y = stepped_y(base.translation.y, f.input.scroll_delta.1);
-    let (origin, dir) = cursor_ray(f, f.cursor?);
-    let hit = ray_vs_ground_plane(origin, dir, y)?;
-    Some(Transform { translation: Vec3::new(hit.x, y, hit.z), ..base })
+    let (mut x, mut z) = (base.translation.x, base.translation.z);
+    if cursor_moved(f) {
+        let (origin, dir) = cursor_ray(f, f.cursor?);
+        let hit = ray_vs_ground_plane(origin, dir, base.translation.y)?;
+        x = snap(hit.x, TRANSLATE_SNAP_M);
+        z = snap(hit.z, TRANSLATE_SNAP_M);
+    }
+    Some(Transform { translation: Vec3::new(x, y, z), ..base })
 }
 
 /// Rotate (`r`): unchanged from the shipped grammar - raw horizontal motion about the chosen world axis
@@ -388,6 +411,14 @@ fn hold_allowed(f: &Inputs) -> bool {
         && !f.input.mouse_held(MouseButton::Middle)
 }
 
+/// Did the mouse physically move this frame? The free move re-reads the cursor's XZ only when it did,
+/// so a scroll-only frame (hand on the wheel, mouse still) holds XZ and steps the height purely
+/// vertically. Raw motion is the right signal: it is non-zero exactly when the device moved, and the
+/// free move runs with no cursor lock, so it tracks the visible cursor.
+fn cursor_moved(f: &Inputs) -> bool {
+    f.input.mouse_motion.0 != 0.0 || f.input.mouse_motion.1 != 0.0
+}
+
 /// The cursor ray for a window-space cursor position, mapped against the well rect at the scene far
 /// plane (the same source the pick and the render use - sharp-edges 2).
 fn cursor_ray(f: &Inputs, cursor: Vec2) -> (Vec3, Vec3) {
@@ -433,20 +464,24 @@ mod tests {
 
     #[test]
     fn snap_rounds_to_the_nearest_multiple_and_a_nonpositive_step_passes_through() {
-        // The 5deg rotate steps, plus the Alt = no-snap pass-through (move and scale do not snap).
+        // The 1m translate grid (G / F XZ) and the 5deg rotate steps, plus the no-snap pass-through.
+        assert_eq!(TRANSLATE_SNAP_M, 1.0, "the move grid is a clean 1m");
+        assert_eq!(snap(0.4, TRANSLATE_SNAP_M), 0.0);
+        assert_eq!(snap(0.6, TRANSLATE_SNAP_M), 1.0);
+        assert_eq!(snap(-1.4, TRANSLATE_SNAP_M), -1.0);
         assert_eq!(snap(7.0, ROTATE_SNAP_DEG), 5.0);
         assert_eq!(snap(8.0, ROTATE_SNAP_DEG), 10.0);
-        assert_eq!(snap(-13.0, ROTATE_SNAP_DEG), -15.0);
-        assert_eq!(snap(3.3, 0.0), 3.3, "a non-positive step is a pass-through (Alt disables snap)");
+        assert_eq!(snap(3.3, 0.0), 3.3, "a non-positive step is a pass-through");
     }
 
     #[test]
-    fn stepped_y_steps_one_height_increment_per_notch_and_scroll_up_raises() {
-        // The free move's F + scroll: one step per notch, positive (scroll up) raising. The camera
-        // dolly is gated off in the same condition so the wheel drives only the height.
+    fn stepped_y_steps_one_metre_of_world_vertical_per_notch_and_scroll_up_raises() {
+        // F + scroll: exactly 1m of world height per notch, positive (scroll up) raising, independent
+        // of the camera. The dolly is gated off in the same condition so the wheel drives only height.
+        assert_eq!(MOVE_Y_STEP_M, 1.0, "world-vertical steps are a clean 1m");
         assert_eq!(stepped_y(2.0, 0.0), 2.0, "no scroll holds the height");
-        assert_eq!(stepped_y(2.0, 1.0), 2.0 + MOVE_Y_STEP_M, "one notch up raises one step");
-        assert_eq!(stepped_y(2.0, -2.0), 2.0 - 2.0 * MOVE_Y_STEP_M, "scrolling down lowers, scaling with notches");
+        assert_eq!(stepped_y(2.0, 1.0), 3.0, "one notch up raises 1m");
+        assert_eq!(stepped_y(2.0, -2.0), 0.0, "two notches down lowers 2m");
     }
 
     #[test]
