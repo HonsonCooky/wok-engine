@@ -285,26 +285,51 @@ impl RenderScene {
         best
     }
 
-    /// Visit each authored shape (its primitive and world transform) of every placement except
-    /// `exclude`, the shared traversal behind the surface queries. The dragged instance is skipped so
-    /// it never snaps to itself. (`pick` keeps its own copy: it includes every instance and tracks the
-    /// id.)
-    fn for_each_excluded_shape(&self, exclude: InstanceId, mut visit: impl FnMut(Primitive, Mat4)) {
+    /// The world-space AABB of one instance's prefab shapes at its live transform (rotation and scale
+    /// included), or `None` when the instance resolves to no shape (an unknown prefab/state, or a
+    /// mesh-only state with no placeholder shapes). The surface-snap move reads this to rest the item's
+    /// bottom on the surface rather than its (often centered) origin; like the shadow region it unions
+    /// each shape's conservative world AABB. Y is chunk-origin-independent (a chunk origin has zero
+    /// height), so `min.y` reads directly as the item's lowest point in world space.
+    pub fn instance_aabb(&self, id: InstanceId) -> Option<Aabb> {
+        let mut bounds: Option<Aabb> = None;
+        self.for_each_shape(|shape_id, primitive, world| {
+            if shape_id != id {
+                return;
+            }
+            let aabb = wok_physics::world_aabb(primitive, world);
+            bounds = Some(bounds.map_or(aabb, |b| Aabb::new(b.min.min(aabb.min), b.max.max(aabb.max))));
+        });
+        bounds
+    }
+
+    /// Visit each authored shape: its placement's instance id, primitive, and world transform. The
+    /// shared traversal behind the surface queries and the per-instance bounds; each caller filters by
+    /// id as it needs. (`pick` keeps its own copy: it tracks the nearest id across all instances.)
+    fn for_each_shape(&self, mut visit: impl FnMut(InstanceId, Primitive, Mat4)) {
         for chunk in &self.source_chunks {
             let origin_mat = Mat4::from_translation(chunk_origin(chunk.coord));
             for placement in &chunk.placements {
-                if placement.instance_id == exclude {
-                    continue;
-                }
                 let Some(prefab) = self.prefabs.get(&placement.prefab) else { continue };
                 let state_name = placement.state.as_deref().unwrap_or(&prefab.default_state);
                 let Some(state) = prefab.states.iter().find(|s| s.name == state_name) else { continue };
                 let placement_mat = origin_mat * placement.transform.to_mat4();
                 for shape in &state.shapes {
-                    visit(shape.primitive, placement_mat * shape.transform.to_mat4());
+                    visit(placement.instance_id, shape.primitive, placement_mat * shape.transform.to_mat4());
                 }
             }
         }
+    }
+
+    /// Visit each authored shape (primitive and world transform) of every placement except `exclude`,
+    /// so the dragged instance never snaps to itself - the surface queries' filter over
+    /// [`for_each_shape`](Self::for_each_shape).
+    fn for_each_excluded_shape(&self, exclude: InstanceId, mut visit: impl FnMut(Primitive, Mat4)) {
+        self.for_each_shape(|id, primitive, world| {
+            if id != exclude {
+                visit(primitive, world);
+            }
+        });
     }
 
     /// World terrain height at world `(x, z)`, or `None` off the loaded terrain (no chunk there, or one
@@ -668,6 +693,44 @@ mod tests {
         let ground = scene.surface_height_at(50.0, 50.0, InstanceId(0)).expect("terrain");
         assert!(ground.abs() < 0.05, "ground: {ground}");
         assert!(scene.surface_height_at(-500.0, -500.0, InstanceId(0)).is_none(), "the void is empty");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn instance_aabb_unions_the_instance_shapes_at_the_live_scale() {
+        // The bounds the surface-snap rest reads: a unit cube scaled 2x (a 2m box) spans [-1, 1] in
+        // each axis, so its bottom sits 1m below the centered origin. A missing instance has no bounds.
+        let root = unique_temp_root();
+        let _ = std::fs::remove_dir_all(&root);
+        seed_content(&root, "village");
+        let scaled = Transform { scale: Vec3::splat(2.0), ..Transform::IDENTITY };
+        let scene = RenderScene::build(&root, "village", &[one_block(scaled)]);
+
+        let aabb = scene.instance_aabb(InstanceId(0)).expect("the block resolves to shapes");
+        assert!((aabb.min.y + 1.0).abs() < 1e-4, "the 2m box's bottom is 1m below the origin: {}", aabb.min.y);
+        assert!((aabb.max.y - 1.0).abs() < 1e-4, "and its top 1m above: {}", aabb.max.y);
+        assert!(scene.instance_aabb(InstanceId(99)).is_none(), "an absent instance has no bounds");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn instance_aabb_reflects_rotation_in_the_vertical_extent() {
+        // A unit cube tilted 45 degrees about Z points a diagonal down, so its world AABB's vertical
+        // half-extent grows to sqrt(2)/2 ~ 0.707: the surface-snap rest lifts a tilted item by its
+        // rotated extent, not its unrotated half-height.
+        let root = unique_temp_root();
+        let _ = std::fs::remove_dir_all(&root);
+        seed_content(&root, "village");
+        let tilted = Transform {
+            rotation: glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_4),
+            ..Transform::IDENTITY
+        };
+        let scene = RenderScene::build(&root, "village", &[one_block(tilted)]);
+
+        let aabb = scene.instance_aabb(InstanceId(0)).expect("resolves");
+        assert!((aabb.min.y + std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-3, "tilted bottom: {}", aabb.min.y);
 
         let _ = std::fs::remove_dir_all(&root);
     }

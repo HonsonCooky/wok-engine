@@ -301,19 +301,25 @@ fn target(hold: &Hold, f: &Inputs) -> Option<Transform> {
     }
 }
 
-/// Surface-snap move (`g`): rest the placement on the surface under the cursor, snapped to the 1m grid.
-/// The cursor ray's surface hit (terrain or a prefab beneath, never the moving instance) gives the XZ;
-/// snapping it to the grid, the placement rests on the surface at that grid column - so it rides the
-/// ground and prefabs but lands on grid lines. `None` (hold position) when the cursor is gone or the
-/// ray meets only sky; a snapped column with no surface (just off an edge) keeps the cursor hit's
-/// height so the move still lands rather than stalling.
+/// Surface-snap move (`g`): rest the placement's BOTTOM on the surface under the cursor, snapped to the
+/// 1m grid. The cursor ray's surface hit (terrain or a prefab beneath, never the moving instance) gives
+/// the XZ; snapping it to the grid, the placement rests on the surface at that grid column - so it rides
+/// the ground and prefabs but lands on grid lines. The height lifts the item by its pivot-to-bottom
+/// offset ([`rest_y`] over the instance's live AABB), so a centre-pivoted prefab sits on the surface
+/// rather than half-buried. `None` (hold position) when the cursor is gone or the ray meets only sky; a
+/// snapped column with no surface (just off an edge) keeps the cursor hit's height, and a shape-less
+/// instance falls back to resting its origin, so the move still lands rather than stalling.
 fn target_surface(hold: &Hold, f: &Inputs) -> Option<Transform> {
     let base = f.loaded.placement(hold.id)?.transform;
     let (origin, dir) = cursor_ray(f, f.cursor?);
     let hit = f.scene.surface_ray(origin, dir, hold.id)?;
     let x = snap(hit.x, TRANSLATE_SNAP_M);
     let z = snap(hit.z, TRANSLATE_SNAP_M);
-    let y = f.scene.surface_height_at(x, z, hold.id).unwrap_or(hit.y);
+    let surface = f.scene.surface_height_at(x, z, hold.id).unwrap_or(hit.y);
+    let y = match f.scene.instance_aabb(hold.id) {
+        Some(aabb) => rest_y(surface, base.translation.y, aabb.min.y),
+        None => surface,
+    };
     Some(Transform { translation: Vec3::new(x, y, z), ..base })
 }
 
@@ -441,6 +447,15 @@ fn stepped_y(base_y: f32, notches: f32) -> f32 {
     base_y + notches * MOVE_Y_STEP_M
 }
 
+/// The translation Y that rests an item's BOTTOM on `surface`: the surface plus the item's pivot-to-
+/// bottom offset (`base_y - aabb_min_y`, the height of the origin above the item's lowest point at the
+/// live rotation and scale). A centre-pivoted prefab would otherwise sink half-in; this lifts it so the
+/// lowest point sits on the surface. The offset cancels `base_y`, so it is invariant under where the
+/// item currently sits and depends only on the item's shape.
+fn rest_y(surface: f32, base_y: f32, aabb_min_y: f32) -> f32 {
+    surface + (base_y - aabb_min_y)
+}
+
 /// The world point where the ray `origin + t*dir` meets the horizontal plane `y = height`, or `None`
 /// when the ray runs parallel to the plane (no crossing) or the crossing is behind the eye (`t <= 0`).
 /// The free move casts the cursor ray at the selection's height.
@@ -482,6 +497,18 @@ mod tests {
         assert_eq!(stepped_y(2.0, 0.0), 2.0, "no scroll holds the height");
         assert_eq!(stepped_y(2.0, 1.0), 3.0, "one notch up raises 1m");
         assert_eq!(stepped_y(2.0, -2.0), 0.0, "two notches down lowers 2m");
+    }
+
+    #[test]
+    fn rest_y_sits_the_items_bottom_on_the_surface_not_its_centre() {
+        // A 2m box with a centred origin sits 1m above its bottom (AABB min.y = -1 when at y = 0).
+        // On flat ground (surface 0) its origin lifts to 1.0 so the bottom rests at 0; on a 1m-tall
+        // prefab top (surface 1) it rests at 2.0 (the prefab top plus the box half-height).
+        assert_eq!(rest_y(0.0, 0.0, -1.0), 1.0, "on flat ground the 2m box's centre lifts to 1.0");
+        assert_eq!(rest_y(1.0, 0.0, -1.0), 2.0, "on a 1m prefab top it rests at 2.0");
+        // The pivot-to-bottom offset cancels the current height, so the rested result depends only on
+        // the surface and the item's shape, not where it sits now.
+        assert_eq!(rest_y(0.0, 5.0, 4.0), 1.0, "the same 1m offset, measured from a different height");
     }
 
     #[test]
