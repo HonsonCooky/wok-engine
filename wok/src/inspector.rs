@@ -18,11 +18,12 @@
 //! grid snap (the 1m / 5deg snapping is the future viewport-gizmo bite). Rotation edits through a held
 //! Euler scratch so adjusting one axis never scrambles the other two (see `rot_row`).
 
-use glam::{EulerRot, Quat, Vec3};
+use glam::Vec3;
 
 use wok_scene::{InstanceId, Transform};
 
 use crate::action::Action;
+use crate::euler::{euler_xyz_degrees, quat_from_euler_xyz_degrees};
 use crate::loaded::LoadedScene;
 use crate::model::Model;
 use crate::theme;
@@ -236,23 +237,6 @@ fn rot_row(ui: &mut egui::Ui, id: InstanceId, t: Transform, actions: &mut Vec<Ac
     ui.end_row();
 }
 
-/// The selected placement's rotation as `[X, Y, Z]` Euler degrees, decomposed in the editor's `YXZ`
-/// order (the convention lifted from the prior editor's inspector): `to_euler(YXZ)` yields
-/// `(yaw, pitch, roll)` = rotation about (Y, X, Z), which this reorders to the X/Y/Z the inspector shows
-/// and converts to degrees. Pure, so the axis mapping is unit-tested directly.
-fn euler_xyz_degrees(rotation: Quat) -> [f32; 3] {
-    let (yaw, pitch, roll) = rotation.to_euler(EulerRot::YXZ);
-    [pitch.to_degrees(), yaw.to_degrees(), roll.to_degrees()]
-}
-
-/// The inverse of [`euler_xyz_degrees`]: rebuild a quaternion from `[X, Y, Z]` Euler degrees in the
-/// editor's `YXZ` order. The display order is `[pitch, yaw, roll]` (rotation about X, Y, Z), so this
-/// feeds them back as `from_euler(YXZ, yaw, pitch, roll)` in radians - exactly undoing the
-/// `to_euler(YXZ)` the display does. Pure, so the round trip is unit-tested directly.
-fn quat_from_euler_xyz_degrees(xyz: [f32; 3]) -> Quat {
-    Quat::from_euler(EulerRot::YXZ, xyz[1].to_radians(), xyz[0].to_radians(), xyz[2].to_radians())
-}
-
 /// Tidy a rotation degree for display: a magnitude below a thousandth (the float noise a `Quat -> Euler`
 /// decomposition leaves, and a signed zero) reads as a clean positive `0.0`. Applied only to the
 /// canonical decomposition that seeds the Rot fields, never to a value mid-edit, so it cleans the
@@ -269,45 +253,6 @@ mod tests {
     fn approx(actual: [f32; 3], expected: [f32; 3]) {
         for (a, e) in actual.iter().zip(expected.iter()) {
             assert!((a - e).abs() < 1e-3, "got {actual:?}, expected {expected:?}");
-        }
-    }
-
-    #[test]
-    fn euler_xyz_degrees_maps_each_axis_to_its_field() {
-        // A pure rotation about one axis lands wholly in that axis's field and nowhere else, which pins
-        // the YXZ -> X/Y/Z reordering: X reads pitch, Y reads yaw, Z reads roll.
-        approx(euler_xyz_degrees(Quat::from_rotation_x(30.0_f32.to_radians())), [30.0, 0.0, 0.0]);
-        approx(euler_xyz_degrees(Quat::from_rotation_y(45.0_f32.to_radians())), [0.0, 45.0, 0.0]);
-        approx(euler_xyz_degrees(Quat::from_rotation_z(60.0_f32.to_radians())), [0.0, 0.0, 60.0]);
-    }
-
-    #[test]
-    fn euler_xyz_degrees_of_identity_is_zero() {
-        approx(euler_xyz_degrees(Quat::IDENTITY), [0.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn quat_from_euler_degrees_inverts_the_display_decomposition() {
-        // The Rot field edits by recomposing the held degrees into a quaternion; that must be the exact
-        // inverse of the Quat -> Euler display, or even a no-op edit would drift the rotation. Holds for
-        // each single axis and a combined rotation, all within the principal YXZ range (pitch in
-        // (-90, 90)).
-        for e in [[0.0, 0.0, 0.0], [30.0, 0.0, 0.0], [0.0, 45.0, 0.0], [0.0, 0.0, 60.0], [10.0, 20.0, 30.0]] {
-            approx(euler_xyz_degrees(quat_from_euler_xyz_degrees(e)), e);
-        }
-    }
-
-    #[test]
-    fn editing_one_euler_axis_leaves_the_others_intact() {
-        // Why the Rot fields edit through a held [X, Y, Z] scratch rather than the stored quaternion:
-        // changing one axis, recomposing to a quaternion, then re-decomposing returns the other two axes
-        // unscrambled. Each axis in turn is set to a fresh value over a non-trivial starting rotation;
-        // the round trip pins exactly the edited triple, so the scratch keeps an edit local to its axis.
-        let start = [10.0, 20.0, 30.0];
-        for axis in 0..3 {
-            let mut edited = start;
-            edited[axis] = 55.0;
-            approx(euler_xyz_degrees(quat_from_euler_xyz_degrees(edited)), edited);
         }
     }
 

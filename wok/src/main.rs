@@ -29,6 +29,7 @@
 
 mod action;
 mod camera;
+mod euler;
 mod gizmo;
 mod gui;
 mod icons;
