@@ -76,8 +76,10 @@ pub struct RenderScene {
     /// The per-chunk heightmaps, cached at build keyed by chunk coord. Cached here because a re-derive
     /// rebuilds the store with no heightmap (the GPU terrain is cached separately), which would
     /// otherwise drop them after the first edit; terrain does not change without a scene reload, so a
-    /// build-time copy stays valid. The surface-snap move samples these to rest an instance on the
-    /// ground ([`surface_ray`](Self::surface_ray) -> [`terrain_height_at`](Self::terrain_height_at)).
+    /// build-time copy stays valid. The surface query samples these to rest an instance on the ground
+    /// ([`surface_ray`](Self::surface_ray) -> [`terrain_height_at`](Self::terrain_height_at)); parked
+    /// with that query until brief 2's drag-and-drop move calls it.
+    #[allow(dead_code)]
     heightmaps: HashMap<ChunkCoord, Heightmap>,
     /// The authored chunks the store was last derived from. [`reconcile`] re-derives when the live
     /// authored chunks differ from this, so an inspector edit shows in the 3D without disk I/O.
@@ -106,7 +108,7 @@ impl RenderScene {
         let mut store = ChunkStore::new();
         for chunk in chunks {
             let heightmap = heightmap_for(&layout, name, chunk.coord);
-            // Cache the heightmap before it moves into the store, so the surface-snap move can sample
+            // Cache the heightmap before it moves into the store, so the surface query can sample
             // terrain even after a re-derive drops the store's copy.
             if let Some(h) = &heightmap {
                 heightmaps.insert(chunk.coord, h.clone());
@@ -234,9 +236,9 @@ impl RenderScene {
 
     /// Cast a ray against the scene's surfaces - the prefab colliders and the terrain - and return the
     /// world point where it first lands, or `None` when it meets neither (the cursor is over empty
-    /// sky). The editor's surface-snap move (`g`) rests the dragged instance on whatever lies under the
-    /// cursor; `exclude` is that instance, whose own colliders are skipped so it snaps to the ground or
-    /// to other prefabs, never to itself.
+    /// sky). The editor's drag-and-drop move (brief 2) rests the moved instance on whatever lies under
+    /// the cursor; `exclude` is that instance, whose own colliders are skipped so it snaps to the ground
+    /// or to other prefabs, never to itself.
     ///
     /// The nearer of two hits wins. The prefab colliders are tested exactly, the same
     /// `classify_collider` -> [`ray_collider`](wok_physics::ray_collider) path as [`pick`](Self::pick)
@@ -244,6 +246,11 @@ impl RenderScene {
     /// marched no farther than the nearest collider - a closer solid occludes the ground - by sampling
     /// the cached heightmaps, a stepped sample precise enough for snapping (the inspector is the exact
     /// path). Returns `origin + dir * t` for the winning `t`.
+    ///
+    /// Parked under `#[allow(dead_code)]` with [`instance_aabb`](Self::instance_aabb) and the private
+    /// surface-query helpers below: the held-key move that drove it was removed in the interaction
+    /// demolition, and brief 2's drag-and-drop is its caller (designs/movement-camera-design.md).
+    #[allow(dead_code)]
     pub fn surface_ray(&self, origin: Vec3, dir: Vec3, exclude: InstanceId) -> Option<Vec3> {
         // Nearest prefab-collider hit, skipping the moving instance.
         let mut best: Option<f32> = None;
@@ -264,10 +271,12 @@ impl RenderScene {
 
     /// The world-space AABB of one instance's prefab shapes at its live transform (rotation and scale
     /// included), or `None` when the instance resolves to no shape (an unknown prefab/state, or a
-    /// mesh-only state with no placeholder shapes). The surface-snap move reads this to rest the item's
-    /// bottom on the surface rather than its (often centered) origin; like the shadow region it unions
-    /// each shape's conservative world AABB. Y is chunk-origin-independent (a chunk origin has zero
-    /// height), so `min.y` reads directly as the item's lowest point in world space.
+    /// mesh-only state with no placeholder shapes). The drag-and-drop move (brief 2) reads this to rest
+    /// the item's bottom on the surface rather than its (often centered) origin; like the shadow region
+    /// it unions each shape's conservative world AABB. Y is chunk-origin-independent (a chunk origin has
+    /// zero height), so `min.y` reads directly as the item's lowest point in world space. Parked with
+    /// the surface query (see [`surface_ray`](Self::surface_ray)).
+    #[allow(dead_code)]
     pub fn instance_aabb(&self, id: InstanceId) -> Option<Aabb> {
         let mut bounds: Option<Aabb> = None;
         self.for_each_shape(|shape_id, primitive, world| {
@@ -283,6 +292,7 @@ impl RenderScene {
     /// Visit each authored shape: its placement's instance id, primitive, and world transform. The
     /// shared traversal behind the surface queries and the per-instance bounds; each caller filters by
     /// id as it needs. (`pick` keeps its own copy: it tracks the nearest id across all instances.)
+    #[allow(dead_code)]
     fn for_each_shape(&self, mut visit: impl FnMut(InstanceId, Primitive, Mat4)) {
         for chunk in &self.source_chunks {
             let origin_mat = Mat4::from_translation(chunk_origin(chunk.coord));
@@ -301,6 +311,7 @@ impl RenderScene {
     /// Visit each authored shape (primitive and world transform) of every placement except `exclude`,
     /// so the dragged instance never snaps to itself - the surface queries' filter over
     /// [`for_each_shape`](Self::for_each_shape).
+    #[allow(dead_code)]
     fn for_each_excluded_shape(&self, exclude: InstanceId, mut visit: impl FnMut(Primitive, Mat4)) {
         self.for_each_shape(|id, primitive, world| {
             if id != exclude {
@@ -313,6 +324,7 @@ impl RenderScene {
     /// with no heightmap). Resolves the chunk from the world coordinate and samples its cached
     /// heightmap in chunk-local space; the chunk origin's height is zero, so the sample is the world
     /// height. Reads the heightmaps cached at build, which survive an edit's re-derive.
+    #[allow(dead_code)]
     fn terrain_height_at(&self, x: f32, z: f32) -> Option<f32> {
         let coord = ChunkCoord::new((x / CHUNK_SIZE_M).floor() as i32, (z / CHUNK_SIZE_M).floor() as i32);
         let heightmap = self.heightmaps.get(&coord)?;
@@ -441,6 +453,7 @@ fn terrain_bounds(store: &ChunkStore) -> Option<Aabb> {
 
 /// Step between height samples along the surface march, in metres. Coarse enough to stay cheap over a
 /// scene-far ray, fine enough that the interpolated crossing snaps cleanly.
+#[allow(dead_code)]
 const TERRAIN_MARCH_STEP_M: f32 = 0.5;
 
 /// March the ray `origin + t*dir` (`dir` normalized) against a height field, returning the `t` where it
@@ -449,6 +462,7 @@ const TERRAIN_MARCH_STEP_M: f32 = 0.5;
 /// where the ray crosses is interpolated by the signed gap on each side, so the snap is not stair-
 /// stepped to the stride. `sample` returns the world height at `(x, z)`, or `None` off the terrain - a
 /// gap is not a crossing, so it breaks the above-the-surface tracking rather than registering a hit.
+#[allow(dead_code)]
 fn ray_heightfield(origin: Vec3, dir: Vec3, max_t: f32, sample: impl Fn(f32, f32) -> Option<f32>) -> Option<f32> {
     // The previous on-terrain sample: its t and signed gap (ray height minus terrain height), kept to
     // interpolate the crossing. Cleared on a gap, so a bracket never spans terrain-less space.

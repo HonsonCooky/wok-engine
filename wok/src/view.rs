@@ -46,9 +46,11 @@ use crate::workspace;
 /// which the Instances nav view lists; it is `None` when no scene tab is active. The model alone cannot
 /// carry it - it is filesystem residency, not pure model state - so it is threaded in separately.
 ///
-/// The transform gizmo draws no viewport visual this bite (the Instances tree and the inspector show
-/// the selection; a subtle 3D highlight is a later bite), so the chrome takes no gizmo input - the
-/// held-key manipulation is wholly the frame loop's (`crate::gizmo::update`).
+/// The viewport interaction - the camera and the transform grammar - lives in the frame loop
+/// (`crate::main`), not the chrome: the old held-key gizmo was removed in the interaction demolition
+/// (designs/movement-camera-design.md) and its rebuild plugs in there. The chrome emits no interaction
+/// input; the well's left-click (the surviving pick, `crate::workspace::editor_area`) is the only
+/// viewport gesture it raises, as a `ViewportClick` the frame loop resolves.
 pub fn chrome(
     ctx: &egui::Context,
     model: &Model,

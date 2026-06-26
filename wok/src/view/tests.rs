@@ -70,7 +70,7 @@ fn chrome_harness(
         ctx.set_theme(theme);
         let editor_bg = crate::theme::palette(ctx).editor_bg;
         ctx.layer_painter(egui::LayerId::background()).rect_filled(ctx.screen_rect(), 0.0, editor_bg);
-        // The gizmo draws no chrome visual (it is a live-input manipulation, verified by a run, not a
+        // The viewport interaction draws no chrome visual (it is live-input, verified by a run, not a
         // PNG), so the snapshot renders the chrome exactly as the app does.
         let _ = chrome(ctx, &model, loaded_scene.as_ref());
     })

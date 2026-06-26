@@ -13,11 +13,16 @@
 //! The editor well is the 3D Scene viewport. The authored scene (`crate::loaded`) is derived into a
 //! render residency (`crate::render_scene`, distinct from the editable model) reconciled to the open
 //! scene, and wok-render draws it - terrain, placeholder prefab shapes, the scene's lighting - into the
-//! well's rect, flown by a mouse-only god-cam (`crate::camera`, `crate::input`). The frame order is
-//! load-bearing: reconcile the authored scene, build the chrome (its focus queries decide what input
-//! the camera may use), drain the chrome's actions, reconcile the render residency (an edit just
-//! applied shows this frame), advance the camera last (on this frame's focus state), then draw the 3D
-//! with the chrome painted over it (`crate::render`).
+//! well's rect through a god-cam (`crate::camera`). The frame order is load-bearing: reconcile the
+//! authored scene, build the chrome, drain the chrome's actions (a viewport click resolves to a pick
+//! here), reconcile the render residency (an edit just applied shows this frame), then draw the 3D with
+//! the chrome painted over it (`crate::render`).
+//!
+//! The viewport interaction - the camera control and the transform grammar - was removed in the
+//! interaction demolition (designs/movement-camera-design.md). The camera is static: positioned over
+//! the scene on load (`RenderScene::spawn_camera`) and not moved after, so the editor renders a fixed
+//! view. Picking, selection, and the inspector stay live; brief 2 rebuilds the camera and transforms in
+//! the frame loop, between the action drain and the draw, where the old interaction used to plug in.
 //!
 //! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish` (inside `render::draw`):
 //! each frame runs the egui pass (building the chrome), draws the 3D into the well rect (or clears the
@@ -29,10 +34,9 @@
 
 mod action;
 mod camera;
-mod gizmo;
+mod geom;
 mod gui;
 mod icons;
-mod input;
 mod inspector;
 mod loaded;
 mod menu;
@@ -54,7 +58,6 @@ use model::Model;
 use render::Gpu;
 use render_scene::RenderScene;
 use std::path::Path;
-use wok_platform::winit::dpi::PhysicalPosition;
 use wok_platform::winit::event::WindowEvent;
 use wok_platform::{App, Desc, FrameCtx, Platform};
 
@@ -75,18 +78,9 @@ struct Editor {
     /// `loaded_scene` and reconciled to it each frame so edits show. Separate from the editable model;
     /// `None` when no scene is open or it failed to load.
     render_scene: Option<RenderScene>,
-    /// The god-cam the viewport renders through. Spawned over the scene when one loads, then advanced
-    /// from the mouse each frame (`crate::camera`, `crate::input`).
+    /// The god-cam the viewport renders through. Positioned over the scene when one loads
+    /// (`RenderScene::spawn_camera`) and static after - the camera control returns in brief 2.
     camera: FlyCamera,
-    /// The cursor-lock anchor while a camera drag is held: the press position the cursor is hidden and
-    /// grabbed at, restored there on release so it never jumps (`input::update_cursor_grab`). `None`
-    /// when no drag is capturing the cursor.
-    cursor_grab: Option<PhysicalPosition<f64>>,
-    /// The in-progress transform manipulation (`crate::gizmo`): a held-key grammar (G surface move, F
-    /// free move + scroll height, R rotate, S scale) advanced each frame from the mouse and the held
-    /// keys. `None` when the gizmo is idle. It rides here beside the camera, since like the camera it is
-    /// viewport interaction state the egui- and disk-free `Model` does not hold.
-    gizmo: Option<gizmo::Hold>,
     /// The window title last pushed to the OS, so `set_title` fires only when it changes.
     title: String,
 }
@@ -113,8 +107,6 @@ impl Editor {
             loaded_scene: None,
             render_scene: None,
             camera: default_camera(),
-            cursor_grab: None,
-            gizmo: None,
             title: String::new(),
         }
     }
@@ -203,67 +195,14 @@ impl App for Editor {
             })
         };
 
-        // The mouse drives the camera only when the cursor is free for the viewport: over the well rect,
-        // not under a foreground area (an open menu, the floating inspector), and not in an egui pointer
-        // gesture (a panel-resize drag straying onto the well). The well is egui's background layer under
-        // a CentralPanel, so is_pointer_over_area is always true over it and cannot tell the viewport
-        // from a panel - gate on the rect plus the layer order plus is_using_pointer (sharp-edges 2).
-        let pointer = gui.ctx.pointer_latest_pos();
-        let over_viewport = pointer.is_some_and(|p| editor_rect.contains(p));
-        let over_foreground =
-            pointer.and_then(|p| gui.ctx.layer_id_at(p)).is_some_and(|layer| layer.order != egui::Order::Background);
-        // The well rect under no foreground layer - the cursor-lock engage gate. It omits is_using_pointer
-        // on purpose: on a drag's press frame egui marks the well's own deselect click-sense as the
-        // potential click, so is_using_pointer (and pointer_free) is true exactly then, and gating the lock
-        // on it would miss the press (the cursor would not hide until the click cleared a few pixels in). A
-        // press lands over the well only for a genuine viewport drag, never a panel-resize drag (which
-        // presses on the panel edge), so this is the right engage signal.
-        let over_well = over_viewport && !over_foreground;
-        let pointer_free = over_well && !gui.ctx.is_using_pointer();
-
-        // Drive the transform gizmo before the action drain, where the camera, the render residency, and
-        // the raw input live (not the pure Model). It advances or ends a held-key manipulation (G / F
-        // move, R / S rotate / scale) and emits the resulting transform edit through the same single
-        // writer the inspector uses. It reports when it consumed this frame's Esc to cancel a hold (so
-        // the chrome's deselect is dropped below - a cancel keeps the selection) and when a free move
-        // claimed the scroll (so the camera dolly is gated off below). It casts against the residency's
-        // colliders and terrain at its far plane (one cursor-to-ray source, sharp-edges 2), so it is
-        // inert until a render residency exists; any edit shows this frame via the reconcile below.
-        let gizmo_out = match (self.loaded_scene.as_ref(), self.render_scene.as_ref()) {
-            (Some(loaded), Some(scene)) => {
-                let inputs = gizmo::Inputs {
-                    input: &ctx.input,
-                    camera: &self.camera,
-                    loaded,
-                    scene,
-                    selection: self.model.shell.selection(),
-                    rect: editor_rect,
-                    cursor: pointer.map(|p| Vec2::new(p.x, p.y)),
-                    over_well,
-                    keyboard_free: !gui.ctx.wants_keyboard_input(),
-                };
-                gizmo::update(&mut self.gizmo, &inputs)
-            }
-            _ => gizmo::Outcome::default(),
-        };
-        if let Some(action) = gizmo_out.action {
-            action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
-        }
-
         // Drain the buffer through the single writer: click -> Action -> handle, and the next frame
         // re-renders the new state. The handler returns the effects it cannot perform itself: persisting
         // the recent-projects list, and saving the open scene (handle stays filesystem-free).
         for action in actions {
-            // The gizmo cancelled a hold on this frame's Esc (restoring the transform); a cancel keeps
-            // the selection, so swallow the chrome's deselect that the same Esc raised. A left click no
-            // longer routes through the gizmo at all - there are no handles to intercept it - so it
-            // always falls through to the pick below.
-            if gizmo_out.consumed_esc && matches!(action, Action::Deselect) {
-                continue;
-            }
             // A viewport click resolves to a pick here, where the camera and render residency live (not
             // in the pure Model): it becomes a Select of the nearest instance or a Deselect, then runs
-            // through the single writer like every other action.
+            // through the single writer like every other action. Picking is the surviving selection
+            // mechanism (the camera it casts through is the static load-time god-cam, until brief 2).
             let action = match action {
                 Action::ViewportClick(pos) => {
                     resolve_viewport_pick(self.render_scene.as_ref(), &self.camera, pos, editor_rect)
@@ -289,30 +228,21 @@ impl App for Editor {
         let editor_bg = theme::palette(&gui.ctx).editor_bg;
 
         // The render residency and the 3D pass need the device. Reconcile the residency to the open
-        // scene (a fresh build spawns the god-cam over it; an in-memory edit just applied is re-derived
-        // here so it shows this frame), advance the camera from the mouse last so it sees this frame's
-        // focus state, then draw the 3D into the well and paint the chrome over it.
+        // scene (a fresh build positions the god-cam over it; an in-memory edit just applied is
+        // re-derived here so it shows this frame), then draw the 3D into the well and paint the chrome
+        // over it.
+        //
+        // The viewport interaction plugged in HERE, between the drain and the draw: the cursor lock, the
+        // mouse camera step, and the held-key transform gizmo. The demolition removed them
+        // (designs/movement-camera-design.md, "What survives, what is thrown out"), so the camera is
+        // whatever `spawn_camera` last set and the view is static; brief 2 rebuilds the Layout / Orbit
+        // camera and the transform grammar in this seam.
         let Some(gpu) = self.gpu.as_mut() else { return };
         if render_scene::reconcile(&mut self.render_scene, gpu, ctx.platform, self.loaded_scene.as_ref()) {
             if let Some(scene) = self.render_scene.as_ref() {
                 self.camera = scene.spawn_camera();
             }
         }
-        // Hide and lock the cursor while a look/pan drag pressed over the viewport is held, restoring it
-        // on release (`input::update_cursor_grab`). Engage gates on `over_well` (the press frame, where
-        // is_using_pointer is set by the well's own click-sense, so pointer_free would miss it). While a
-        // lock is active the camera stays driven even if the captured cursor would nominally leave the
-        // well, so a confined cursor (the Windows fallback) drifting over a panel does not cut the drag -
-        // and it drives from frame one, covering pointer_free's press-frame dead spot.
-        let lock_active = input::update_cursor_grab(&mut self.cursor_grab, &ctx.platform.window, &ctx.input, over_well);
-        // The free move (`f` held) steps the instance's height with the wheel, so gate the camera's
-        // scroll-dolly off this frame when the gizmo claimed the scroll; everything else (look, pan,
-        // and dolly when `f` is not held) is untouched. The gizmo ran above, so the flag is this frame's.
-        let mut camera_input = input::camera_input(&ctx.input, pointer_free || lock_active);
-        if gizmo_out.consumed_scroll {
-            camera_input.dolly = 0.0;
-        }
-        self.camera = camera::update(&self.camera, &camera_input);
         render::draw(ctx.platform, gpu, self.render_scene.as_ref(), self.camera, editor_rect, editor_bg, gui, output);
 
         // Keep the window title on the open project's name (or just the app name when none).

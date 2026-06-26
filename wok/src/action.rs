@@ -84,8 +84,8 @@ pub enum Action {
     SetInstanceName(InstanceId, String),
     /// Set the whole transform (position, rotation, scale) of the placement with this instance id,
     /// editing it in the loaded scene. Emitted by the inspector's Pos / Rot / Scale `DragValue`s on
-    /// change - the precise authoring path, exact values with no grid snap (the 1m / 5deg gizmo snap is
-    /// a later viewport bite). The whole transform travels each time (the field that changed already
+    /// change - the precise authoring path, exact values with no grid snap (the 1m / 5deg keyboard snap
+    /// is a later viewport bite). The whole transform travels each time (the field that changed already
     /// folded into it), so one variant covers all three rows; per-component actions are a later
     /// refinement if that proves too coarse. A stale id or a transform equal to the one stored is a
     /// clean no-op (no dirty), the same as a rename.

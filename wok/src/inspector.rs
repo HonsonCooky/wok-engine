@@ -18,10 +18,10 @@
 //! out for a steady panel: Position is three even-spaced editable X/Y/Z cells; Scale is a single value
 //! when uniform (the common case, editing all three together) and an even X/Y/Z triplet otherwise; and
 //! every number is fixed at two decimals in a monospace cell, so the panel never resizes as values
-//! change. Rotation is a READ-ONLY axis-angle readout (`<angle>deg about (x, y, z)`): the W / E / R
-//! rotate taps (`crate::gizmo`) spin the placement's quaternion, which axis-angle shows readably (the
+//! change. Rotation is a READ-ONLY axis-angle readout (`<angle>deg about (x, y, z)`): the keyboard
+//! rotate (rebuilt in brief 2) spins the placement's quaternion, which axis-angle shows readably (the
 //! Euler readout it replaces was lossy and ambiguous, the source of the messy numbers) - a single-axis
-//! spin reads a clean angle, a compound one reads honestly. Rotation is authored via the taps, not here.
+//! spin reads a clean angle, a compound one reads honestly. Rotation is authored by that spin, not here.
 //! Rotation and Scale each carry a small reset button at the row's right edge (to identity / one) - the
 //! one way back once a relative spin has compounded; Position has none (it is moved or typed).
 
@@ -59,7 +59,7 @@ const AXES: [(&str, egui::Color32); 3] = [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AX
 
 /// `DragValue` drag sensitivity for the linear transform fields (Pos and Scale), in units per point of
 /// pointer travel. Fine on purpose: the inspector is the precise path, so a drag nudges by hundredths
-/// and a typed value is the way to jump far. No grid snap here (the 1m / 5deg snapping is the gizmo's).
+/// and a typed value is the way to jump far. No grid snap here (the 1m / 5deg snapping is the keyboard's).
 const LINEAR_DRAG_SPEED: f64 = 0.01;
 
 /// Decimal places for every TRANSFORM number, fixed (not a max), so the panel width never changes as
@@ -126,7 +126,7 @@ pub fn floating(
 
             // TRANSFORM: Position (even editable X/Y/Z cells) and Scale (one value when uniform, else the
             // X/Y/Z triplet) commit through the edit seam the Name field uses; Rotation is a read-only
-            // axis-angle readout (authored via the W/E/R gizmo taps). Rotation and Scale carry a reset
+            // axis-angle readout (authored via the keyboard rotate). Rotation and Scale carry a reset
             // button at the right edge (identity / one); Position has none (it is moved or typed, never
             // reset to the world origin). Each row reserves the same label and reset cells, so the value
             // columns line up and the panel does not resize as values change.
@@ -275,7 +275,7 @@ fn pos_row(ui: &mut egui::Ui, id: InstanceId, t: Transform, actions: &mut Vec<Ac
     );
 }
 
-/// The Rotation row: a READ-ONLY axis-angle readout (authored by the gizmo's W / E / R taps), with a
+/// The Rotation row: a READ-ONLY axis-angle readout (authored by the keyboard rotate), with a
 /// reset button to clear it to identity. Axis-angle, not Euler, because Euler is lossy and ambiguous
 /// (the source of the old messy numbers); a single-axis spin reads a clean angle about a unit axis, a
 /// compound one reads honestly. Reset is the only way back to no-rotation once a relative spin has

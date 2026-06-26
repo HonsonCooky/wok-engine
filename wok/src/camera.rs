@@ -1,26 +1,25 @@
-//! The editor's camera state, the mouse-only navigation step, and framing - pure logic and matrix
-//! construction.
+//! The editor's camera state and the pure matrix and framing math the renderer and picking read.
 //!
-//! [`FlyCamera`] is the one camera state the renderer reads. The editor camera is mouse-only and
-//! always live (designs/editor-design.md, Input): [`update`] takes the previous state and a frame's
-//! [`CameraInput`] (already mapped from raw mouse input by the caller) and returns the next state -
-//! look from a right-drag, dolly from scroll, pan from a middle-drag - a free navigation with no
-//! world constraints, so it is built from glam directly. [`look_at`] is the shared bridge - the
-//! angles that aim the camera from a point at a target - used by framing. [`frame`] computes a
-//! vantage of an axis-aligned bounds and is kept for a later explicit Go action; nothing calls it
-//! yet. Input mapping (which button, which sensitivity) lives in `crate::input`; everything here is
-//! unit testable with no window.
+//! [`FlyCamera`] is the one camera state the renderer reads: a position and a yaw/pitch orientation,
+//! with [`forward`](FlyCamera::forward) / [`right`](FlyCamera::right) / [`up`](FlyCamera::up) the
+//! orthonormal basis the view is built from. [`view_proj`](FlyCamera::view_proj) is the
+//! view-projection the renderer draws with (far plane supplied per frame - the scene's render
+//! distance), and [`cursor_ray`](FlyCamera::cursor_ray) inverts it to turn a viewport click into a
+//! world ray for picking (sharp-edges 2: one shared cursor-to-ray source). [`look_at`] and [`frame`]
+//! are the framing math - the angles that aim a camera at a target, and a vantage of an axis-aligned
+//! bounds. Everything here is unit testable with no window.
+//!
+//! Pure math, no input: the interaction that drove the camera (the mouse-only look / dolly / pan) was
+//! removed in the interaction demolition (designs/movement-camera-design.md, "What survives, what is
+//! thrown out"), and the rebuilt camera grammar (brief 2: the Layout / Orbit cluster nav and the
+//! framing ladder) is built on this same math from the frame loop. Nothing advances the camera yet, so
+//! the editor renders a static view until then.
 //!
 //! Conventions: right-handed, `+Y` up. `yaw` is radians about `+Y` with `0` facing `-Z`, positive
-//! turning right (toward `+X`); `pitch` is radians with positive looking up, clamped short of the
-//! poles so the view never flips. Look rotates the view in place; dolly slides along the full look
-//! direction (a pitched view dollies into the ground or the sky, not level); pan slides along the
-//! camera's right and up - the view plane, which tilts with pitch - so a drag stays on screen.
+//! turning right (toward `+X`); `pitch` is radians with positive looking up. `forward` follows the
+//! yaw/pitch; `right` is always horizontal (no roll); `up` is their cross, equal to `+Y` when level.
 
 use glam::{Mat4, Vec2, Vec3};
-
-/// Hard pitch limit, just shy of straight up/down (about 88.9 degrees).
-const PITCH_LIMIT: f32 = 1.55;
 
 /// Vertical field of view and near plane for the projection. The far plane is per-frame data (the
 /// scene's render distance - its streaming extent, per the HLD), so it is a [`view_proj`] parameter.
@@ -35,21 +34,6 @@ pub struct FlyCamera {
     pub pitch: f32,
 }
 
-/// One frame's worth of camera-relevant input, already mapped from device input by the caller: the
-/// look delta in radians (zero when the right button is not held), the dolly distance in metres
-/// (from scroll), and the pan offset in metres (zero when the middle button is not held). All are
-/// per-frame deltas, so the step takes no `dt`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct CameraInput {
-    /// Radians to add this frame: `x` to yaw, `y` to pitch. Zero unless the look button is held.
-    pub look_delta: Vec2,
-    /// Metres to dolly along the look direction this frame (from scroll); positive moves forward.
-    pub dolly: f32,
-    /// Metres to pan this frame: `x` along the camera's right, `y` along its up. Already signed by
-    /// the caller so the scene tracks the drag. Zero unless the pan button is held.
-    pub pan: Vec2,
-}
-
 impl FlyCamera {
     /// The unit vector the camera looks along.
     pub fn forward(&self) -> Vec3 {
@@ -58,16 +42,19 @@ impl FlyCamera {
         Vec3::new(sin_yaw * cos_pitch, sin_pitch, -cos_yaw * cos_pitch)
     }
 
-    /// The unit vector to the camera's right, always horizontal (roll is never introduced).
+    /// The unit vector to the camera's right, always horizontal (roll is never introduced). Parked for
+    /// the rebuilt camera (brief 2) like the framing math: only the tests exercise it until then.
+    #[allow(dead_code)]
     pub fn right(&self) -> Vec3 {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         Vec3::new(cos_yaw, 0.0, sin_yaw)
     }
 
     /// The unit vector for the camera's up across the view plane: perpendicular to forward and right,
-    /// so it tilts with pitch (unlike world up) and a pan slides along the screen's vertical. Equals
-    /// `+Y` when the view is level. The basis (`right`, `up`, `-forward`) is orthonormal at any
-    /// orientation, so a pan never skews or scales.
+    /// so it tilts with pitch (unlike world up). Equals `+Y` when the view is level. The basis
+    /// (`right`, `up`, `-forward`) is orthonormal at any orientation. Parked for the rebuilt camera
+    /// (brief 2) like [`right`](Self::right): only the tests exercise it until then.
+    #[allow(dead_code)]
     pub fn up(&self) -> Vec3 {
         self.right().cross(self.forward())
     }
@@ -106,8 +93,8 @@ impl FlyCamera {
 }
 
 // ---- framing ----
-// Lifted with the camera and exercised by the unit tests below; the frame-to-subject jump wires into
-// an explicit Go action in a later brief, so these are unused in this navigate-only build.
+// Exercised by the unit tests below and built on by the rebuilt camera (brief 2: the framing ladder
+// and an explicit Go action); nothing calls them yet, so they are parked under `#[allow(dead_code)]`.
 
 /// The `(yaw, pitch)` that aim a camera at `position` toward `target`, in [`FlyCamera`]'s
 /// convention (yaw about `+Y`, `0` facing `-Z`; pitch positive looking up). The inverse of
@@ -156,24 +143,6 @@ pub fn frame(camera: &FlyCamera, min: Vec3, max: Vec3) -> FlyCamera {
     FlyCamera { position: center - aimed.forward() * distance, ..aimed }
 }
 
-/// Advance the camera by one frame. Pure: identical inputs give an identical next state.
-///
-/// Look is applied first, so a frame that both turns and translates moves along where the user just
-/// turned. Dolly then slides along the post-look forward (the full look direction, pitch included),
-/// and pan slides along the post-look right and up (the view plane). The inputs are already per-frame
-/// deltas in metres and radians, so there is no `dt` and no speed.
-pub fn update(camera: &FlyCamera, input: &CameraInput) -> FlyCamera {
-    let yaw = camera.yaw + input.look_delta.x;
-    let pitch = (camera.pitch + input.look_delta.y).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-    let turned = FlyCamera { yaw, pitch, ..*camera };
-
-    let position = turned.position
-        + turned.forward() * input.dolly
-        + turned.right() * input.pan.x
-        + turned.up() * input.pan.y;
-    FlyCamera { position, ..turned }
-}
-
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests {
@@ -189,11 +158,6 @@ mod tests {
         (a - b).length() < EPS
     }
 
-    /// A look-only input - the common case in these tests, where only the right-drag delta matters.
-    fn look(delta: Vec2) -> CameraInput {
-        CameraInput { look_delta: delta, ..Default::default() }
-    }
-
     // ---- orientation ----
 
     #[test]
@@ -205,29 +169,9 @@ mod tests {
     }
 
     #[test]
-    fn positive_yaw_turns_right_toward_positive_x() {
-        let cam = update(&camera(), &look(Vec2::new(std::f32::consts::FRAC_PI_2, 0.0)));
-        assert!(close(cam.forward(), Vec3::X), "forward was {:?}", cam.forward());
-    }
-
-    #[test]
-    fn positive_look_y_pitches_up() {
-        let cam = update(&camera(), &look(Vec2::new(0.0, 0.5)));
-        assert!(cam.forward().y > 0.0);
-    }
-
-    #[test]
-    fn pitch_clamps_short_of_the_poles() {
-        let cam = update(&camera(), &look(Vec2::new(0.0, 10.0)));
-        assert_eq!(cam.pitch, PITCH_LIMIT);
-        let cam = update(&cam, &look(Vec2::new(0.0, -20.0)));
-        assert_eq!(cam.pitch, -PITCH_LIMIT);
-    }
-
-    #[test]
     fn the_basis_stays_orthonormal_when_pitched_and_yawed() {
-        // up is unit length and perpendicular to forward and right at any orientation, so a pan
-        // moves the camera without skew or scale.
+        // up is unit length and perpendicular to forward and right at any orientation - the orthonormal
+        // basis the view matrix and the rebuilt camera (brief 2) are built on.
         let cam = FlyCamera { yaw: 1.1, pitch: -0.7, ..camera() };
         assert!((cam.forward().length() - 1.0).abs() < EPS);
         assert!((cam.right().length() - 1.0).abs() < EPS);
@@ -235,68 +179,6 @@ mod tests {
         assert!(cam.forward().dot(cam.right()).abs() < EPS);
         assert!(cam.forward().dot(cam.up()).abs() < EPS);
         assert!(cam.right().dot(cam.up()).abs() < EPS);
-    }
-
-    // ---- dolly ----
-
-    #[test]
-    fn scroll_dollies_along_the_look_direction() {
-        // A level camera dollies straight along -Z; the dolly magnitude is the input distance.
-        let moved = update(&camera(), &CameraInput { dolly: 5.0, ..Default::default() });
-        assert!(close(moved.position, Vec3::NEG_Z * 5.0), "dollied to {:?}", moved.position);
-    }
-
-    #[test]
-    fn dolly_follows_pitch_into_the_view() {
-        // Dolly is along the full look direction, not the horizontal: a downward-pitched view dollies
-        // downward (negative Y), so scrolling drives into whatever the camera is looking at.
-        let cam = FlyCamera { pitch: -0.6, ..camera() };
-        let moved = update(&cam, &CameraInput { dolly: 3.0, ..Default::default() });
-        assert!(close(moved.position, cam.forward() * 3.0), "dolly should track forward");
-        assert!(moved.position.y < 0.0, "a downward look dollies downward");
-    }
-
-    // ---- pan ----
-
-    #[test]
-    fn pan_x_slides_along_right_and_pan_y_along_up() {
-        // pan.x moves along the camera's right, pan.y along its up. The input carries the sign that
-        // makes the scene track the drag (set in crate::input), so here the axes are at face value.
-        let cam = camera();
-        let moved = update(&cam, &CameraInput { pan: Vec2::new(2.0, 0.0), ..Default::default() });
-        assert!(close(moved.position, cam.right() * 2.0));
-        let moved = update(&cam, &CameraInput { pan: Vec2::new(0.0, 2.0), ..Default::default() });
-        assert!(close(moved.position, cam.up() * 2.0));
-    }
-
-    #[test]
-    fn pan_uses_the_tilted_view_plane_not_world_axes() {
-        // Pan-up on a pitched view moves along the camera's up (which tilts with pitch), not world up,
-        // so the drag stays in the screen plane and gains a horizontal lean.
-        let cam = FlyCamera { pitch: -0.6, ..camera() };
-        let moved = update(&cam, &CameraInput { pan: Vec2::new(0.0, 1.0), ..Default::default() });
-        assert!(close(moved.position, cam.up()));
-        assert!(moved.position.z < 0.0, "a downward-tilted up leans forward, so pan-up gains -Z");
-    }
-
-    // ---- composition ----
-
-    #[test]
-    fn look_is_applied_before_the_move() {
-        // A single frame that turns 90 degrees right and dollies must dolly along the new forward
-        // (+X), not the pre-turn one (-Z): look first, then move.
-        let input = CameraInput {
-            look_delta: Vec2::new(std::f32::consts::FRAC_PI_2, 0.0),
-            dolly: 4.0,
-            ..Default::default()
-        };
-        let moved = update(&camera(), &input);
-        assert!(close(moved.position, Vec3::X * 4.0), "dolly used the post-look forward: {:?}", moved.position);
-    }
-
-    #[test]
-    fn no_input_holds_the_camera_still() {
-        assert_eq!(update(&camera(), &CameraInput::default()), camera());
     }
 
     // ---- framing ----
