@@ -1,10 +1,10 @@
-//! The transform manipulator: a held grammar over the selected placement. Per the device split
-//! (designs/editor-design.md, Input: the mouse is motion, the left hand is the operators), a transform
-//! is an operator key held with the mouse - held-not-modal, so the manipulation lives only while the
-//! key is down and releasing it commits (the edit is already persisted live). The move grammar is
-//! reworked for the ZSA Voyager left hand: it drops the axis chords and the static tripod for two
-//! reachable keys, while rotate and scale keep the shipped key + axis grammar untouched (their reworks
-//! are later bites; the inspector is the precise path for all three meanwhile).
+//! The transform manipulator: a small left-hand grammar over the selected placement. Per the device
+//! split (designs/editor-design.md, Input: the mouse is motion, the left hand is the operators), move
+//! and scale are an operator key held with the mouse (held-not-modal: the manipulation lives only while
+//! the key is down, releasing commits, and the edit is persisted live throughout), while rotate is
+//! discrete key taps. The grammar is being reworked for the ZSA Voyager left hand key by key: move is
+//! two reachable keys (no axis chords, no tripod), rotate is W / E / R taps, and scale stays the
+//! shipped held + mouse op (its rework is a later bite; the inspector is the precise path meanwhile).
 //!
 //! The grammar ([`update`], driven from the frame loop where the camera, the render residency, and the
 //! raw input live):
@@ -23,14 +23,19 @@
 //!   while `f` is held - see [`Outcome::consumed_scroll`]); a scroll with the cursor still holds the
 //!   XZ, so the placement rises and lowers straight up in world space, not along the view (which a
 //!   re-read of the cursor on the new height plane would pull toward the camera).
-//! - Rotate (`r`) and scale (`s`): unchanged - no axis or `x` / `y` / `z` constrains to a world axis,
-//!   from raw horizontal mouse motion (5deg snap on rotate, Alt for fine).
+//! - Rotate (`w` / `e` / `r`): keyboard-only discrete taps, no mouse and no chords. Each press turns the
+//!   selection 5deg about a world axis - W pitch (X), E yaw (Y), R roll (Z) - reversed with Shift. One
+//!   tap is one committed step (not a hold, no Esc-cancel); the press edge swallows OS auto-repeat, so
+//!   holding a key does not spin - large turns are repeated taps or the inspector's Rot fields.
+//! - Scale (`s`): held + mouse, the remaining hold op - no axis scales uniformly, `x` / `y` / `z`
+//!   scales that one component, from raw horizontal mouse motion.
 //!
 //! Move snaps to a 1m grid by default (sub-grid precision stays on the inspector); there are no axis
 //! chords and no Alt on move (the Voyager cannot reach them; a reachable snap-off toggle is a later
-//! bite). Esc cancels (restores the captured transform, keeps the selection);
-//! op-key-up commits. Keys read through `char_held`, so they are rebindable later (table parked). Every
-//! change routes through the edit seam: [`update`] returns an
+//! bite). A hold ends on op-key-up (the edit is already committed) and Esc cancels it (restores the
+//! captured transform, keeps the selection); a rotate tap is immediate, with nothing to cancel. Keys
+//! read through `char_held`, the rotate taps through `char_pressed`, so they are rebindable later (table
+//! parked). Every change routes through the edit seam: [`update`] returns an
 //! [`Action::SetInstanceTransform`](crate::action::Action) the frame loop applies through
 //! `crate::action::handle`, exactly as the inspector's fields do; [`LoadedScene::set_transform`] no-ops
 //! an unchanged transform, so emitting the full transform every held frame is free.
@@ -40,7 +45,7 @@
 //! the render (sharp-edges 2): [`cursor_ray`] maps the cursor against the same well rect with the same
 //! far plane, and the surface query runs the same `classify_collider` -> `ray_collider` reduction the
 //! pick uses, so a snap lands on what a placement collides as. The pure geometry (ray vs the ground
-//! plane, the height step, the rotate snap) is unit tested below; the surface query and its terrain
+//! plane, the height step, the rotate step) is unit tested below; the surface query and its terrain
 //! march live on the render residency beside the pick.
 
 use glam::{Quat, Vec2, Vec3};
@@ -54,25 +59,28 @@ use crate::camera::FlyCamera;
 use crate::loaded::LoadedScene;
 use crate::render_scene::RenderScene;
 
-/// The operator keys (read case-insensitively through `char_held`; rebindable later, the keybind table
-/// is parked). Move splits into surface-snap (`g`, like Blender's grab) and free (`f`); rotate and
-/// scale keep their shipped keys. The inspector is the precise path for all of them.
+/// The held-op keys (read case-insensitively; rebindable later, the keybind table is parked). Move is
+/// surface-snap (`g`, like Blender's grab) and free (`f`); scale (`s`) stays the held + mouse op.
 const MOVE_SURFACE_KEY: char = 'g';
 const MOVE_FREE_KEY: char = 'f';
-const ROTATE_KEY: char = 'r';
 const SCALE_KEY: char = 's';
+
+/// Discrete rotate taps (keyboard-only, no mouse, no chords): each press turns the selection one step
+/// about a world axis - W pitch (X), E yaw (Y), R roll (Z) - reversed with Shift. The step is the 5deg
+/// canon; larger turns are repeated taps or the inspector's Rot fields.
+const ROTATE_PITCH_KEY: char = 'w';
+const ROTATE_YAW_KEY: char = 'e';
+const ROTATE_ROLL_KEY: char = 'r';
+const ROTATE_STEP_DEG: f32 = 5.0;
 
 /// World-vertical height step per scroll notch for the free move (`f` + wheel), in metres; positive
 /// scroll raises. A clean 1m, matching the translate grid; sub-grid height stays on the inspector.
 const MOVE_Y_STEP_M: f32 = 1.0;
 
 /// Translate grid (canon: 1m): the default snap for both moves' XZ; sub-grid precision is the
-/// inspector's (no Alt fine-modifier - unreachable on the Voyager). Rotate snaps to 5deg steps (Alt
-/// disables it per hold); scale has no grid.
+/// inspector's (no Alt fine-modifier - unreachable on the Voyager). Scale has no grid.
 const TRANSLATE_SNAP_M: f32 = 1.0;
-const ROTATE_SNAP_DEG: f32 = 5.0;
-/// Hold sensitivities: degrees of rotation and scale exponent per point of raw horizontal mouse motion.
-const ROTATE_DEG_PER_PX: f32 = 0.5;
+/// Scale exponent per point of raw horizontal mouse motion (the held + mouse scale op).
 const SCALE_PER_PX: f32 = 0.005;
 
 /// A world axis named by the X / Y / Z keys for rotate and scale (move has no axis chords this bite).
@@ -110,9 +118,8 @@ enum Op {
     MoveSurface,
     /// Move free in the horizontal plane, the scroll wheel stepping height (`f`).
     MoveFree,
-    /// Rotate about a world axis (`r`).
-    Rotate,
-    /// Scale uniformly or by one axis (`s`).
+    /// Scale uniformly or by one axis (`s`). (Rotate is no longer a hold - it is discrete W / E / R
+    /// taps, handled outside the hold machinery.)
     Scale,
 }
 
@@ -122,25 +129,24 @@ impl Op {
         match self {
             Op::MoveSurface => MOVE_SURFACE_KEY,
             Op::MoveFree => MOVE_FREE_KEY,
-            Op::Rotate => ROTATE_KEY,
             Op::Scale => SCALE_KEY,
         }
     }
 
-    /// Whether this op takes an X / Y / Z axis chord (rotate and scale do; the move ops do not).
+    /// Whether this op takes an X / Y / Z axis chord (scale does; the move ops do not).
     fn takes_axis(self) -> bool {
-        matches!(self, Op::Rotate | Op::Scale)
+        matches!(self, Op::Scale)
     }
 }
 
 /// The current sub-drag's reference. The move ops are absolute - each frame reads the cursor fresh and
-/// (for free) the live height - so they carry no reference; rotate and scale accumulate raw horizontal
-/// mouse motion since the seed.
+/// (for free) the live height - so they carry no reference; scale accumulates raw horizontal mouse
+/// motion since the seed.
 #[derive(Clone, Copy)]
 enum Drag {
     /// A move op (surface or free): nothing to accumulate, the cursor is read fresh each frame.
     Cursor,
-    /// Rotate or scale: raw horizontal mouse motion accumulated since the seed.
+    /// Scale: raw horizontal mouse motion accumulated since the seed.
     Motion(f32),
 }
 
@@ -153,12 +159,12 @@ pub struct Hold {
     /// The transform when the op key went down - the cancel target Esc restores; never changes during
     /// the hold.
     captured: Transform,
-    /// The current axis constraint for rotate / scale (`None` = the op's default: world Y for rotate,
-    /// uniform for scale). Always `None` for the move ops. A change re-seeds the sub-drag.
+    /// The current axis constraint for scale (`None` = uniform). Always `None` for the move ops. A
+    /// change re-seeds the sub-drag.
     axis: Option<Axis>,
-    /// The base the sub-drag's motion folds into (rotate / scale), re-seeded to the live transform on
-    /// an axis change so the constraint switch picks up where the last left off. The move ops read the
-    /// live placement directly, so they ignore it.
+    /// The base the sub-drag's motion folds into (scale), re-seeded to the live transform on an axis
+    /// change so the constraint switch picks up where the last left off. The move ops read the live
+    /// placement directly, so they ignore it.
     base: Transform,
     /// The sub-drag's reference.
     drag: Drag,
@@ -223,17 +229,22 @@ pub fn update(gizmo: &mut Option<Hold>, f: &Inputs) -> Outcome {
             *gizmo = None;
             return Outcome::default();
         }
-        // Re-seed when the axis constraint changes (rotate / scale), fold this frame's motion in, then
-        // emit. A free move consumes the scroll, so the loop gates the camera dolly off.
+        // Re-seed when the axis constraint changes (scale), fold this frame's motion in, then emit. A
+        // free move consumes the scroll, so the loop gates the camera dolly off.
         reseed_if_axis_changed(hold, f);
         accumulate(hold, f);
         let consumed_scroll = hold.op == Op::MoveFree;
         return Outcome { action: emit(hold, f), consumed_esc: false, consumed_scroll };
     }
 
-    // 2) Idle: an op key held over the well (gated) engages a hold, applying this frame's motion at once
-    // so a quick flick on the engage frame is not dropped.
+    // 2) Idle (no active hold): a discrete rotate tap (W / E / R) is a one-shot edit checked first, then
+    // an op key held over the well engages a hold, applying this frame's motion at once so a quick flick
+    // on the engage frame is not dropped. Both share the gate (selection, over the well, no focused
+    // field, no camera drag); taps fire only from idle, so they never interrupt a move or scale hold.
     if hold_allowed(f) {
+        if let Some(action) = rotate_tap(f) {
+            return Outcome { action: Some(action), ..Outcome::default() };
+        }
         if let Some(mut hold) = engage(f) {
             accumulate(&mut hold, f);
             let action = emit(&hold, f);
@@ -256,10 +267,10 @@ fn engage(f: &Inputs) -> Option<Hold> {
     Some(Hold { id, op, captured: base, axis, base, drag: seed(op) })
 }
 
-/// Re-anchor the sub-drag when the held axis keys differ from last frame's constraint (rotate / scale
-/// only - the move ops never take an axis, so their `None` never changes): a new base from the live
-/// transform (so the switch continues from where the last constraint left off) and a fresh motion
-/// accumulator (so the toggle does not jump).
+/// Re-anchor the sub-drag when the held axis keys differ from last frame's constraint (scale only - the
+/// move ops never take an axis, so their `None` never changes): a new base from the live transform (so
+/// the switch continues from where the last constraint left off) and a fresh motion accumulator (so the
+/// toggle does not jump).
 fn reseed_if_axis_changed(hold: &mut Hold, f: &Inputs) {
     let axis = axis_for(hold.op, f);
     if axis == hold.axis {
@@ -271,16 +282,16 @@ fn reseed_if_axis_changed(hold: &mut Hold, f: &Inputs) {
 }
 
 /// The sub-drag reference for an op at engage (and re-anchor): a fresh cursor reference for a move, a
-/// zeroed motion accumulator for rotate / scale.
+/// zeroed motion accumulator for scale.
 fn seed(op: Op) -> Drag {
     match op {
         Op::MoveSurface | Op::MoveFree => Drag::Cursor,
-        Op::Rotate | Op::Scale => Drag::Motion(0.0),
+        Op::Scale => Drag::Motion(0.0),
     }
 }
 
-/// Fold this frame's raw horizontal mouse motion into a rotate / scale accumulator. A move drag reads
-/// the cursor ray fresh each frame, so it has nothing to accumulate.
+/// Fold this frame's raw horizontal mouse motion into the scale accumulator. A move drag reads the
+/// cursor ray fresh each frame, so it has nothing to accumulate.
 fn accumulate(hold: &mut Hold, f: &Inputs) {
     if let Drag::Motion(accum) = &mut hold.drag {
         *accum += f.input.mouse_motion.0 as f32;
@@ -299,7 +310,6 @@ fn target(hold: &Hold, f: &Inputs) -> Option<Transform> {
     match hold.op {
         Op::MoveSurface => target_surface(hold, f),
         Op::MoveFree => target_free(hold, f),
-        Op::Rotate => target_rotate(hold, f),
         Op::Scale => target_scale(hold),
     }
 }
@@ -350,20 +360,6 @@ fn target_free(hold: &Hold, f: &Inputs) -> Option<Transform> {
     Some(Transform { translation: Vec3::new(x, y, z), ..base })
 }
 
-/// Rotate (`r`): unchanged from the shipped grammar - raw horizontal motion about the chosen world axis
-/// (default Y), 5deg snap unless Alt is held. Pre-multiplied so the rotation is about the world axis
-/// regardless of the placement's heading.
-fn target_rotate(hold: &Hold, f: &Inputs) -> Option<Transform> {
-    let Drag::Motion(accum) = hold.drag else { return None };
-    let mut degrees = accum * ROTATE_DEG_PER_PX;
-    if !f.input.key_held(NamedKey::Alt) {
-        degrees = snap(degrees, ROTATE_SNAP_DEG);
-    }
-    let ax = hold.axis.unwrap_or(Axis::Y);
-    let rotation = Quat::from_axis_angle(ax.unit(), degrees.to_radians()) * hold.base.rotation;
-    Some(Transform { rotation, ..hold.base })
-}
-
 /// Scale (`s`): unchanged - exponential in raw horizontal motion (so left / right are symmetric and the
 /// factor never reaches zero), uniform or one component by axis. Scale has no grid, so unlike rotate it
 /// reads no Alt and needs no per-frame input beyond its accumulated motion.
@@ -381,15 +377,13 @@ fn target_scale(hold: &Hold) -> Option<Transform> {
     Some(Transform { scale, ..hold.base })
 }
 
-/// The op key held this frame, if any (G surface move, F free move, R rotate, S scale; first match wins
-/// when several are down).
+/// The held op key this frame, if any (G surface move, F free move, S scale; first match wins when
+/// several are down). Rotate is not here - it is a discrete tap, not a held op.
 fn current_op(f: &Inputs) -> Option<Op> {
     if f.input.char_held(MOVE_SURFACE_KEY) {
         Some(Op::MoveSurface)
     } else if f.input.char_held(MOVE_FREE_KEY) {
         Some(Op::MoveFree)
-    } else if f.input.char_held(ROTATE_KEY) {
-        Some(Op::Rotate)
     } else if f.input.char_held(SCALE_KEY) {
         Some(Op::Scale)
     } else {
@@ -397,8 +391,35 @@ fn current_op(f: &Inputs) -> Option<Op> {
     }
 }
 
-/// The world-axis constraint for an op this frame: the X / Y / Z key for rotate and scale (first match
-/// wins when several are down), always `None` for the move ops (no axis chords on move this bite).
+/// A discrete rotate tap this frame, if any: one [`ROTATE_STEP_DEG`] step about the world axis named by
+/// a W / E / R press (pitch / yaw / roll), reversed with Shift. Keyboard-only and one-shot - no hold,
+/// no cancel; the press edge (`char_pressed`, OS auto-repeat swallowed) makes one tap exactly one step,
+/// so holding a key does not spin. `None` when no rotate key edged this frame or the selection or its
+/// placement does not resolve. The caller has already gated it (`hold_allowed`).
+fn rotate_tap(f: &Inputs) -> Option<Action> {
+    let axis = tapped_axis(f)?;
+    let id = f.selection?;
+    let base = f.loaded.placement(id)?.transform;
+    let degrees = if f.input.key_held(NamedKey::Shift) { -ROTATE_STEP_DEG } else { ROTATE_STEP_DEG };
+    Some(Action::SetInstanceTransform(id, rotate_step(base, axis, degrees)))
+}
+
+/// The world axis a rotate tap names this frame (W pitch X, E yaw Y, R roll Z; first match wins when
+/// several edge the same frame), or `None` when no rotate key was pressed.
+fn tapped_axis(f: &Inputs) -> Option<Axis> {
+    if f.input.char_pressed(ROTATE_PITCH_KEY) {
+        Some(Axis::X)
+    } else if f.input.char_pressed(ROTATE_YAW_KEY) {
+        Some(Axis::Y)
+    } else if f.input.char_pressed(ROTATE_ROLL_KEY) {
+        Some(Axis::Z)
+    } else {
+        None
+    }
+}
+
+/// The world-axis constraint for an op this frame: the X / Y / Z key for scale (first match wins when
+/// several are down), always `None` for the move ops (no axis chords on move).
 fn axis_for(op: Op, f: &Inputs) -> Option<Axis> {
     if !op.takes_axis() {
         return None;
@@ -464,6 +485,14 @@ fn rest_y(floor: f32, base_y: f32, aabb_min_y: f32) -> f32 {
     floor + (base_y - aabb_min_y)
 }
 
+/// Turn `base` by `degrees` about world `axis`, pre-multiplied so the rotation is about the world axis
+/// regardless of the placement's current heading (the W / E / R taps, +/-[`ROTATE_STEP_DEG`]). The
+/// non-rotation fields pass through. Pure so the step is unit tested.
+fn rotate_step(base: Transform, axis: Axis, degrees: f32) -> Transform {
+    let rotation = Quat::from_axis_angle(axis.unit(), degrees.to_radians()) * base.rotation;
+    Transform { rotation, ..base }
+}
+
 /// The world point where the ray `origin + t*dir` meets the horizontal plane `y = height`, or `None`
 /// when the ray runs parallel to the plane (no crossing) or the crossing is behind the eye (`t <= 0`).
 /// The free move casts the cursor ray at the selection's height.
@@ -487,14 +516,34 @@ mod tests {
 
     #[test]
     fn snap_rounds_to_the_nearest_multiple_and_a_nonpositive_step_passes_through() {
-        // The 1m translate grid (G / F XZ) and the 5deg rotate steps, plus the no-snap pass-through.
+        // The 1m translate grid (G / F XZ), plus the no-snap pass-through. snap is generic over the step.
         assert_eq!(TRANSLATE_SNAP_M, 1.0, "the move grid is a clean 1m");
         assert_eq!(snap(0.4, TRANSLATE_SNAP_M), 0.0);
         assert_eq!(snap(0.6, TRANSLATE_SNAP_M), 1.0);
         assert_eq!(snap(-1.4, TRANSLATE_SNAP_M), -1.0);
-        assert_eq!(snap(7.0, ROTATE_SNAP_DEG), 5.0);
-        assert_eq!(snap(8.0, ROTATE_SNAP_DEG), 10.0);
+        assert_eq!(snap(7.0, 5.0), 5.0, "rounds to the nearest multiple of any step");
         assert_eq!(snap(3.3, 0.0), 3.3, "a non-positive step is a pass-through");
+    }
+
+    #[test]
+    fn rotate_step_turns_5deg_about_the_world_axis_premultiplied() {
+        // W / E / R taps turn 5deg about world X / Y / Z; +5 unshifted, -5 with Shift; pre-multiplied so
+        // the turn is about the world axis regardless of the placement's heading.
+        assert_eq!(ROTATE_STEP_DEG, 5.0, "a tap is the 5deg canon step");
+        let v = Vec3::new(0.3, 0.5, 0.8);
+        // E: +5deg about world Y; Shift+W: -5deg about world X.
+        let yaw = rotate_step(Transform::IDENTITY, Axis::Y, ROTATE_STEP_DEG).rotation;
+        assert!((yaw * v - Quat::from_rotation_y(ROTATE_STEP_DEG.to_radians()) * v).length() < EPS, "E yaws +5 about Y");
+        let pitch = rotate_step(Transform::IDENTITY, Axis::X, -ROTATE_STEP_DEG).rotation;
+        assert!((pitch * v - Quat::from_rotation_x(-ROTATE_STEP_DEG.to_radians()) * v).length() < EPS, "Shift+W pitches -5");
+        // Pre-multiplied: from a turned base, the world-axis turn composes on the world (left) side.
+        let base = Transform { rotation: Quat::from_rotation_y(1.0), ..Transform::IDENTITY };
+        let rolled = rotate_step(base, Axis::Z, ROTATE_STEP_DEG).rotation;
+        let world = Quat::from_rotation_z(ROTATE_STEP_DEG.to_radians()) * base.rotation;
+        assert!((rolled * v - world * v).length() < EPS, "roll pre-multiplies about world Z");
+        // The non-rotation fields pass through.
+        let scaled = Transform { scale: Vec3::splat(2.0), ..Transform::IDENTITY };
+        assert_eq!(rotate_step(scaled, Axis::Y, ROTATE_STEP_DEG).scale, Vec3::splat(2.0), "scale untouched");
     }
 
     #[test]
