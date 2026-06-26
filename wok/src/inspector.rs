@@ -22,12 +22,15 @@
 //! rotate taps (`crate::gizmo`) spin the placement's quaternion, which axis-angle shows readably (the
 //! Euler readout it replaces was lossy and ambiguous, the source of the messy numbers) - a single-axis
 //! spin reads a clean angle, a compound one reads honestly. Rotation is authored via the taps, not here.
+//! Rotation and Scale each carry a small reset button at the row's right edge (to identity / one) - the
+//! one way back once a relative spin has compounded; Position has none (it is moved or typed).
 
 use glam::{Quat, Vec3};
 
 use wok_scene::{InstanceId, Transform};
 
 use crate::action::Action;
+use crate::icons;
 use crate::loaded::LoadedScene;
 use crate::model::Model;
 use crate::theme;
@@ -66,6 +69,10 @@ const DECIMALS: usize = 2;
 /// The leading-label width (points) of a TRANSFORM row, so the value cells line up across Pos / Rot /
 /// Scale whatever the label's length.
 const ROW_LABEL_WIDTH: f32 = 38.0;
+
+/// The width (points) of the reset-button cell at a TRANSFORM row's right edge. Reserved on every row
+/// (empty on Position, which has no reset) so the value cells line up whether or not the row resets.
+const RESET_CELL: f32 = 16.0;
 
 /// Half the smallest 2dp step: a value within this of zero rounds to `0.00`, so [`fmt2`] folds it to a
 /// clean unsigned zero (no stray `-0.00`) and the axis-angle readout treats it as identity.
@@ -119,12 +126,14 @@ pub fn floating(
 
             // TRANSFORM: Position (even editable X/Y/Z cells) and Scale (one value when uniform, else the
             // X/Y/Z triplet) commit through the edit seam the Name field uses; Rotation is a read-only
-            // axis-angle readout (authored via the W/E/R gizmo taps). Each row is its own labelled line so
-            // the value cells stay even and fixed-width - the panel does not resize as values change.
+            // axis-angle readout (authored via the W/E/R gizmo taps). Rotation and Scale carry a reset
+            // button at the right edge (identity / one); Position has none (it is moved or typed, never
+            // reset to the world origin). Each row reserves the same label and reset cells, so the value
+            // columns line up and the panel does not resize as values change.
             section(ui, "TRANSFORM");
             let t = placement.transform;
             pos_row(ui, id, t, actions);
-            rot_row(ui, t.rotation);
+            rot_row(ui, id, t, actions);
             scale_row(ui, id, t, actions);
 
             ui.add_space(8.0);
@@ -199,63 +208,146 @@ fn axis_cells(ui: &mut egui::Ui, value: Vec3) -> (Vec3, bool) {
     (v, changed)
 }
 
-/// The Position row: the three translation components as even editable cells, committed through the edit
-/// seam as a whole transform on any change.
-fn pos_row(ui: &mut egui::Ui, id: InstanceId, t: Transform, actions: &mut Vec<Action>) {
+/// Lay out one TRANSFORM row: the fixed-width dim label, the value area (a fixed-width region the
+/// `value` closure fills, so every row's values line up), and a fixed reset cell at the right edge. The
+/// `value` closure returns the edit it made (if any); `reset` is `Some((tooltip, action))` for a row
+/// with a reset button, `None` for Position (its reset cell stays empty so the columns still align).
+/// At most one of the value edit and the reset is pushed per frame.
+fn transform_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: impl FnOnce(&mut egui::Ui) -> Option<Action>,
+    reset: Option<(&str, Action)>,
+    actions: &mut Vec<Action>,
+) {
     ui.horizontal(|ui| {
-        row_label(ui, "Pos");
-        let (v, changed) = axis_cells(ui, t.translation);
-        if changed {
-            actions.push(Action::SetInstanceTransform(id, Transform { translation: v, ..t }));
+        row_label(ui, label);
+        let h = ui.spacing().interact_size.y;
+        let value_w = (ui.available_width() - RESET_CELL - ui.spacing().item_spacing.x).max(0.0);
+        let edit = ui
+            .allocate_ui_with_layout(egui::vec2(value_w, h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                // Reserve the full value width even when the content is narrow (a uniform Scale is just
+                // one number), so the reset cell - and the value cells - line up across every row.
+                ui.set_min_width(value_w);
+                value(ui)
+            })
+            .inner;
+        if let Some(action) = edit {
+            actions.push(action);
+        }
+        match reset {
+            Some((tooltip, action)) if reset_button(ui, tooltip) => actions.push(action),
+            // No reset (Position), or the button was not clicked: keep the cell's width reserved so the
+            // value columns line up across every row.
+            Some(_) => {}
+            None => {
+                ui.allocate_exact_size(egui::vec2(RESET_CELL, h), egui::Sense::hover());
+            }
         }
     });
+}
+
+/// A small reset glyph button at a row's right edge: a dim restore icon that brightens on hover, with
+/// `tooltip`, in a fixed [`RESET_CELL`] cell. Returns whether it was clicked. Resetting through the same
+/// [`Action::SetInstanceTransform`] seam means an already-default value is a clean no-op (the loaded
+/// scene no-ops an unchanged transform), so a second click never dirties.
+fn reset_button(ui: &mut egui::Ui, tooltip: &str) -> bool {
+    let p = theme::palette(ui.ctx());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(RESET_CELL, ui.spacing().interact_size.y), egui::Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tooltip);
+    let color = if response.hovered() { p.text } else { p.text_dim };
+    icons::paint(ui.painter(), rect, icons::RESET, color);
+    response.clicked()
+}
+
+/// The Position row: the three translation components as even editable cells, committed through the edit
+/// seam on any change. No reset - position is moved or typed, not reset to the world origin.
+fn pos_row(ui: &mut egui::Ui, id: InstanceId, t: Transform, actions: &mut Vec<Action>) {
+    transform_row(
+        ui,
+        "Pos",
+        |ui| {
+            let (v, changed) = axis_cells(ui, t.translation);
+            changed.then_some(Action::SetInstanceTransform(id, Transform { translation: v, ..t }))
+        },
+        None,
+        actions,
+    );
+}
+
+/// The Rotation row: a READ-ONLY axis-angle readout (authored by the gizmo's W / E / R taps), with a
+/// reset button to clear it to identity. Axis-angle, not Euler, because Euler is lossy and ambiguous
+/// (the source of the old messy numbers); a single-axis spin reads a clean angle about a unit axis, a
+/// compound one reads honestly. Reset is the only way back to no-rotation once a relative spin has
+/// compounded.
+fn rot_row(ui: &mut egui::Ui, id: InstanceId, t: Transform, actions: &mut Vec<Action>) {
+    transform_row(
+        ui,
+        "Rot",
+        |ui| {
+            rot_readout(ui, t.rotation);
+            None
+        },
+        Some(("Reset rotation", Action::SetInstanceTransform(id, reset_rotation(t)))),
+        actions,
+    );
 }
 
 /// The Scale row: a single editable value when the scale is uniform (the common case - editing it sets
-/// all three components together), else the even X/Y/Z editable cells. Committed through the edit seam.
+/// all three components together), else the even X/Y/Z editable cells, with a reset button to one.
 fn scale_row(ui: &mut egui::Ui, id: InstanceId, t: Transform, actions: &mut Vec<Action>) {
-    ui.horizontal(|ui| {
-        row_label(ui, "Scale");
-        if is_uniform(t.scale) {
-            let mut s = t.scale.x;
-            let changed = ui
-                .scope(|ui| {
-                    ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
-                    let dv = egui::DragValue::new(&mut s).speed(LINEAR_DRAG_SPEED).fixed_decimals(DECIMALS);
-                    ui.add(dv).changed()
-                })
-                .inner;
-            if changed {
-                actions.push(Action::SetInstanceTransform(id, Transform { scale: Vec3::splat(s), ..t }));
-            }
-        } else {
-            let (v, changed) = axis_cells(ui, t.scale);
-            if changed {
-                actions.push(Action::SetInstanceTransform(id, Transform { scale: v, ..t }));
-            }
+    transform_row(
+        ui,
+        "Scale",
+        |ui| scale_value(ui, id, t),
+        Some(("Reset scale", Action::SetInstanceTransform(id, reset_scale(t)))),
+        actions,
+    );
+}
+
+/// The Scale row's value area: a single monospace 2dp `DragValue` when the scale is uniform (editing it
+/// sets all three components via `splat`), else the even X/Y/Z editable cells. Returns the edit it made.
+fn scale_value(ui: &mut egui::Ui, id: InstanceId, t: Transform) -> Option<Action> {
+    if is_uniform(t.scale) {
+        let mut s = t.scale.x;
+        let changed = ui
+            .scope(|ui| {
+                ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+                let dv = egui::DragValue::new(&mut s).speed(LINEAR_DRAG_SPEED).fixed_decimals(DECIMALS);
+                ui.add(dv).changed()
+            })
+            .inner;
+        changed.then_some(Action::SetInstanceTransform(id, Transform { scale: Vec3::splat(s), ..t }))
+    } else {
+        let (v, changed) = axis_cells(ui, t.scale);
+        changed.then_some(Action::SetInstanceTransform(id, Transform { scale: v, ..t }))
+    }
+}
+
+/// Paint the two-line axis-angle readout (the angle, then the axis tuple) into the Rotation row's value
+/// area. Dim, monospace; the break before the tuple keeps it whole and the panel width steady.
+fn rot_readout(ui: &mut egui::Ui, rotation: Quat) {
+    let dim = theme::palette(ui.ctx()).text_dim;
+    let text = axis_angle_text(rotation);
+    ui.vertical(|ui| {
+        let (angle, axis) = text.split_once(" (").unwrap_or((text.as_str(), ""));
+        ui.label(egui::RichText::new(angle).monospace().color(dim));
+        if !axis.is_empty() {
+            ui.label(egui::RichText::new(format!("({axis}")).monospace().color(dim));
         }
     });
 }
 
-/// The Rotation row: a READ-ONLY axis-angle readout of the placement's quaternion (authored by the
-/// gizmo's W / E / R taps). Axis-angle, not Euler, because Euler is lossy and ambiguous (the source of
-/// the old messy numbers); a single-axis spin reads a clean angle about a unit axis, a compound one
-/// reads honestly. Dim and monospace, laid over two lines - the angle then the axis tuple - so the tuple
-/// never breaks mid-way and the panel width stays steady.
-fn rot_row(ui: &mut egui::Ui, rotation: Quat) {
-    let dim = theme::palette(ui.ctx()).text_dim;
-    let text = axis_angle_text(rotation);
-    ui.horizontal(|ui| {
-        row_label(ui, "Rot");
-        ui.vertical(|ui| {
-            // Break before the axis tuple ("<angle>deg about" then "(x, y, z)"), so the tuple stays whole.
-            let (angle, axis) = text.split_once(" (").unwrap_or((text.as_str(), ""));
-            ui.label(egui::RichText::new(angle).monospace().color(dim));
-            if !axis.is_empty() {
-                ui.label(egui::RichText::new(format!("({axis}")).monospace().color(dim));
-            }
-        });
-    });
+/// The transform that resets rotation to identity (no rotation), keeping position and scale. The
+/// Rotation row's reset emits this; pure, so the reset value is unit tested.
+fn reset_rotation(t: Transform) -> Transform {
+    Transform { rotation: Quat::IDENTITY, ..t }
+}
+
+/// The transform that resets scale to one (uniform 1), keeping position and rotation. The Scale row's
+/// reset emits this; pure, so the reset value is unit tested.
+fn reset_scale(t: Transform) -> Transform {
+    Transform { scale: Vec3::ONE, ..t }
 }
 
 /// Whether all three components are equal - the uniform-scale case the Scale row shows as one value.
@@ -318,5 +410,23 @@ mod tests {
         assert!(is_uniform(Vec3::ONE));
         assert!(!is_uniform(Vec3::new(1.0, 2.0, 1.0)));
         assert!(!is_uniform(Vec3::new(1.0, 1.0, 1.5)));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn reset_clears_rotation_to_identity_and_scale_to_one_keeping_the_rest() {
+        // The per-row resets carry the exact default and leave the other components, so each reset
+        // touches only its own axis of the transform.
+        let t = Transform {
+            translation: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Quat::from_rotation_y(1.0),
+            scale: Vec3::splat(2.0),
+        };
+        let r = reset_rotation(t);
+        assert_eq!(r.rotation, Quat::IDENTITY, "rotation reset clears to identity");
+        assert_eq!((r.translation, r.scale), (t.translation, t.scale), "and leaves position and scale");
+        let s = reset_scale(t);
+        assert_eq!(s.scale, Vec3::ONE, "scale reset clears to one");
+        assert_eq!((s.translation, s.rotation), (t.translation, t.rotation), "and leaves position and rotation");
     }
 }

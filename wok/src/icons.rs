@@ -54,6 +54,9 @@ pub const FOLDER_OPEN: char = '\u{f0770}';
 /// the Prefabs nav view's [`CUBE_OUTLINE`], so a placed instance reads as solid against the outline
 /// the library uses.
 pub const CUBE: char = '\u{f01a6}';
+/// `nf-md-refresh` - the inspector's per-row reset affordance (Rotation -> identity, Scale -> one). A
+/// circular-arrow mark reads as "reset to default"; the row's tooltip names which.
+pub const RESET: char = '\u{f0450}';
 
 /// The bundled icons-only symbols font, embedded so the build needs no network and the asset is
 /// version-pinned (see `wok/assets/README.md`).
@@ -108,7 +111,7 @@ mod tests {
         install_font(&ctx);
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             ctx.fonts(|fonts| {
-                for glyph in [MENU, LAYERS, CUBE_OUTLINE, LIST_BULLETED, WEATHER_SUNNY, FOLDER, FOLDER_OPEN, CUBE] {
+                for glyph in [MENU, LAYERS, CUBE_OUTLINE, LIST_BULLETED, WEATHER_SUNNY, FOLDER, FOLDER_OPEN, CUBE, RESET] {
                     let probe = fonts.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(MEASURE_SIZE), egui::Color32::WHITE);
                     let font = font_for_ink_height(probe.mesh_bounds.size());
                     let galley = fonts.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(font), egui::Color32::WHITE);

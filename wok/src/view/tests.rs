@@ -337,8 +337,8 @@ fn chrome_instances_flat_snapshot() {
 /// shows it - IDENTITY (the editable Name field showing the current name, the `oak_tree` prefab, the
 /// `0x00000001` id) and TRANSFORM (Position as even editable X/Y/Z cells, the read-only axis-angle
 /// Rotation reading "45.00deg about (0.00, 1.00, 0.00)" for the seeded yaw, and the uniform Scale as a
-/// single 1.50 value, all fixed at 2dp), closing on the boundary line. The Name is a `TextEdit`; the
-/// scene is
+/// single 1.50 value, all fixed at 2dp, with a reset button on the Rotation and Scale rows), closing on
+/// the boundary line. The Name is a `TextEdit`; the scene is
 /// unedited, so the status bar shows no save dot - the dirty state is `chrome_instances_dirty`. Built
 /// by setting the selection directly (not by faking a row click), the counterpart to the grouped
 /// snapshot's deselected / no-inspector state (sharp-edges 3: build the state on the model). Dark
