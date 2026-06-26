@@ -262,29 +262,6 @@ impl RenderScene {
         best.map(|t| origin + dir * t)
     }
 
-    /// World height of the surface (terrain or a prefab top) at the vertical column over world
-    /// `(x, z)`, or `None` when nothing is there. The surface-snap move rests the instance here after
-    /// snapping its XZ to the grid, so it sits on the surface at the grid point rather than the
-    /// unsnapped cursor hit. The highest surface in the column wins (rest on top of a stack); `exclude`
-    /// (the moving instance) is skipped.
-    ///
-    /// Terrain is sampled directly. Each prefab top is read by a short downward ray cast from just
-    /// above that shape's own bounds, so its first entry is the shape's true top at the column (a
-    /// sphere or cylinder rests at its real height) and no global scene height or terrain march range
-    /// is needed.
-    pub fn surface_height_at(&self, x: f32, z: f32, exclude: InstanceId) -> Option<f32> {
-        let mut best = self.terrain_height_at(x, z);
-        self.for_each_excluded_shape(exclude, |primitive, world| {
-            let above = wok_physics::world_aabb(primitive, world).max.y + 1.0;
-            let collider = wok_physics::classify_collider(primitive, world);
-            if let Some(t) = wok_physics::ray_collider(Vec3::new(x, above, z), Vec3::NEG_Y, &collider) {
-                let top = above - t;
-                best = Some(best.map_or(top, |b| b.max(top)));
-            }
-        });
-        best
-    }
-
     /// The world-space AABB of one instance's prefab shapes at its live transform (rotation and scale
     /// included), or `None` when the instance resolves to no shape (an unknown prefab/state, or a
     /// mesh-only state with no placeholder shapes). The surface-snap move reads this to rest the item's
@@ -673,26 +650,25 @@ mod tests {
     }
 
     #[test]
-    fn surface_height_at_returns_the_top_of_the_column_and_skips_the_excluded() {
-        // The re-sample the surface-snap move uses after snapping XZ: the highest surface in the
-        // column, with the moving instance excluded.
+    fn surface_ray_under_a_floating_prefab_lands_on_the_terrain_the_aim_points_at() {
+        // The under-prefab fix: G sources its height from where the cursor ray actually lands
+        // (surface_ray), not the column top, so aiming at terrain beneath a prefab rests on the ground -
+        // no teleport onto the prefab. A unit cube floats at (10, 3, 10); a ray angled in under it lands
+        // on the terrain at its column (which target_surface then snaps to the 1m grid floor, here 0).
         let root = unique_temp_root();
         let _ = std::fs::remove_dir_all(&root);
         seed_content(&root, "village");
         save_flat_heightmap(&root, "village", ChunkCoord::new(0, 0), 0.0);
-        let placed = Transform { translation: Vec3::new(10.0, 0.0, 10.0), ..Transform::IDENTITY };
-        let scene = RenderScene::build(&root, "village", &[one_block(placed)]);
+        let floating = Transform { translation: Vec3::new(10.0, 3.0, 10.0), ..Transform::IDENTITY };
+        let scene = RenderScene::build(&root, "village", &[one_block(floating)]);
 
-        // Over the block: the top of its unit cube at y = 0.5 (above the terrain at 0).
-        let on_block = scene.surface_height_at(10.0, 10.0, InstanceId(99)).expect("a surface in the column");
-        assert!((on_block - 0.5).abs() < 0.05, "block top: {on_block}");
-        // Excluding the block (the instance being moved): the terrain beneath it.
-        let under = scene.surface_height_at(10.0, 10.0, InstanceId(0)).expect("terrain under the block");
-        assert!(under.abs() < 0.05, "ground under: {under}");
-        // Empty ground: the terrain height; off the terrain and under no prefab: nothing.
-        let ground = scene.surface_height_at(50.0, 50.0, InstanceId(0)).expect("terrain");
-        assert!(ground.abs() < 0.05, "ground: {ground}");
-        assert!(scene.surface_height_at(-500.0, -500.0, InstanceId(0)).is_none(), "the void is empty");
+        // From low and to the south, angled down to the ground directly under the floating cube: the ray
+        // passes beneath the cube (y ~ 0 through its column) and meets the terrain, never the cube top.
+        let origin = Vec3::new(10.0, 2.0, 0.0);
+        let dir = (Vec3::new(10.0, 0.0, 10.0) - origin).normalize();
+        let hit = scene.surface_ray(origin, dir, InstanceId(99)).expect("hits the ground under the cube");
+        assert!(hit.y.abs() < 0.05, "lands on the terrain (y ~ 0), not the cube top at 3.5: {hit:?}");
+        assert!((hit.x - 10.0).abs() < 0.2 && (hit.z - 10.0).abs() < 0.3, "under the cube's column: {hit:?}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

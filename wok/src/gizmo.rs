@@ -8,12 +8,15 @@
 //!
 //! The grammar ([`update`], driven from the frame loop where the camera, the render residency, and the
 //! raw input live):
-//! - Move onto the surface (`g`): the placement follows the cursor onto whatever lies under it -
-//!   resting on the terrain or climbing onto a prefab beneath. The cursor ray's surface hit
-//!   ([`RenderScene::surface_ray`](crate::render_scene::RenderScene::surface_ray)) gives the XZ,
-//!   snapped to the 1m grid; the placement then rests on the surface at that grid column
-//!   ([`RenderScene::surface_height_at`](crate::render_scene::RenderScene::surface_height_at)), so it
-//!   rides the ground and prefabs but lands on grid lines.
+//! - Move onto the surface (`g`): the placement follows the cursor onto whatever it aims at - the
+//!   terrain or a prefab beneath. The cursor ray's surface hit
+//!   ([`RenderScene::surface_ray`](crate::render_scene::RenderScene::surface_ray)) gives both the XZ and
+//!   the height, each snapped to the 1m grid; the placement's bottom rests there (lifted by its
+//!   pivot-to-bottom offset from
+//!   [`RenderScene::instance_aabb`](crate::render_scene::RenderScene::instance_aabb)). Sourcing the
+//!   height from the actual hit means G follows the aim - terrain under or past a prefab rests on the
+//!   ground, a prefab top stacks, with no teleport - and the snapped height may sit slightly in the
+//!   ground (penetration is allowed).
 //! - Move free (`f`): the placement slides in the horizontal plane at its current height (the cursor
 //!   ray meets `y = translation.y`), snapped to the 1m grid. The scroll wheel steps the height by 1m
 //!   of world vertical per notch instead of dollying the camera (the frame loop gates the dolly off
@@ -301,24 +304,26 @@ fn target(hold: &Hold, f: &Inputs) -> Option<Transform> {
     }
 }
 
-/// Surface-snap move (`g`): rest the placement's BOTTOM on the surface under the cursor, snapped to the
-/// 1m grid. The cursor ray's surface hit (terrain or a prefab beneath, never the moving instance) gives
-/// the XZ; snapping it to the grid, the placement rests on the surface at that grid column - so it rides
-/// the ground and prefabs but lands on grid lines. The height lifts the item by its pivot-to-bottom
-/// offset ([`rest_y`] over the instance's live AABB), so a centre-pivoted prefab sits on the surface
-/// rather than half-buried. `None` (hold position) when the cursor is gone or the ray meets only sky; a
-/// snapped column with no surface (just off an edge) keeps the cursor hit's height, and a shape-less
-/// instance falls back to resting its origin, so the move still lands rather than stalling.
+/// Surface-snap move (`g`): rest the placement's BOTTOM on the surface the cursor aims at, snapped to
+/// the 1m grid. The cursor ray's surface hit (terrain or a prefab beneath, never the moving instance)
+/// gives both the XZ and the height, each snapped to the grid; the bottom rests at that height, lifted
+/// by the item's pivot-to-bottom offset ([`rest_y`] over the instance's live AABB) so a centre-pivoted
+/// prefab is not half-buried. Sourcing the height from the actual hit - not the highest surface in the
+/// snapped column - means G follows the aim: point at terrain under or past a prefab and it rests on the
+/// ground; point at a prefab top and it stacks; no teleport onto a prefab the snapped XZ slides under.
+/// The snapped height may sit slightly in the ground (penetration is allowed). `None` (hold position)
+/// when the cursor is gone or the ray meets only sky; a shape-less instance falls back to resting its
+/// origin on the grid height.
 fn target_surface(hold: &Hold, f: &Inputs) -> Option<Transform> {
     let base = f.loaded.placement(hold.id)?.transform;
     let (origin, dir) = cursor_ray(f, f.cursor?);
     let hit = f.scene.surface_ray(origin, dir, hold.id)?;
     let x = snap(hit.x, TRANSLATE_SNAP_M);
     let z = snap(hit.z, TRANSLATE_SNAP_M);
-    let surface = f.scene.surface_height_at(x, z, hold.id).unwrap_or(hit.y);
+    let floor = snap(hit.y, TRANSLATE_SNAP_M);
     let y = match f.scene.instance_aabb(hold.id) {
-        Some(aabb) => rest_y(surface, base.translation.y, aabb.min.y),
-        None => surface,
+        Some(aabb) => rest_y(floor, base.translation.y, aabb.min.y),
+        None => floor,
     };
     Some(Transform { translation: Vec3::new(x, y, z), ..base })
 }
@@ -447,13 +452,14 @@ fn stepped_y(base_y: f32, notches: f32) -> f32 {
     base_y + notches * MOVE_Y_STEP_M
 }
 
-/// The translation Y that rests an item's BOTTOM on `surface`: the surface plus the item's pivot-to-
-/// bottom offset (`base_y - aabb_min_y`, the height of the origin above the item's lowest point at the
-/// live rotation and scale). A centre-pivoted prefab would otherwise sink half-in; this lifts it so the
-/// lowest point sits on the surface. The offset cancels `base_y`, so it is invariant under where the
-/// item currently sits and depends only on the item's shape.
-fn rest_y(surface: f32, base_y: f32, aabb_min_y: f32) -> f32 {
-    surface + (base_y - aabb_min_y)
+/// The translation Y that rests an item's BOTTOM at world height `floor`: `floor` plus the item's
+/// pivot-to-bottom offset (`base_y - aabb_min_y`, the height of the origin above the item's lowest point
+/// at the live rotation and scale). A centre-pivoted prefab would otherwise sink half-in; this lifts it
+/// so the lowest point sits at `floor`. The offset cancels `base_y`, so it is invariant under where the
+/// item currently sits and depends only on the item's shape. G feeds `floor` the cursor's surface-hit
+/// height snapped to the 1m grid.
+fn rest_y(floor: f32, base_y: f32, aabb_min_y: f32) -> f32 {
+    floor + (base_y - aabb_min_y)
 }
 
 /// The world point where the ray `origin + t*dir` meets the horizontal plane `y = height`, or `None`
@@ -500,14 +506,17 @@ mod tests {
     }
 
     #[test]
-    fn rest_y_sits_the_items_bottom_on_the_surface_not_its_centre() {
-        // A 2m box with a centred origin sits 1m above its bottom (AABB min.y = -1 when at y = 0).
-        // On flat ground (surface 0) its origin lifts to 1.0 so the bottom rests at 0; on a 1m-tall
-        // prefab top (surface 1) it rests at 2.0 (the prefab top plus the box half-height).
+    fn rest_y_sits_the_items_bottom_on_the_grid_floor_under_the_aim() {
+        // G snaps the cursor ray's surface-hit height to the 1m grid, then rests the item's bottom
+        // there. A centred 2m box (AABB min.y = base - 1) aimed where the surface is y = 3.4: the height
+        // snaps to 3.0, so the base lands at 3.0 (translation.y = 4.0) - 0.4 into the ground, which is
+        // fine (placement allows penetration).
+        assert_eq!(rest_y(snap(3.4, TRANSLATE_SNAP_M), 0.0, -1.0), 4.0, "base on the 1m grid at 3.0, into the ground");
+        // On flat ground (floor 0) its centre lifts to 1.0 so the bottom rests at 0; on a 1m floor it
+        // rests at 2.0. The pivot-to-bottom offset cancels the current height, so the result depends
+        // only on the floor and the item's shape, not where it sits now.
         assert_eq!(rest_y(0.0, 0.0, -1.0), 1.0, "on flat ground the 2m box's centre lifts to 1.0");
-        assert_eq!(rest_y(1.0, 0.0, -1.0), 2.0, "on a 1m prefab top it rests at 2.0");
-        // The pivot-to-bottom offset cancels the current height, so the rested result depends only on
-        // the surface and the item's shape, not where it sits now.
+        assert_eq!(rest_y(1.0, 0.0, -1.0), 2.0, "a 1m floor rests it at 2.0");
         assert_eq!(rest_y(0.0, 5.0, 4.0), 1.0, "the same 1m offset, measured from a different height");
     }
 
