@@ -82,10 +82,10 @@ struct Editor {
     /// grabbed at, restored there on release so it never jumps (`input::update_cursor_grab`). `None`
     /// when no drag is capturing the cursor.
     cursor_grab: Option<PhysicalPosition<f64>>,
-    /// The in-progress transform manipulation (`crate::gizmo`): a held op + axis grammar (G / R / S with
-    /// an optional X / Y / Z) advanced each frame from the mouse and the held keys. `None` when the
-    /// gizmo is idle. It rides here beside the camera, since like the camera it is viewport interaction
-    /// state the egui- and disk-free `Model` does not hold.
+    /// The in-progress transform manipulation (`crate::gizmo`): a held-key grammar (G surface move, F
+    /// free move + scroll height, R rotate, S scale) advanced each frame from the mouse and the held
+    /// keys. `None` when the gizmo is idle. It rides here beside the camera, since like the camera it is
+    /// viewport interaction state the egui- and disk-free `Model` does not hold.
     gizmo: Option<gizmo::Hold>,
     /// The window title last pushed to the OS, so `set_title` fires only when it changes.
     title: String,
@@ -196,15 +196,8 @@ impl App for Editor {
         let output = {
             let model = &self.model;
             let loaded_scene = self.loaded_scene.as_ref();
-            // The tripod's draw inputs: the camera and the scene's far plane project the axis lines with
-            // the same matrix the 3D and the pick use. `None` until a render residency exists, which is
-            // also when the well has nothing to mark a selection over.
-            let gizmo_view = self.render_scene.as_ref().map(|scene| gizmo::GizmoView {
-                camera: self.camera,
-                far: scene.far_plane(),
-            });
             gui.run(&ctx.platform.window, |egui_ctx| {
-                let (acts, rect) = view::chrome(egui_ctx, model, loaded_scene, gizmo_view);
+                let (acts, rect) = view::chrome(egui_ctx, model, loaded_scene);
                 actions.extend(acts);
                 editor_rect = rect;
             })
@@ -229,21 +222,21 @@ impl App for Editor {
         let pointer_free = over_well && !gui.ctx.is_using_pointer();
 
         // Drive the transform gizmo before the action drain, where the camera, the render residency, and
-        // the raw input live (not the pure Model). It advances or ends a held op + axis manipulation and
-        // emits the resulting transform edit through the same single writer the inspector uses, and
-        // reports when it consumed this frame's Esc to cancel a hold (so the chrome's deselect is dropped
-        // below - a cancel keeps the selection). It ray-casts with the scene's far plane (one
-        // cursor-to-ray source, sharp-edges 2), so it is inert until a render residency exists; last
-        // frame's residency is fine (the far plane does not change without a scene reload), and any edit
-        // shows this frame via the reconcile below.
+        // the raw input live (not the pure Model). It advances or ends a held-key manipulation (G / F
+        // move, R / S rotate / scale) and emits the resulting transform edit through the same single
+        // writer the inspector uses. It reports when it consumed this frame's Esc to cancel a hold (so
+        // the chrome's deselect is dropped below - a cancel keeps the selection) and when a free move
+        // claimed the scroll (so the camera dolly is gated off below). It casts against the residency's
+        // colliders and terrain at its far plane (one cursor-to-ray source, sharp-edges 2), so it is
+        // inert until a render residency exists; any edit shows this frame via the reconcile below.
         let gizmo_out = match (self.loaded_scene.as_ref(), self.render_scene.as_ref()) {
             (Some(loaded), Some(scene)) => {
                 let inputs = gizmo::Inputs {
                     input: &ctx.input,
                     camera: &self.camera,
                     loaded,
+                    scene,
                     selection: self.model.shell.selection(),
-                    far: scene.far_plane(),
                     rect: editor_rect,
                     cursor: pointer.map(|p| Vec2::new(p.x, p.y)),
                     over_well,
@@ -312,7 +305,14 @@ impl App for Editor {
         // well, so a confined cursor (the Windows fallback) drifting over a panel does not cut the drag -
         // and it drives from frame one, covering pointer_free's press-frame dead spot.
         let lock_active = input::update_cursor_grab(&mut self.cursor_grab, &ctx.platform.window, &ctx.input, over_well);
-        self.camera = camera::update(&self.camera, &input::camera_input(&ctx.input, pointer_free || lock_active));
+        // The free move (`f` held) steps the instance's height with the wheel, so gate the camera's
+        // scroll-dolly off this frame when the gizmo claimed the scroll; everything else (look, pan,
+        // and dolly when `f` is not held) is untouched. The gizmo ran above, so the flag is this frame's.
+        let mut camera_input = input::camera_input(&ctx.input, pointer_free || lock_active);
+        if gizmo_out.consumed_scroll {
+            camera_input.dolly = 0.0;
+        }
+        self.camera = camera::update(&self.camera, &camera_input);
         render::draw(ctx.platform, gpu, self.render_scene.as_ref(), self.camera, editor_rect, editor_bg, gui, output);
 
         // Keep the window title on the open project's name (or just the app name when none).

@@ -73,6 +73,12 @@ pub struct RenderScene {
     /// scene reload, and a re-derive drops the store's terrain meshes), unioned with the live visible
     /// items in [`scene_bounds`](Self::scene_bounds). `None` for a scene with no terrain.
     terrain_bounds: Option<Aabb>,
+    /// The per-chunk heightmaps, cached at build keyed by chunk coord. Cached here because a re-derive
+    /// rebuilds the store with no heightmap (the GPU terrain is cached separately), which would
+    /// otherwise drop them after the first edit; terrain does not change without a scene reload, so a
+    /// build-time copy stays valid. The surface-snap move samples these to rest an instance on the
+    /// ground ([`surface_ray`](Self::surface_ray) -> [`terrain_height_at`](Self::terrain_height_at)).
+    heightmaps: HashMap<ChunkCoord, Heightmap>,
     /// The authored chunks the store was last derived from. [`reconcile`] re-derives when the live
     /// authored chunks differ from this, so an inspector edit shows in the 3D without disk I/O.
     source_chunks: Vec<Chunk>,
@@ -96,9 +102,15 @@ impl RenderScene {
             .as_ref()
             .map_or(FALLBACK_RENDER_DISTANCE, |m| m.default_streaming.render_distance());
 
+        let mut heightmaps = HashMap::new();
         let mut store = ChunkStore::new();
         for chunk in chunks {
             let heightmap = heightmap_for(&layout, name, chunk.coord);
+            // Cache the heightmap before it moves into the store, so the surface-snap move can sample
+            // terrain even after a re-derive drops the store's copy.
+            if let Some(h) = &heightmap {
+                heightmaps.insert(chunk.coord, h.clone());
+            }
             if let Err(err) = store.load(chunk.clone(), heightmap, &prefabs) {
                 eprintln!("wok: chunk {}_{} did not load for render: {err}", chunk.coord.x, chunk.coord.z);
             }
@@ -113,6 +125,7 @@ impl RenderScene {
             render_distance,
             store,
             terrain_bounds,
+            heightmaps,
             source_chunks: chunks.to_vec(),
         }
     }
@@ -217,6 +230,61 @@ impl RenderScene {
             }
         }
         best.map(|(_, id)| id)
+    }
+
+    /// Cast a ray against the scene's surfaces - the prefab colliders and the terrain - and return the
+    /// world point where it first lands, or `None` when it meets neither (the cursor is over empty
+    /// sky). The editor's surface-snap move (`g`) rests the dragged instance on whatever lies under the
+    /// cursor; `exclude` is that instance, whose own colliders are skipped so it snaps to the ground or
+    /// to other prefabs, never to itself.
+    ///
+    /// The nearer of two hits wins. The prefab colliders are tested exactly, the same
+    /// `classify_collider` -> [`ray_collider`](wok_physics::ray_collider) path as [`pick`](Self::pick)
+    /// (so a snap lands on what a placement collides as), over the authored chunks. The terrain is then
+    /// marched no farther than the nearest collider - a closer solid occludes the ground - by sampling
+    /// the cached heightmaps, a stepped sample precise enough for snapping (the inspector is the exact
+    /// path). Returns `origin + dir * t` for the winning `t`.
+    pub fn surface_ray(&self, origin: Vec3, dir: Vec3, exclude: InstanceId) -> Option<Vec3> {
+        // Nearest prefab-collider hit, skipping the moving instance. The traversal mirrors `pick`'s but
+        // tracks the nearest distance rather than the instance, and drops the dragged one.
+        let mut best: Option<f32> = None;
+        for chunk in &self.source_chunks {
+            let origin_mat = Mat4::from_translation(chunk_origin(chunk.coord));
+            for placement in &chunk.placements {
+                if placement.instance_id == exclude {
+                    continue;
+                }
+                let Some(prefab) = self.prefabs.get(&placement.prefab) else { continue };
+                let state_name = placement.state.as_deref().unwrap_or(&prefab.default_state);
+                let Some(state) = prefab.states.iter().find(|s| s.name == state_name) else { continue };
+                let placement_mat = origin_mat * placement.transform.to_mat4();
+                for shape in &state.shapes {
+                    let world = placement_mat * shape.transform.to_mat4();
+                    let collider = wok_physics::classify_collider(shape.primitive, world);
+                    if let Some(t) = wok_physics::ray_collider(origin, dir, &collider) {
+                        best = Some(best.map_or(t, |b| b.min(t)));
+                    }
+                }
+            }
+        }
+        // Terrain, no farther than the nearest collider. A hit within that range is necessarily the
+        // nearer (or equal), so it wins outright.
+        let march_to = best.unwrap_or_else(|| self.far_plane());
+        if let Some(t) = ray_heightfield(origin, dir, march_to, |x, z| self.terrain_height_at(x, z)) {
+            best = Some(t);
+        }
+        best.map(|t| origin + dir * t)
+    }
+
+    /// World terrain height at world `(x, z)`, or `None` off the loaded terrain (no chunk there, or one
+    /// with no heightmap). Resolves the chunk from the world coordinate and samples its cached
+    /// heightmap in chunk-local space; the chunk origin's height is zero, so the sample is the world
+    /// height. Reads the heightmaps cached at build, which survive an edit's re-derive.
+    fn terrain_height_at(&self, x: f32, z: f32) -> Option<f32> {
+        let coord = ChunkCoord::new((x / CHUNK_SIZE_M).floor() as i32, (z / CHUNK_SIZE_M).floor() as i32);
+        let heightmap = self.heightmaps.get(&coord)?;
+        let origin = chunk_origin(coord);
+        Some(heightmap.height_at(x - origin.x, z - origin.z))
     }
 }
 
@@ -338,14 +406,51 @@ fn terrain_bounds(store: &ChunkStore) -> Option<Aabb> {
     (min.x <= max.x).then(|| Aabb::new(min, max))
 }
 
+/// Step between height samples along the surface march, in metres. Coarse enough to stay cheap over a
+/// scene-far ray, fine enough that the interpolated crossing snaps cleanly.
+const TERRAIN_MARCH_STEP_M: f32 = 0.5;
+
+/// March the ray `origin + t*dir` (`dir` normalized) against a height field, returning the `t` where it
+/// first dips to or below the surface within `max_t`, or `None` when it never does. A stepped sample
+/// (canon: fine for snapping): the surface is read every [`TERRAIN_MARCH_STEP_M`], and the bracket
+/// where the ray crosses is interpolated by the signed gap on each side, so the snap is not stair-
+/// stepped to the stride. `sample` returns the world height at `(x, z)`, or `None` off the terrain - a
+/// gap is not a crossing, so it breaks the above-the-surface tracking rather than registering a hit.
+fn ray_heightfield(origin: Vec3, dir: Vec3, max_t: f32, sample: impl Fn(f32, f32) -> Option<f32>) -> Option<f32> {
+    // The previous on-terrain sample: its t and signed gap (ray height minus terrain height), kept to
+    // interpolate the crossing. Cleared on a gap, so a bracket never spans terrain-less space.
+    let mut prev: Option<(f32, f32)> = None;
+    let mut t = 0.0;
+    while t <= max_t {
+        let p = origin + dir * t;
+        if let Some(h) = sample(p.x, p.z) {
+            let gap = p.y - h;
+            if gap <= 0.0 {
+                return Some(match prev {
+                    // A bracket from above (gap > 0) to on/below: interpolate where the gap hits zero.
+                    Some((tp, gp)) if gp > 0.0 => tp + (t - tp) * gp / (gp - gap),
+                    // The march started on or under the terrain: it is already there.
+                    _ => t,
+                });
+            }
+            prev = Some((t, gap));
+        } else {
+            prev = None;
+        }
+        t += TERRAIN_MARCH_STEP_M;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use wok_scene::{
-        Chunk, ChunkCoord, ChunkStreaming, Eagerness, InstanceId, LightStateRef, Placement, Prefab,
-        PrefabState, Primitive, Scene, Shape, StreamingDefaults, SurfaceTag, Transform, save_prefab, save_scene,
+        CHUNK_GRID_LEN, Chunk, ChunkCoord, ChunkStreaming, Eagerness, Heightmap, InstanceId, LightStateRef,
+        Placement, Prefab, PrefabState, Primitive, Scene, Shape, StreamingDefaults, SurfaceTag, Transform,
+        save_heightmap, save_prefab, save_scene,
     };
 
     #[allow(clippy::float_cmp)]
@@ -395,6 +500,17 @@ mod tests {
 
         std::fs::create_dir_all(layout.lighting_dir()).unwrap();
         wok_light::save_light_state(&LightState::default(), layout.lighting("noon")).unwrap();
+    }
+
+    /// Write a flat heightmap (every cell at `height_m`, one surface tag) for `coord` under the scene,
+    /// so `RenderScene::build` loads terrain the surface-snap move can sample.
+    fn save_flat_heightmap(root: &Path, scene: &str, coord: ChunkCoord, height_m: f32) {
+        let layout = ContentLayout::new(root);
+        let raw = Heightmap::meters_to_raw(height_m);
+        let heightmap =
+            Heightmap::new(vec![raw; CHUNK_GRID_LEN], vec![SurfaceTag::new("grass")], vec![0; CHUNK_GRID_LEN])
+                .unwrap();
+        save_heightmap(&heightmap, layout.heightmap(scene, coord)).unwrap();
     }
 
     /// One chunk placing a single `block` instance at `transform`.
@@ -466,5 +582,73 @@ mod tests {
         assert_ne!(before, after, "the re-derive carries the moved placement into the runtime arrays");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn surface_ray_lands_on_the_nearest_of_prefab_and_terrain_and_skips_the_excluded() {
+        // The surface-snap move's spatial query: the nearer of a prefab collider and the terrain, with
+        // the moving instance excluded so it never snaps to itself.
+        let root = unique_temp_root();
+        let _ = std::fs::remove_dir_all(&root);
+        seed_content(&root, "village");
+        save_flat_heightmap(&root, "village", ChunkCoord::new(0, 0), 0.0);
+
+        // A unit-cube block centred at (10, 0, 10): its top face sits at y = 0.5 over flat terrain at 0.
+        let placed = Transform { translation: Vec3::new(10.0, 0.0, 10.0), ..Transform::IDENTITY };
+        let scene = RenderScene::build(&root, "village", &[one_block(placed)]);
+
+        // Straight down onto the block lands on its top face (the collider is nearer than the ground).
+        let on_block =
+            scene.surface_ray(Vec3::new(10.0, 10.0, 10.0), Vec3::NEG_Y, InstanceId(99)).expect("hits the block");
+        assert!((on_block - Vec3::new(10.0, 0.5, 10.0)).length() < 0.05, "on the block top: {on_block:?}");
+
+        // Excluding the block (the instance being moved) falls through to the terrain beneath it.
+        let through =
+            scene.surface_ray(Vec3::new(10.0, 10.0, 10.0), Vec3::NEG_Y, InstanceId(0)).expect("hits the terrain");
+        assert!((through - Vec3::new(10.0, 0.0, 10.0)).length() < 0.05, "through to the ground: {through:?}");
+
+        // A ray over empty ground lands on the terrain; a ray at the sky meets neither.
+        let on_ground =
+            scene.surface_ray(Vec3::new(50.0, 10.0, 50.0), Vec3::NEG_Y, InstanceId(0)).expect("hits the terrain");
+        assert!((on_ground - Vec3::new(50.0, 0.0, 50.0)).length() < 0.05, "on the ground: {on_ground:?}");
+        assert!(scene.surface_ray(Vec3::new(50.0, 10.0, 50.0), Vec3::Y, InstanceId(0)).is_none(), "sky is empty");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn surface_ray_terrain_survives_an_edit_rederive() {
+        // A re-derive rebuilds the store with no heightmap; the cached heightmaps must keep the
+        // surface-snap move sampling terrain, or the first edit would break ground snapping.
+        let root = unique_temp_root();
+        let _ = std::fs::remove_dir_all(&root);
+        seed_content(&root, "village");
+        save_flat_heightmap(&root, "village", ChunkCoord::new(0, 0), 0.0);
+
+        let mut scene = RenderScene::build(&root, "village", &[one_block(Transform::IDENTITY)]);
+        // Any edit re-derives the store, rebuilding it with no heightmap. Re-derive from nothing so the
+        // store is empty, proving the cached heightmaps (not the store) answer the terrain query.
+        scene.rederive(&[]);
+
+        let hit =
+            scene.surface_ray(Vec3::new(50.0, 10.0, 50.0), Vec3::NEG_Y, InstanceId(0)).expect("terrain after re-derive");
+        assert!((hit - Vec3::new(50.0, 0.0, 50.0)).length() < 0.05, "still snaps to the ground: {hit:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ray_heightfield_finds_the_crossing_on_flat_ground() {
+        // A ray dropping from y = 10 onto flat terrain at y = 2 crosses at t = 8 (dir is -Y, unit).
+        let t = ray_heightfield(Vec3::new(0.0, 10.0, 0.0), Vec3::NEG_Y, 100.0, |_, _| Some(2.0)).expect("crosses");
+        assert!((t - 8.0).abs() < 0.05, "t = {t}");
+    }
+
+    #[test]
+    fn ray_heightfield_misses_when_the_ray_rises_or_the_space_is_terrain_less() {
+        // Pointing up from above flat terrain never dips to it.
+        assert!(ray_heightfield(Vec3::new(0.0, 5.0, 0.0), Vec3::Y, 100.0, |_, _| Some(0.0)).is_none());
+        // The sampler reports no terrain anywhere (off the loaded chunks), so there is no crossing.
+        assert!(ray_heightfield(Vec3::new(0.0, 10.0, 0.0), Vec3::NEG_Y, 100.0, |_, _| None).is_none());
     }
 }

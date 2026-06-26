@@ -28,7 +28,6 @@
 //! single writer, the same as every other action.
 
 use crate::action::Action;
-use crate::gizmo::{self, GizmoView};
 use crate::inspector;
 use crate::loaded::LoadedScene;
 use crate::menu;
@@ -47,16 +46,13 @@ use crate::workspace;
 /// which the Instances nav view lists; it is `None` when no scene tab is active. The model alone cannot
 /// carry it - it is filesystem residency, not pure model state - so it is threaded in separately.
 ///
-/// `gizmo` is the transform gizmo's draw inputs (the camera and far plane the tripod projects with),
-/// threaded in the same way from the frame loop where the camera and render residency live; `None` when
-/// no scene is open (the static snapshot tests pass `None`, so the gizmo never enters their PNGs). When
-/// present, the axis tripod marks the selection over the well beside the inspector, for the same
-/// selection both read from `model.shell.selection()`.
+/// The transform gizmo draws no viewport visual this bite (the Instances tree and the inspector show
+/// the selection; a subtle 3D highlight is a later bite), so the chrome takes no gizmo input - the
+/// held-key manipulation is wholly the frame loop's (`crate::gizmo::update`).
 pub fn chrome(
     ctx: &egui::Context,
     model: &Model,
     loaded_scene: Option<&LoadedScene>,
-    gizmo: Option<GizmoView>,
 ) -> (Vec<Action>, egui::Rect) {
     let mut actions = Vec::new();
     // Region order is load-bearing (sharp-edges 2): the nav panel is added first on whichever side it
@@ -76,12 +72,6 @@ pub fn chrome(
     let editor_rect = ctx.available_rect();
     workspace::editor_area(ctx, &mut actions);
     inspector::floating(ctx, model, loaded_scene, editor_rect, &mut actions);
-    // The axis tripod, on the same floating layer as the inspector and over the same selection. It
-    // draws under the inspector window and the menus (a Background-order layer, clipped to the well);
-    // the held op + axis manipulation is the frame loop's (`crate::gizmo::update`).
-    if let Some(view) = gizmo {
-        gizmo::draw(ctx, loaded_scene, model.shell.selection(), editor_rect, &view);
-    }
     // Esc clears the selection (editor-design.md: Esc unwinds the selection). Gated on there being one,
     // so it is inert otherwise and never fights for the key when nothing is selected.
     if model.shell.selection().is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
