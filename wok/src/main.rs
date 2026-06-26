@@ -82,11 +82,11 @@ struct Editor {
     /// grabbed at, restored there on release so it never jumps (`input::update_cursor_grab`). `None`
     /// when no drag is capturing the cursor.
     cursor_grab: Option<PhysicalPosition<f64>>,
-    /// The in-progress transform manipulation (`crate::gizmo`): a world-axis translate-handle drag or a
-    /// hold-key rotate / scale, advanced each frame from the mouse and the held keys. `None` when the
+    /// The in-progress transform manipulation (`crate::gizmo`): a held op + axis grammar (G / R / S with
+    /// an optional X / Y / Z) advanced each frame from the mouse and the held keys. `None` when the
     /// gizmo is idle. It rides here beside the camera, since like the camera it is viewport interaction
     /// state the egui- and disk-free `Model` does not hold.
-    gizmo: Option<gizmo::Gizmo>,
+    gizmo: Option<gizmo::Hold>,
     /// The window title last pushed to the OS, so `set_title` fires only when it changes.
     title: String,
 }
@@ -196,14 +196,12 @@ impl App for Editor {
         let output = {
             let model = &self.model;
             let loaded_scene = self.loaded_scene.as_ref();
-            // The gizmo overlay's draw inputs: the camera and the scene's far plane project the handles
-            // with the same matrix the 3D and the pick use, and the active axis (from last frame's drag)
-            // is drawn highlighted. `None` until a render residency exists, which is also when the well
-            // has nothing to draw a gizmo over.
+            // The tripod's draw inputs: the camera and the scene's far plane project the axis lines with
+            // the same matrix the 3D and the pick use. `None` until a render residency exists, which is
+            // also when the well has nothing to mark a selection over.
             let gizmo_view = self.render_scene.as_ref().map(|scene| gizmo::GizmoView {
                 camera: self.camera,
                 far: scene.far_plane(),
-                active: gizmo::active_axis(self.gizmo.as_ref()),
             });
             gui.run(&ctx.platform.window, |egui_ctx| {
                 let (acts, rect) = view::chrome(egui_ctx, model, loaded_scene, gizmo_view);
@@ -231,12 +229,13 @@ impl App for Editor {
         let pointer_free = over_well && !gui.ctx.is_using_pointer();
 
         // Drive the transform gizmo before the action drain, where the camera, the render residency, and
-        // the raw input live (not the pure Model). It advances a handle drag or a hold-key rotate/scale
-        // and emits the resulting transform edit through the same single writer the inspector uses, and
-        // reports when a handle press has captured the pointer so the click below does not also pick. It
-        // projects and ray-casts with the scene's far plane (one cursor-to-ray source, sharp-edges 2), so
-        // it is inert until a render residency exists; last frame's residency is fine (the far plane does
-        // not change without a scene reload), and any edit shows this frame via the reconcile below.
+        // the raw input live (not the pure Model). It advances or ends a held op + axis manipulation and
+        // emits the resulting transform edit through the same single writer the inspector uses, and
+        // reports when it consumed this frame's Esc to cancel a hold (so the chrome's deselect is dropped
+        // below - a cancel keeps the selection). It ray-casts with the scene's far plane (one
+        // cursor-to-ray source, sharp-edges 2), so it is inert until a render residency exists; last
+        // frame's residency is fine (the far plane does not change without a scene reload), and any edit
+        // shows this frame via the reconcile below.
         let gizmo_out = match (self.loaded_scene.as_ref(), self.render_scene.as_ref()) {
             (Some(loaded), Some(scene)) => {
                 let inputs = gizmo::Inputs {
@@ -262,10 +261,11 @@ impl App for Editor {
         // re-renders the new state. The handler returns the effects it cannot perform itself: persisting
         // the recent-projects list, and saving the open scene (handle stays filesystem-free).
         for action in actions {
-            // A handle press captures the pointer for its whole press->release, so a ViewportClick from a
-            // click that landed on a handle must not also pick or deselect - the gizmo already consumed
-            // the gesture. A click that missed every handle still falls through and picks as before.
-            if gizmo_out.consumed_press && matches!(action, Action::ViewportClick(_)) {
+            // The gizmo cancelled a hold on this frame's Esc (restoring the transform); a cancel keeps
+            // the selection, so swallow the chrome's deselect that the same Esc raised. A left click no
+            // longer routes through the gizmo at all - there are no handles to intercept it - so it
+            // always falls through to the pick below.
+            if gizmo_out.consumed_esc && matches!(action, Action::Deselect) {
                 continue;
             }
             // A viewport click resolves to a pick here, where the camera and render residency live (not

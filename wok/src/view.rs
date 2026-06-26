@@ -47,10 +47,10 @@ use crate::workspace;
 /// which the Instances nav view lists; it is `None` when no scene tab is active. The model alone cannot
 /// carry it - it is filesystem residency, not pure model state - so it is threaded in separately.
 ///
-/// `gizmo` is the transform gizmo's draw inputs (the camera and far plane the overlay projects with),
+/// `gizmo` is the transform gizmo's draw inputs (the camera and far plane the tripod projects with),
 /// threaded in the same way from the frame loop where the camera and render residency live; `None` when
 /// no scene is open (the static snapshot tests pass `None`, so the gizmo never enters their PNGs). When
-/// present, the world-axis translate gizmo paints over the well beside the inspector, for the same
+/// present, the axis tripod marks the selection over the well beside the inspector, for the same
 /// selection both read from `model.shell.selection()`.
 pub fn chrome(
     ctx: &egui::Context,
@@ -76,9 +76,9 @@ pub fn chrome(
     let editor_rect = ctx.available_rect();
     workspace::editor_area(ctx, &mut actions);
     inspector::floating(ctx, model, loaded_scene, editor_rect, &mut actions);
-    // The transform gizmo's overlay, on the same floating layer as the inspector and over the same
-    // selection. It draws under the inspector window and the menus (a Background-order layer, clipped to
-    // the well); the drag and the hold-key fast path are the frame loop's (`crate::gizmo::update`).
+    // The axis tripod, on the same floating layer as the inspector and over the same selection. It
+    // draws under the inspector window and the menus (a Background-order layer, clipped to the well);
+    // the held op + axis manipulation is the frame loop's (`crate::gizmo::update`).
     if let Some(view) = gizmo {
         gizmo::draw(ctx, loaded_scene, model.shell.selection(), editor_rect, &view);
     }
