@@ -47,10 +47,10 @@ use crate::workspace;
 /// carry it - it is filesystem residency, not pure model state - so it is threaded in separately.
 ///
 /// The viewport interaction - the camera and the transform grammar - lives in the frame loop
-/// (`crate::main`), not the chrome: the old held-key gizmo was removed in the interaction demolition
-/// (designs/movement-camera-design.md) and its rebuild plugs in there. The chrome emits no interaction
-/// input; the well's left-click (the surviving pick, `crate::workspace::editor_area`) is the only
-/// viewport gesture it raises, as a `ViewportClick` the frame loop resolves.
+/// (`crate::main` / `crate::interaction`), not the chrome: the keyboard verbs read wok-platform input
+/// there. The chrome raises only the well's mouse gestures (`crate::workspace::editor_area`) - a click
+/// to select or a drag-and-drop to move - as a `ViewportGesture` the frame loop resolves into selection
+/// and transform edits.
 pub fn chrome(
     ctx: &egui::Context,
     model: &Model,

@@ -21,9 +21,10 @@
 //! The viewport interaction is the keyboard-first camera and selection model
 //! (designs/movement-camera-design.md), rebuilt on the cleared state. It runs in the interaction seam
 //! (`crate::interaction`), between the action drain and the draw, where the old mouse interaction used
-//! to plug in: the status-bar target toggle aims the directional cluster, which in the Look target pans
-//! and zooms the top-down Layout camera. (The Move target's grid-step and the mouse drag-and-drop land
-//! next.) Picking, selection, and the inspector stay live.
+//! to plug in: the status-bar target toggle aims the directional cluster, which pans and zooms the
+//! top-down Layout camera (the Look target) or grid-steps the selection (the Move target); the mouse
+//! resolves a click to a selection and a drag to a drag-and-drop move. The inspector stays the precise
+//! editing surface.
 //!
 //! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish` (inside `render::draw`):
 //! each frame runs the egui pass (building the chrome), draws the 3D into the well rect (or clears the
@@ -53,8 +54,9 @@ mod workspace;
 
 use action::Action;
 use camera::LayoutCamera;
-use glam::{Vec2, Vec3};
+use glam::Vec3;
 use gui::Gui;
+use interaction::Interaction;
 use loaded::LoadedScene;
 use model::Model;
 use render::Gpu;
@@ -84,6 +86,9 @@ struct Editor {
     /// Positioned over the scene when one loads (`RenderScene::spawn_camera`), then panned and zoomed by
     /// the interaction seam's Look target (`crate::interaction`).
     camera: LayoutCamera,
+    /// The keyboard-first interaction's cross-frame state (`crate::interaction`): the drag-and-drop grab.
+    /// The keyboard verbs are stateless; only the mouse drag remembers its grab between frames.
+    interaction: Interaction,
     /// The window title last pushed to the OS, so `set_title` fires only when it changes.
     title: String,
 }
@@ -110,6 +115,7 @@ impl Editor {
             loaded_scene: None,
             render_scene: None,
             camera: default_camera(),
+            interaction: Interaction::new(),
             title: String::new(),
         }
     }
@@ -125,32 +131,6 @@ impl Editor {
             platform.window.set_title(&title);
             self.title = title;
         }
-    }
-}
-
-/// Resolve a viewport click into a selection action. The click is mapped against the SAME well rect
-/// the 3D rendered into (sharp-edges 2 - one shared cursor-to-ray source), the cursor ray is cast, and
-/// the nearest instance under it is picked. No open scene, a degenerate well, or a ray that meets only
-/// terrain or empty space all deselect. The model mutation itself still goes through the single writer
-/// (`Select` / `Deselect` via `action::handle`); this only turns the click into the right one, where
-/// the camera and render residency a pick needs live (not the pure Model). A free function over those
-/// two fields so it borrows them disjointly from the mutable `gui` the frame loop still holds.
-fn resolve_viewport_pick(
-    render_scene: Option<&RenderScene>,
-    camera: &LayoutCamera,
-    pos: Vec2,
-    editor_rect: egui::Rect,
-) -> Action {
-    let Some(scene) = render_scene else { return Action::Deselect };
-    let size = Vec2::new(editor_rect.width(), editor_rect.height());
-    if size.x <= 0.0 || size.y <= 0.0 {
-        return Action::Deselect;
-    }
-    let pos_in_rect = pos - Vec2::new(editor_rect.min.x, editor_rect.min.y);
-    let (origin, dir) = camera.cursor_ray(pos_in_rect, size);
-    match scene.pick(origin, dir) {
-        Some(id) => Action::Select(id),
-        None => Action::Deselect,
     }
 }
 
@@ -198,29 +178,34 @@ impl App for Editor {
             })
         };
 
-        // Drain the buffer through the single writer: click -> Action -> handle, and the next frame
-        // re-renders the new state. The handler returns the effects it cannot perform itself: persisting
-        // the recent-projects list, and saving the open scene (handle stays filesystem-free).
+        // Drain the buffer through the single writer, and the next frame re-renders the new state. A
+        // viewport gesture resolves first, where the camera, the render residency, the well rect, and the
+        // drag grab a pick / surface-follow need live (not the pure Model): it becomes the Select /
+        // Deselect / SetInstanceTransform the gesture implies (`crate::interaction`), each run through the
+        // writer like every other action. The handler returns the effects it cannot perform itself:
+        // persisting the recent-projects list, and saving the open scene (handle stays filesystem-free).
         for action in actions {
-            // A viewport click resolves to a pick here, where the camera and render residency live (not
-            // in the pure Model): it becomes a Select of the nearest instance or a Deselect, then runs
-            // through the single writer like every other action. Picking is the surviving selection
-            // mechanism (the camera it casts through is the static load-time god-cam, until brief 2).
-            let action = match action {
-                Action::ViewportClick(pos) => {
-                    resolve_viewport_pick(self.render_scene.as_ref(), &self.camera, pos, editor_rect)
-                }
-                other => other,
+            let resolved = match action {
+                Action::ViewportGesture(gesture) => self.interaction.gesture(
+                    gesture,
+                    self.render_scene.as_ref(),
+                    &self.camera,
+                    editor_rect,
+                    self.loaded_scene.as_ref(),
+                ),
+                other => vec![other],
             };
-            let handled = action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
-            if handled.save_recents {
-                recent::save(&self.model.recents);
-            }
-            if handled.save {
-                if let Some(scene) = self.loaded_scene.as_mut() {
-                    // Best-effort write; a failure leaves the scene dirty, so the save dot stays lit as
-                    // the signal (surfacing a save error is a later bite, like load errors).
-                    let _ = scene.save();
+            for action in resolved {
+                let handled = action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
+                if handled.save_recents {
+                    recent::save(&self.model.recents);
+                }
+                if handled.save {
+                    if let Some(scene) = self.loaded_scene.as_mut() {
+                        // Best-effort write; a failure leaves the scene dirty, so the save dot stays lit
+                        // as the signal (surfacing a save error is a later bite, like load errors).
+                        let _ = scene.save();
+                    }
                 }
             }
         }
@@ -230,9 +215,10 @@ impl App for Editor {
         // the draw - the spot the old mouse interaction plugged into. Focus-gated by egui's
         // keyboard-want, so a focused text field types instead of driving the editor. The Look target
         // pans / zooms the Layout camera in place (camera state is frame-loop residency, not the model);
-        // the target toggle routes through the single writer like every other action.
+        // the Move target grid-steps the selection and the target toggle both route through the single
+        // writer like every other action.
         let typing = gui.ctx.wants_keyboard_input();
-        for action in interaction::keyboard(&ctx.input, typing, &self.model, &mut self.camera) {
+        for action in interaction::keyboard(&ctx.input, typing, &self.model, self.loaded_scene.as_ref(), &mut self.camera) {
             action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
         }
 

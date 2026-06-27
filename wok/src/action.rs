@@ -30,6 +30,26 @@ use crate::loaded::LoadedScene;
 use crate::model::{InstanceSort, Model, NavSide, NavView, Tab};
 use crate::project::Project;
 
+/// A pointer gesture in the 3D viewport well, raised by the well (`crate::workspace::editor_area`) and
+/// carried by [`Action::ViewportGesture`]. egui assigns the gesture to the topmost area, so one over the
+/// floating inspector or a menu never reaches the well. The frame loop (`crate::interaction`) resolves
+/// it - it owns the camera, the render residency, the well rect, and the drag state a pick and a
+/// surface-follow need. All positions are window-space egui points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Gesture {
+    /// A press and release with no drag, at this position: select the instance under the cursor, or
+    /// deselect over empty space / terrain. The surviving click-to-select (the specific grab).
+    Click(Vec2),
+    /// A drag began at this position: grab and select the instance under the cursor - the start of a
+    /// drag-and-drop move. A drag begun on empty space grabs nothing.
+    GrabStart(Vec2),
+    /// The drag continued, now at this position: the grabbed instance follows the cursor's surface
+    /// point (snapped to the grid, rested on the surface).
+    GrabMove(Vec2),
+    /// The drag ended (the button released): drop the grabbed instance (already committed each frame).
+    GrabEnd,
+}
+
 /// A menu choice, keybind, or chrome interaction, emitted by the view and applied by [`handle`].
 ///
 /// `PartialEq` only, not `Eq`: [`SetInstanceTransform`](Action::SetInstanceTransform) carries a
@@ -73,13 +93,14 @@ pub enum Action {
     /// Clear the selection. Emitted by Esc or a click on empty space, and applied by the frame loop
     /// when it switches to a different scene (the per-scene id no longer applies).
     Deselect,
-    /// A genuine left-click landed in the 3D viewport well, at this position in egui points (window
-    /// space). Resolved by the frame loop - it owns the camera, the render residency, and the well
-    /// rect a cursor-ray pick needs, which the egui- and residency-free [`handle`] cannot - into a
-    /// [`Select`](Action::Select) of the nearest instance under the cursor, or a
-    /// [`Deselect`](Action::Deselect) over empty space or terrain, both applied through this same
-    /// handler. So it never reaches [`handle`] itself; the arm there is an inert guard.
-    ViewportClick(Vec2),
+    /// A pointer [`Gesture`] in the 3D viewport well - a click-to-select or a drag-and-drop move.
+    /// Resolved by the frame loop (`crate::interaction`), which owns the camera, the render residency,
+    /// the well rect, and the drag state a pick and a surface-follow need, which the egui- and
+    /// residency-free [`handle`] cannot - into the [`Select`](Action::Select) /
+    /// [`Deselect`](Action::Deselect) / [`SetInstanceTransform`](Action::SetInstanceTransform) the
+    /// gesture implies, each applied through this same handler. So it never reaches [`handle`] itself;
+    /// the arm there is an inert guard.
+    ViewportGesture(Gesture),
 
     // ---- editing ----
     /// Set the display name of the placement with this instance id, renaming it in the loaded scene.
@@ -174,10 +195,11 @@ pub fn handle(model: &mut Model, loaded: Option<&mut LoadedScene>, action: Actio
             model.shell.deselect();
             Handled::default()
         }
-        Action::ViewportClick(_) => {
-            // The frame loop resolves a viewport click into Select/Deselect before it reaches the
-            // writer (it owns the camera, the render residency, and the well rect a pick needs; handle
-            // is egui- and residency-free). Reaching here means no pick was resolved, so do nothing.
+        Action::ViewportGesture(_) => {
+            // The frame loop resolves a viewport gesture into Select / Deselect / SetInstanceTransform
+            // before it reaches the writer (it owns the camera, the render residency, the well rect, and
+            // the drag state a pick / surface-follow need; handle is egui- and residency-free). Reaching
+            // here means nothing was resolved, so do nothing.
             Handled::default()
         }
         Action::SetInstanceName(id, name) => {
@@ -362,12 +384,13 @@ mod tests {
     }
 
     #[test]
-    fn viewport_click_is_an_inert_no_op_in_the_handler() {
-        // The frame loop resolves a viewport click into Select/Deselect (it owns the camera and render
-        // residency a pick needs); if one ever reaches handle it must leave the model untouched.
+    fn viewport_gesture_is_an_inert_no_op_in_the_handler() {
+        // The frame loop resolves a viewport gesture into Select / Deselect / SetInstanceTransform (it
+        // owns the camera, residency, and drag state); if one ever reaches handle it must leave the
+        // model untouched.
         let mut model = Model::default();
         handle(&mut model, None, Action::Select(InstanceId(3)));
-        let handled = handle(&mut model, None, Action::ViewportClick(Vec2::new(10.0, 20.0)));
+        let handled = handle(&mut model, None, Action::ViewportGesture(Gesture::Click(Vec2::new(10.0, 20.0))));
         assert_eq!(handled, Handled::default());
         assert_eq!(model.shell.selection(), Some(InstanceId(3)), "handle leaves the selection untouched");
     }
