@@ -13,7 +13,7 @@
 //! OS light/dark.
 
 use crate::action::Action;
-use crate::model::{Model, NavSide, Shell};
+use crate::model::{Model, NavSide, Shell, Target};
 use crate::project::{self, Project};
 use crate::recent::Recents;
 use crate::theme;
@@ -148,17 +148,24 @@ fn disabled_item(ui: &mut egui::Ui, label: &str) {
 /// The bottom status bar, within the view column only (the composition root shows the navigation
 /// panel first, so this bottom panel spans only the width right of it, never under the nav). The left
 /// shows the open project's name - the in-window confirmation that Open took effect, which the title
-/// bar carries too - or that none is open. The right holds the snap setting and, when the open scene
-/// has unsaved edits (`dirty`), the save dot - the Save click target. The richer readouts (counts,
-/// framerate, integrity) join as their features land.
-pub fn status_bar(ctx: &egui::Context, project: Option<&Project>, dirty: bool, actions: &mut Vec<Action>) {
+/// bar carries too - or that none is open - then the cluster `target` (Move / Look), the keyboard-first
+/// interaction's current aim (designs/movement-camera-design.md), in primary text so it reads as the
+/// live mode. The right holds the snap setting and, when the open scene has unsaved edits (`dirty`), the
+/// save dot - the Save click target. The richer readouts (counts, framerate, integrity) join as their
+/// features land.
+pub fn status_bar(ctx: &egui::Context, project: Option<&Project>, target: Target, dirty: bool, actions: &mut Vec<Action>) {
     egui::TopBottomPanel::bottom("wok_status_bar").exact_height(STATUS_BAR_HEIGHT).show(ctx, |ui| {
-        let dim = theme::palette(ui.ctx()).text_dim;
+        let p = theme::palette(ui.ctx());
+        let dim = p.text_dim;
         ui.horizontal_centered(|ui| {
             match project {
                 Some(project) => ui.label(egui::RichText::new(project.name()).color(dim)),
                 None => ui.label(egui::RichText::new("No project open").color(dim)),
             };
+            // The cluster target, the keyboard-first interaction's current aim. Primary text (not dim)
+            // so it reads as the live mode the cluster drives, set off by a separator from the project.
+            ui.separator();
+            ui.label(egui::RichText::new(target.label()).color(p.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // The save dot sits at the right edge, shown only when there are unsaved edits; the snap
                 // setting to its left. In a right-to-left layout the first item added is the rightmost.

@@ -31,7 +31,7 @@ use wok_scene::{
     Primitive, Scene, VisibleItem,
 };
 
-use crate::camera::FlyCamera;
+use crate::camera::LayoutCamera;
 use crate::loaded::LoadedScene;
 use crate::render::Gpu;
 
@@ -147,17 +147,17 @@ impl RenderScene {
         self.source_chunks = chunks.to_vec();
     }
 
-    /// Spawn the god-cam over the first loaded chunk, mid-south looking north across it, a little above
-    /// the terrain there (or above the origin plane when the chunk has no terrain). Called right after
-    /// a fresh [`build`](Self::build), where the store still carries the chunks' heightmaps.
-    pub fn spawn_camera(&self) -> FlyCamera {
+    /// Spawn the Layout camera over the first loaded chunk: looking straight down at its centre, focused
+    /// on the terrain height there (or the origin plane when the chunk has no terrain), at the default
+    /// zoom. Called right after a fresh [`build`](Self::build), where the store still carries the chunks'
+    /// heightmaps.
+    pub fn spawn_camera(&self) -> LayoutCamera {
         let half = CHUNK_SIZE_M * 0.5;
-        let south = CHUNK_SIZE_M * 0.8;
         let (origin, ground) = self.store.iter_loaded().next().map_or((Vec3::ZERO, 0.0), |(coord, runtime)| {
-            let ground = runtime.heightmap.as_ref().map_or(0.0, |h| h.height_at(half, south));
+            let ground = runtime.heightmap.as_ref().map_or(0.0, |h| h.height_at(half, half));
             (chunk_origin(coord), ground)
         });
-        FlyCamera { position: origin + Vec3::new(half, ground + 12.0, south), yaw: 0.0, pitch: -0.15 }
+        LayoutCamera::over(origin + Vec3::new(half, ground, half))
     }
 
     /// The far clip distance: the scene's streaming extent (`load_radius` chunks, the farthest
@@ -601,9 +601,10 @@ mod tests {
         // from fog - the decoupling.
         assert!(scene.far_plane() >= 50.0);
         assert_eq!(scene.far_plane(), 3.0 * CHUNK_SIZE_M);
-        // The god-cam spawns above the scene, finite and looking down a little.
+        // The Layout camera spawns over the scene centre, finite, at a positive zoom, the eye above it.
         let cam = scene.spawn_camera();
-        assert!(cam.position.is_finite() && cam.pitch < 0.0);
+        assert!(cam.focus.is_finite() && cam.half_height > 0.0);
+        assert!(cam.eye().y > cam.focus.y, "the eye floats above the focus plane");
 
         let _ = std::fs::remove_dir_all(&root);
     }

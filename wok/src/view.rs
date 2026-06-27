@@ -66,7 +66,7 @@ pub fn chrome(
     // The status bar shows the save dot when the open scene has unsaved edits (residency state, not
     // model state, so it is read from the loaded scene here and passed in).
     let dirty = loaded_scene.is_some_and(|scene| scene.dirty());
-    menu::status_bar(ctx, model.project.as_ref(), dirty, &mut actions);
+    menu::status_bar(ctx, model.project.as_ref(), model.shell.target(), dirty, &mut actions);
     workspace::tab_bar(ctx, model, &mut actions);
     // The editor area is the central region left after the three bounding panels; capture it now, before
     // the central panel consumes it, so the floating inspector can anchor to and clip to it. The

@@ -1,23 +1,21 @@
 //! The editor's camera state and the pure matrix and framing math the renderer and picking read.
 //!
-//! [`FlyCamera`] is the one camera state the renderer reads: a position and a yaw/pitch orientation,
-//! with [`forward`](FlyCamera::forward) / [`right`](FlyCamera::right) / [`up`](FlyCamera::up) the
-//! orthonormal basis the view is built from. [`view_proj`](FlyCamera::view_proj) is the
-//! view-projection the renderer draws with (far plane supplied per frame - the scene's render
-//! distance), and [`cursor_ray`](FlyCamera::cursor_ray) inverts it to turn a viewport click into a
-//! world ray for picking (sharp-edges 2: one shared cursor-to-ray source). [`look_at`] and [`frame`]
-//! are the framing math - the angles that aim a camera at a target, and a vantage of an axis-aligned
-//! bounds. Everything here is unit testable with no window.
+//! Two cameras live here. [`LayoutCamera`] is the active one (brief 2): a top-down orthographic camera
+//! over a focus point - the Layout home of the keyboard-first camera model
+//! (designs/movement-camera-design.md). It builds the orthographic [`view_proj`](LayoutCamera::view_proj)
+//! the renderer draws with and the straight-down [`cursor_ray`](LayoutCamera::cursor_ray) that picking
+//! and the drag-and-drop cast through, and the Look target pans and zooms it
+//! ([`pan`](LayoutCamera::pan) / [`zoom`](LayoutCamera::zoom)). [`FlyCamera`] is the perspective camera
+//! state with a yaw/pitch basis ([`forward`](FlyCamera::forward) / [`right`](FlyCamera::right) /
+//! [`up`](FlyCamera::up)); it is parked for the Orbit mode (brief 3), the basis the framing math
+//! ([`look_at`], [`frame`]) and the orbit nav will build on. Everything here is pure - no egui, no
+//! input, no window - and unit tested below.
 //!
-//! Pure math, no input: the interaction that drove the camera (the mouse-only look / dolly / pan) was
-//! removed in the interaction demolition (designs/movement-camera-design.md, "What survives, what is
-//! thrown out"), and the rebuilt camera grammar (brief 2: the Layout / Orbit cluster nav and the
-//! framing ladder) is built on this same math from the frame loop. Nothing advances the camera yet, so
-//! the editor renders a static view until then.
-//!
-//! Conventions: right-handed, `+Y` up. `yaw` is radians about `+Y` with `0` facing `-Z`, positive
-//! turning right (toward `+X`); `pitch` is radians with positive looking up. `forward` follows the
-//! yaw/pitch; `right` is always horizontal (no roll); `up` is their cross, equal to `+Y` when level.
+//! Conventions: right-handed, `+Y` up. For `FlyCamera`, `yaw` is radians about `+Y` with `0` facing
+//! `-Z`, positive turning right (toward `+X`); `pitch` is radians with positive looking up. `forward`
+//! follows the yaw/pitch; `right` is always horizontal (no roll); `up` is their cross, equal to `+Y`
+//! when level. For `LayoutCamera`, the view looks straight down (`-Y`) with screen-up mapped to world
+//! `-Z` (a map orientation: north is up, east is right).
 
 use glam::{Mat4, Vec2, Vec3};
 
@@ -26,7 +24,10 @@ use glam::{Mat4, Vec2, Vec3};
 const FOV_Y_RADIANS: f32 = std::f32::consts::FRAC_PI_3;
 const NEAR_PLANE: f32 = 0.1;
 
-/// The camera's whole state between frames.
+/// The perspective camera's whole state between frames. Parked for the Orbit mode (brief 3): the
+/// active editor camera is [`LayoutCamera`], so nothing constructs this outside the tests until the
+/// orbit nav lands - the same parked-not-dead treatment the framing math below carries.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlyCamera {
     pub position: Vec3,
@@ -36,6 +37,7 @@ pub struct FlyCamera {
 
 impl FlyCamera {
     /// The unit vector the camera looks along.
+    #[allow(dead_code)]
     pub fn forward(&self) -> Vec3 {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
@@ -62,6 +64,7 @@ impl FlyCamera {
     /// The combined view-projection matrix for a target with the given aspect ratio, with the far
     /// plane supplied per frame (the editor derives it from the fog distance). `perspective_rh`
     /// maps depth to `0..=1`, which is wgpu's clip-space convention.
+    #[allow(dead_code)]
     pub fn view_proj(&self, aspect: f32, far: f32) -> Mat4 {
         let projection = Mat4::perspective_rh(FOV_Y_RADIANS, aspect, NEAR_PLANE, far);
         let view = Mat4::look_to_rh(self.position, self.forward(), Vec3::Y);
@@ -82,6 +85,7 @@ impl FlyCamera {
     /// coordinates, so the result is identical whether measured in points or pixels.
     ///
     /// [`view_proj`]: Self::view_proj
+    #[allow(dead_code)]
     pub fn cursor_ray(&self, pos_in_rect: Vec2, rect_size: Vec2, far: f32) -> (Vec3, Vec3) {
         let ndc_x = 2.0 * pos_in_rect.x / rect_size.x - 1.0;
         let ndc_y = 1.0 - 2.0 * pos_in_rect.y / rect_size.y;
@@ -89,6 +93,121 @@ impl FlyCamera {
         let near = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
         let far_point = inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
         (self.position, (far_point - near).normalize())
+    }
+}
+
+// ---- layout camera ----
+// The active editor camera (brief 2): a top-down orthographic view of the world plane, the Layout home
+// of the camera model (designs/movement-camera-design.md). Pure math like FlyCamera; the interaction
+// layer pans and zooms it and the renderer draws whatever view_proj it is handed.
+
+/// Near plane for the orthographic projection. Tiny like the perspective near; the far plane is
+/// per-frame (the scene's render distance), a [`LayoutCamera::view_proj`] parameter.
+const LAYOUT_NEAR: f32 = 0.1;
+
+/// How far the eye floats above the focus plane, on top of the half-height. The eye doubles as the
+/// pick-ray origin, so it must clear the framed content; it is also the fog distance (the renderer fogs
+/// by distance from the eye), so it is kept modest - half-height plus this margin - to keep the working
+/// (zoomed-in) view inside the scene's fog start rather than washed out. Camera feel is the brief's to
+/// settle (the doc leaves it open); this is the basic balance.
+const EYE_MARGIN: f32 = 20.0;
+
+/// Orthographic half-height (metres) the camera spawns at - the default zoom over a fresh scene: a few
+/// dozen metres of plane, an object-placement working view rather than a chunk survey (the macro tier
+/// is brief 3).
+const DEFAULT_HALF_HEIGHT: f32 = 24.0;
+
+/// Zoom clamp: in to a couple of metres of plane, out to roughly two chunks. The macro chunk-framing
+/// (brief 3) handles wider surveys; this keeps the basic Layout zoom in a sane band.
+const MIN_HALF_HEIGHT: f32 = 1.0;
+const MAX_HALF_HEIGHT: f32 = 256.0;
+
+/// Multiplicative zoom per vertical-pair input, so each step changes the view by a constant ratio
+/// rather than a constant span (a fixed metre step crawls when zoomed out and lurches when zoomed in).
+const ZOOM_STEP: f32 = 1.05;
+
+/// Pan distance per cluster input as a fraction of the half-height, so panning covers the same share of
+/// the view at any zoom (Look target).
+const PAN_FRACTION: f32 = 0.06;
+
+/// A top-down orthographic camera over a focus point on the world plane. The default Layout camera: the
+/// world reads as a map, the grid is exact, and a grid step is unambiguous. The focus is the pan
+/// position (its XZ) on the plane it pans over (its Y, the ground); `half_height` is the zoom.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayoutCamera {
+    /// The world point the camera looks straight down at: XZ is the pan position on the plane, Y the
+    /// plane height it floats over (the ground; `0` by default).
+    pub focus: Vec3,
+    /// Orthographic half-height in world metres - the zoom. The view spans `2 * half_height` vertically
+    /// and `2 * half_height * aspect` horizontally; smaller is more zoomed in.
+    pub half_height: f32,
+}
+
+impl LayoutCamera {
+    /// A camera looking down at `focus` at the default zoom - the spawn-over-a-scene and pre-scene
+    /// default vantage.
+    pub fn over(focus: Vec3) -> LayoutCamera {
+        LayoutCamera { focus, half_height: DEFAULT_HALF_HEIGHT }
+    }
+
+    /// The eye's world height: the focus plane plus the half-height plus the margin, so the eye clears
+    /// the framed content (it is the pick-ray origin) while staying as low as the zoom allows (it is the
+    /// fog distance). See [`EYE_MARGIN`].
+    fn eye_height(&self) -> f32 {
+        self.focus.y + self.half_height + EYE_MARGIN
+    }
+
+    /// The eye position the renderer reads: directly over the focus, looking straight down.
+    pub fn eye(&self) -> Vec3 {
+        Vec3::new(self.focus.x, self.eye_height(), self.focus.z)
+    }
+
+    /// The top-down orthographic view-projection for the given aspect ratio, far plane supplied per
+    /// frame (the scene's render distance, like [`FlyCamera::view_proj`]). Looks straight down (`-Y`)
+    /// with screen-up mapped to world `-Z` (north up, east right - a map orientation). `orthographic_rh`
+    /// maps depth to `0..=1`, wgpu's clip-space convention (the same range `perspective_rh` uses).
+    pub fn view_proj(&self, aspect: f32, far: f32) -> Mat4 {
+        let half_w = self.half_height * aspect;
+        let projection =
+            Mat4::orthographic_rh(-half_w, half_w, -self.half_height, self.half_height, LAYOUT_NEAR, far);
+        let view = Mat4::look_to_rh(self.eye(), Vec3::NEG_Y, Vec3::NEG_Z);
+        projection * view
+    }
+
+    /// The world-space ray for a cursor click: straight down (`-Y`) through the cursor's world point on
+    /// the plane. An orthographic view has no convergence, so the ray's world XZ is fixed by the cursor
+    /// alone (the eye height only sets the origin, kept above the content). `pos_in_rect` is the click in
+    /// egui points relative to the well's top-left, `rect_size` that same well's size - the rect the 3D
+    /// rendered into (sharp-edges 2: one shared cursor-to-ray source). The picking and the drag-and-drop
+    /// both cast through this.
+    ///
+    /// The click maps to normalized device coordinates (egui's y runs down, NDC's up, so y flips), which
+    /// scale by the orthographic half-extents into a world offset from the focus: `+x` is world `+X`
+    /// (east), screen-up (`+ndc_y`) is world `-Z` (north). The ndc is a ratio of point coordinates, so
+    /// the result is identical whether measured in points or pixels.
+    pub fn cursor_ray(&self, pos_in_rect: Vec2, rect_size: Vec2) -> (Vec3, Vec3) {
+        let ndc_x = 2.0 * pos_in_rect.x / rect_size.x - 1.0;
+        let ndc_y = 1.0 - 2.0 * pos_in_rect.y / rect_size.y;
+        let aspect = rect_size.x / rect_size.y;
+        let world_x = self.focus.x + ndc_x * self.half_height * aspect;
+        let world_z = self.focus.z - ndc_y * self.half_height;
+        (Vec3::new(world_x, self.eye_height(), world_z), Vec3::NEG_Y)
+    }
+
+    /// Pan the focus across the world plane by `(dx, dz)` cluster cells (`+x` east, `+z` south), each a
+    /// fixed fraction of the zoom so a step covers the same share of the view at any zoom. The Look
+    /// target's cluster drives this.
+    pub fn pan(&mut self, dx: i32, dz: i32) {
+        let step = PAN_FRACTION * self.half_height;
+        self.focus.x += dx as f32 * step;
+        self.focus.z += dz as f32 * step;
+    }
+
+    /// Zoom the orthographic scale by `steps` (positive zooms out, negative in), multiplicatively and
+    /// clamped to the sane band. The Look target's vertical pair drives this.
+    pub fn zoom(&mut self, steps: i32) {
+        let factor = ZOOM_STEP.powi(steps);
+        self.half_height = (self.half_height * factor).clamp(MIN_HALF_HEIGHT, MAX_HALF_HEIGHT);
     }
 }
 
@@ -282,5 +401,90 @@ mod tests {
     fn look_at_is_graceful_when_position_equals_target() {
         let (yaw, pitch) = look_at(Vec3::splat(4.0), Vec3::splat(4.0));
         assert!(yaw.is_finite() && pitch.is_finite(), "degenerate aim must not be NaN: {yaw}, {pitch}");
+    }
+
+    // ---- layout camera ----
+
+    #[test]
+    fn layout_view_proj_centers_the_focus_and_projects_in_parallel() {
+        // The focus projects to the screen centre at a depth inside wgpu's 0..1 range, and - the
+        // orthographic signature - a point at the same XZ but a different height projects to the same
+        // screen XY (no perspective convergence), so the top-down grid reads true to scale.
+        let cam = LayoutCamera { focus: Vec3::new(10.0, 2.0, -5.0), half_height: 16.0 };
+        let vp = cam.view_proj(16.0 / 9.0, 500.0);
+        let clip = vp.project_point3(cam.focus);
+        assert!(clip.x.abs() < EPS && clip.y.abs() < EPS, "the focus centres: {clip:?}");
+        assert!(clip.z > 0.0 && clip.z < 1.0, "depth sits inside wgpu's 0..1 range: {}", clip.z);
+        let lower = cam.focus + Vec3::new(0.0, -3.0, 0.0);
+        let clip_lower = vp.project_point3(lower);
+        assert!(
+            (clip.x - clip_lower.x).abs() < EPS && (clip.y - clip_lower.y).abs() < EPS,
+            "a height change must not shift the screen XY under an orthographic projection: {clip_lower:?}"
+        );
+    }
+
+    #[test]
+    fn layout_view_proj_maps_screen_up_to_north_and_right_to_east() {
+        // The map orientation: world +X (east) by the half-width lands at the right edge, and world -Z
+        // (north) by the half-height lands at the top edge - so screen-up is north, screen-right is east.
+        let cam = LayoutCamera { focus: Vec3::ZERO, half_height: 10.0 };
+        let aspect = 2.0;
+        let vp = cam.view_proj(aspect, 500.0);
+        let east = vp.project_point3(Vec3::new(cam.half_height * aspect, 0.0, 0.0));
+        assert!((east.x - 1.0).abs() < 1e-4 && east.y.abs() < 1e-4, "east hits the right edge: {east:?}");
+        let north = vp.project_point3(Vec3::new(0.0, 0.0, -cam.half_height));
+        assert!((north.y - 1.0).abs() < 1e-4 && north.x.abs() < 1e-4, "north hits the top edge: {north:?}");
+    }
+
+    #[test]
+    fn layout_cursor_ray_through_the_center_points_straight_down_at_the_focus() {
+        let cam = LayoutCamera { focus: Vec3::new(4.0, 1.0, 7.0), half_height: 12.0 };
+        let size = Vec2::new(800.0, 600.0);
+        let (origin, dir) = cam.cursor_ray(size * 0.5, size);
+        assert!(close(dir, Vec3::NEG_Y), "a top-down view looks straight down: {dir:?}");
+        assert!(
+            (origin.x - cam.focus.x).abs() < EPS && (origin.z - cam.focus.z).abs() < EPS,
+            "a centred click sits over the focus: {origin:?}"
+        );
+    }
+
+    #[test]
+    fn layout_cursor_ray_inverts_the_projection_for_an_off_center_pixel() {
+        // Project a world point to its pixel, then cast the cursor ray back through that pixel: the
+        // straight-down ray must pass through the point's XZ (its height is irrelevant under ortho). This
+        // pins the ndc mapping, including egui's y-down -> NDC y-up flip and the aspect scaling.
+        let cam = LayoutCamera { focus: Vec3::new(3.0, 2.0, -4.0), half_height: 20.0 };
+        let size = Vec2::new(1024.0, 768.0);
+        let far = 600.0;
+        let target = cam.focus + Vec3::new(7.0, 0.0, -5.0);
+        let clip = cam.view_proj(size.x / size.y, far).project_point3(target);
+        let pixel = Vec2::new((clip.x + 1.0) * 0.5 * size.x, (1.0 - clip.y) * 0.5 * size.y);
+        let (origin, dir) = cam.cursor_ray(pixel, size);
+        assert!(close(dir, Vec3::NEG_Y));
+        assert!(
+            (origin.x - target.x).abs() < 1e-3 && (origin.z - target.z).abs() < 1e-3,
+            "the ray casts back through the point: {origin:?} vs {target:?}"
+        );
+    }
+
+    #[test]
+    fn layout_pan_moves_the_focus_and_zoom_scales_clamped() {
+        let mut cam = LayoutCamera::over(Vec3::new(1.0, 0.0, 2.0));
+        let before = cam.half_height;
+        cam.pan(1, -1); // east, and north (forward, -Z)
+        assert!((cam.focus.x - (1.0 + PAN_FRACTION * before)).abs() < EPS, "pans east by a zoom fraction");
+        assert!((cam.focus.z - (2.0 - PAN_FRACTION * before)).abs() < EPS, "pans north (-Z) by a zoom fraction");
+        cam.zoom(1);
+        assert!(cam.half_height > before, "a positive step zooms out");
+        cam.zoom(-1);
+        assert!((cam.half_height - before).abs() < 1e-3, "the inverse step returns to the start");
+        for _ in 0..1000 {
+            cam.zoom(1);
+        }
+        assert!(cam.half_height <= MAX_HALF_HEIGHT + EPS, "zoom out clamps to the band");
+        for _ in 0..1000 {
+            cam.zoom(-1);
+        }
+        assert!(cam.half_height >= MIN_HALF_HEIGHT - EPS, "zoom in clamps to the band");
     }
 }

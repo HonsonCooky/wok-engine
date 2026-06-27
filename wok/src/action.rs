@@ -48,6 +48,12 @@ pub enum Action {
     /// panel header's sort control while the Instances view is active.
     SetInstanceSort(InstanceSort),
 
+    // ---- interaction ----
+    /// Flip the directional cluster's target (`Move` <-> `Look`). Emitted by the interaction layer's
+    /// toggle key (the thumb tap); the status bar shows the result. Persistent shell state, so it routes
+    /// through the single writer like the navigation actions.
+    ToggleTarget,
+
     // ---- tabs ----
     /// Open the named scene as a tab over the editor area, focusing it if already open (no
     /// duplicate). Emitted by a Scenes nav row. Scene-specific for now; opening prefab or lighting
@@ -144,6 +150,10 @@ pub fn handle(model: &mut Model, loaded: Option<&mut LoadedScene>, action: Actio
             model.shell.set_instance_sort(sort);
             Handled::default()
         }
+        Action::ToggleTarget => {
+            model.shell.toggle_target();
+            Handled::default()
+        }
         Action::OpenScene(name) => {
             model.shell.open_tab(Tab::Scene(name));
             Handled::default()
@@ -221,6 +231,7 @@ pub fn handle(model: &mut Model, loaded: Option<&mut LoadedScene>, action: Actio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Target;
     use std::path::Path;
 
     // ---- navigation panel ----
@@ -276,6 +287,16 @@ mod tests {
         assert_eq!(model.shell.instance_sort(), InstanceSort::Flat);
         handle(&mut model, None, Action::SetInstanceSort(InstanceSort::Group));
         assert_eq!(model.shell.instance_sort(), InstanceSort::Group);
+    }
+
+    #[test]
+    fn toggle_target_flips_the_cluster_target() {
+        let mut model = Model::default();
+        assert_eq!(model.shell.target(), Target::Move, "the cluster rests in Move");
+        handle(&mut model, None, Action::ToggleTarget);
+        assert_eq!(model.shell.target(), Target::Look);
+        handle(&mut model, None, Action::ToggleTarget);
+        assert_eq!(model.shell.target(), Target::Move);
     }
 
     // ---- tabs ----

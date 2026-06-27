@@ -24,7 +24,7 @@ use wok_platform::{Platform, gfx};
 use wok_render::{Camera, RenderItem, Renderer, ViewportRect};
 use wok_scene::{ChunkCoord, Primitive, SurfaceTag, VisibleItem};
 
-use crate::camera::FlyCamera;
+use crate::camera::LayoutCamera;
 use crate::gui::Gui;
 use crate::render_scene::{RenderScene, chunk_origin};
 
@@ -127,7 +127,7 @@ pub fn draw(
     platform: &mut Platform,
     gpu: &mut Gpu,
     scene: Option<&RenderScene>,
-    camera: FlyCamera,
+    camera: LayoutCamera,
     editor_rect: egui::Rect,
     editor_bg: egui::Color32,
     gui: &mut Gui,
@@ -160,7 +160,7 @@ pub fn draw(
             };
             let cam = Camera {
                 view_proj: camera.view_proj(aspect, scene.far_plane()),
-                eye: camera.position,
+                eye: camera.eye(),
             };
             let mut items: Vec<RenderItem> = Vec::new();
             for (coord, runtime) in scene.store.iter_loaded() {

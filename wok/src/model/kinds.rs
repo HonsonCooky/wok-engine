@@ -47,6 +47,39 @@ pub enum InstanceSort {
     Flat,
 }
 
+/// What the directional cluster drives - the persistent target toggle of the keyboard-first camera
+/// model (designs/movement-camera-design.md "The control model"). It rests in `Move` (the cluster steps
+/// the selection) and a thumb tap flips it to `Look` (the cluster pans and zooms the camera); the status
+/// bar shows the current target. It is the keyboard's time-share of a controller's two sticks - one
+/// cluster, aimed by the toggle. (The momentary held Rotate and Scale layers are a later bite; they are
+/// transient holds, not toggle states, so they do not live here.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Target {
+    /// The cluster drives the selection (grid-step move). The resting target.
+    #[default]
+    Move,
+    /// The cluster drives the camera (pan and zoom in Layout).
+    Look,
+}
+
+impl Target {
+    /// The other target - the flip a toggle tap applies.
+    pub fn toggled(self) -> Target {
+        match self {
+            Target::Move => Target::Look,
+            Target::Look => Target::Move,
+        }
+    }
+
+    /// The target's status-bar label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Target::Move => "Move",
+            Target::Look => "Look",
+        }
+    }
+}
+
 /// Which side of the editor the navigation panel docks to (the user's choice; a left-hand-keyboard,
 /// right-hand-mouse setup is the reason it is configurable). Named `NavSide`, not `Side`, so it does
 /// not clash with egui's `egui::panel::Side` where the view picks `SidePanel::left`/`::right`.

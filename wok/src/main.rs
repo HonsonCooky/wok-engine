@@ -18,11 +18,12 @@
 //! here), reconcile the render residency (an edit just applied shows this frame), then draw the 3D with
 //! the chrome painted over it (`crate::render`).
 //!
-//! The viewport interaction - the camera control and the transform grammar - was removed in the
-//! interaction demolition (designs/movement-camera-design.md). The camera is static: positioned over
-//! the scene on load (`RenderScene::spawn_camera`) and not moved after, so the editor renders a fixed
-//! view. Picking, selection, and the inspector stay live; brief 2 rebuilds the camera and transforms in
-//! the frame loop, between the action drain and the draw, where the old interaction used to plug in.
+//! The viewport interaction is the keyboard-first camera and selection model
+//! (designs/movement-camera-design.md), rebuilt on the cleared state. It runs in the interaction seam
+//! (`crate::interaction`), between the action drain and the draw, where the old mouse interaction used
+//! to plug in: the status-bar target toggle aims the directional cluster, which in the Look target pans
+//! and zooms the top-down Layout camera. (The Move target's grid-step and the mouse drag-and-drop land
+//! next.) Picking, selection, and the inspector stay live.
 //!
 //! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish` (inside `render::draw`):
 //! each frame runs the egui pass (building the chrome), draws the 3D into the well rect (or clears the
@@ -38,6 +39,7 @@ mod geom;
 mod gui;
 mod icons;
 mod inspector;
+mod interaction;
 mod loaded;
 mod menu;
 mod model;
@@ -50,7 +52,7 @@ mod view;
 mod workspace;
 
 use action::Action;
-use camera::FlyCamera;
+use camera::LayoutCamera;
 use glam::{Vec2, Vec3};
 use gui::Gui;
 use loaded::LoadedScene;
@@ -78,9 +80,10 @@ struct Editor {
     /// `loaded_scene` and reconciled to it each frame so edits show. Separate from the editable model;
     /// `None` when no scene is open or it failed to load.
     render_scene: Option<RenderScene>,
-    /// The god-cam the viewport renders through. Positioned over the scene when one loads
-    /// (`RenderScene::spawn_camera`) and static after - the camera control returns in brief 2.
-    camera: FlyCamera,
+    /// The Layout camera the viewport renders through: top-down orthographic over a focus point.
+    /// Positioned over the scene when one loads (`RenderScene::spawn_camera`), then panned and zoomed by
+    /// the interaction seam's Look target (`crate::interaction`).
+    camera: LayoutCamera,
     /// The window title last pushed to the OS, so `set_title` fires only when it changes.
     title: String,
 }
@@ -134,7 +137,7 @@ impl Editor {
 /// two fields so it borrows them disjointly from the mutable `gui` the frame loop still holds.
 fn resolve_viewport_pick(
     render_scene: Option<&RenderScene>,
-    camera: &FlyCamera,
+    camera: &LayoutCamera,
     pos: Vec2,
     editor_rect: egui::Rect,
 ) -> Action {
@@ -144,7 +147,7 @@ fn resolve_viewport_pick(
         return Action::Deselect;
     }
     let pos_in_rect = pos - Vec2::new(editor_rect.min.x, editor_rect.min.y);
-    let (origin, dir) = camera.cursor_ray(pos_in_rect, size, scene.far_plane());
+    let (origin, dir) = camera.cursor_ray(pos_in_rect, size);
     match scene.pick(origin, dir) {
         Some(id) => Action::Select(id),
         None => Action::Deselect,
@@ -222,21 +225,27 @@ impl App for Editor {
             }
         }
 
+        // ---- interaction seam (designs/movement-camera-design.md) ----
+        // The keyboard-first verbs read wok-platform InputState (not egui), here between the drain and
+        // the draw - the spot the old mouse interaction plugged into. Focus-gated by egui's
+        // keyboard-want, so a focused text field types instead of driving the editor. The Look target
+        // pans / zooms the Layout camera in place (camera state is frame-loop residency, not the model);
+        // the target toggle routes through the single writer like every other action.
+        let typing = gui.ctx.wants_keyboard_input();
+        for action in interaction::keyboard(&ctx.input, typing, &self.model, &mut self.camera) {
+            action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
+        }
+
         // The editor well is a transparent egui panel, so the surface clear behind it (when no scene
         // draws) is the well's colour: the active theme's editor background. The surface is sRGB and
         // wgpu reads the clear value as linear; `render::draw` decodes it through Rgba.
         let editor_bg = theme::palette(&gui.ctx).editor_bg;
 
         // The render residency and the 3D pass need the device. Reconcile the residency to the open
-        // scene (a fresh build positions the god-cam over it; an in-memory edit just applied is
+        // scene (a fresh build positions the Layout camera over it; an in-memory edit just applied is
         // re-derived here so it shows this frame), then draw the 3D into the well and paint the chrome
-        // over it.
-        //
-        // The viewport interaction plugged in HERE, between the drain and the draw: the cursor lock, the
-        // mouse camera step, and the held-key transform gizmo. The demolition removed them
-        // (designs/movement-camera-design.md, "What survives, what is thrown out"), so the camera is
-        // whatever `spawn_camera` last set and the view is static; brief 2 rebuilds the Layout / Orbit
-        // camera and the transform grammar in this seam.
+        // over it. The interaction seam above has already panned or zoomed the camera this frame, so the
+        // draw reflects it.
         let Some(gpu) = self.gpu.as_mut() else { return };
         if render_scene::reconcile(&mut self.render_scene, gpu, ctx.platform, self.loaded_scene.as_ref()) {
             if let Some(scene) = self.render_scene.as_ref() {
@@ -254,8 +263,8 @@ impl App for Editor {
 
 /// The camera before any scene loads - never rendered (the empty well just clears), but the field
 /// needs a value; [`RenderScene::spawn_camera`] overwrites it when a scene opens.
-fn default_camera() -> FlyCamera {
-    FlyCamera { position: Vec3::new(64.0, 30.0, 128.0), yaw: 0.0, pitch: -0.2 }
+fn default_camera() -> LayoutCamera {
+    LayoutCamera::over(Vec3::ZERO)
 }
 
 fn main() {
