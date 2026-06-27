@@ -59,6 +59,17 @@ pub const STILL_VY: f32 = 0.05;
 /// stranding the player without a jump.
 pub const JUMP_RESET_DWELL: f32 = 1.5 * SIM_DT;
 
+/// The steepest descending slope (as a gradient, rise/run) the body stays glued to: the ground-snap
+/// reaches `GROUND_SNAP_GRADE * move_speed * SIM_DT` below the feet - the terrain a step down the
+/// steepest glued slope falls away - and pulls a grounded, non-rising body onto a surface within that
+/// reach (`crate::sim`), so walking downhill follows the ground instead of floating off it and
+/// free-falling to catch up (the jitter). Beyond the reach the body falls, so a real drop or a ledge
+/// is still a fall, never a downhill glide off a cliff. 2.0 (~63 degrees) clears the 60-degree
+/// walkable limit with headroom. Scaled by the per-step distance, not an absolute band, so it tracks
+/// a retuned run speed. A geometric guard against the descending-slope float, not feel tuning, so it
+/// stays a constant.
+pub const GROUND_SNAP_GRADE: f32 = 2.0;
+
 /// The placeholder ellipsoid's flat base color (linear RGB): a warm signal orange, distinct from
 /// every surface-tag color the terrain and prefabs use.
 pub const PLAYER_COLOR: Vec3 = Vec3::new(0.90, 0.35, 0.15);

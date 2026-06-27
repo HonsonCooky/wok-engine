@@ -150,4 +150,4 @@ pub use sweep_cyl_round::{sweep_cylinder_sphere, sweep_cylinder_vert_cylinder};
 pub use sweep_obb::sweep_capsule_obb;
 pub use sweep_round::{sweep_capsule_cylinder, sweep_capsule_sphere};
 pub use terrain::{TerrainRest, rest_on_heightmap, resolve_heightmap};
-pub use terrain_cyl::rest_cylinder_on_heightmap;
+pub use terrain_cyl::{cylinder_support_height, rest_cylinder_on_heightmap};

@@ -154,6 +154,7 @@ fn player_at(position: Vec3) -> Player {
         motion: Motion { position, velocity: Vec3::ZERO },
         jumps_remaining: Tuning::default().max_jumps,
         still_time: 0.0,
+        grounded: false,
     }
 }
 

@@ -9,6 +9,8 @@
 //!     -> integrate one fixed step under a single gravity   (wok-physics: integrate)
 //!     -> collide-and-slide against the statics              (crate::slide: prefab collision)
 //!     -> rest the slid body on the terrain beneath          (wok-physics: rest_cylinder_on_heightmap)
+//!     -> ground-snap a grounded, non-rising body onto a surface that fell away beneath the step
+//!        (wok-physics: cylinder_support_height) so walking downhill follows the ground
 //!     -> refill the jump counter once the body has been vertically still for the reset dwell
 //!
 //! The player's collider is the flat-bottomed vertical cylinder; the drawn bean stays a capsule,
@@ -32,9 +34,11 @@
 //! which is what the replay test (`crate::replay`) pins bitwise.
 
 use glam::Vec3;
-use wok_physics::{Cylinder, Motion, boom_direction, integrate, rest_cylinder_on_heightmap};
+use wok_physics::{Cylinder, Motion, boom_direction, cylinder_support_height, integrate, rest_cylinder_on_heightmap};
 
-use crate::constants::{JUMP_RESET_DWELL, PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT, SPAWN_HEIGHT, STILL_VY};
+use crate::constants::{
+    GROUND_SNAP_GRADE, JUMP_RESET_DWELL, PLAYER_HEIGHT, PLAYER_RADIUS, SIM_DT, SPAWN_HEIGHT, STILL_VY,
+};
 use crate::slide::slide_player;
 use crate::tuning::Tuning;
 use crate::world::{CHUNK_SIZE_M, World};
@@ -59,6 +63,13 @@ pub struct Player {
     /// it passes the tuning's `jump_reset_time` the jump counter refills. Stepped state, so replay
     /// covers it.
     pub still_time: f32,
+    /// Whether the body rested on terrain at the end of the last step (the terrain rest's grounded
+    /// report). The next step's ground-snap reads it: a body that was grounded and is not rising is
+    /// glued to a surface that fell away beneath the step (walking downhill) instead of floating off
+    /// it. Distinct from `still_time` (which the jump counter reads): this is "on the ground last
+    /// step", the gate that keeps the snap from yanking a jump or a real fall down. Stepped state, so
+    /// replay covers it.
+    pub grounded: bool,
 }
 
 /// One fixed step's input, already resolved against the camera: a world-space horizontal move
@@ -108,6 +119,8 @@ pub fn spawn(world: &World, tuning: &Tuning) -> Player {
         motion: Motion { position, velocity: Vec3::ZERO },
         jumps_remaining: tuning.max_jumps,
         still_time: 0.0,
+        // Spawns in the air, `SPAWN_HEIGHT` above the surface: not grounded until the opening fall lands.
+        grounded: false,
     }
 }
 
@@ -143,27 +156,47 @@ pub fn step(player: Player, input: StepInput, world: &World, tuning: &Tuning) ->
 
     // Rest the slid body on the terrain of the chunk beneath it, in that chunk's local frame
     // (lift-only). Off every chunk there is no ground to rest on. A lift means the body met the
-    // surface this step, so its descent stops there.
+    // surface this step, so its descent stops there. Then ground-snap: a body that was grounded and
+    // is not rising is glued to a surface that fell away beneath this step, so walking downhill
+    // follows the ground instead of floating off it and free-falling to catch up (the jitter).
     let slid_body = Cylinder::upright(slid.position, PLAYER_HEIGHT, PLAYER_RADIUS);
     let mut position = slid.position;
     let mut velocity = slid.velocity;
+    let mut grounded = false;
     if let Some(t) = world.terrain_under(slid.position.x, slid.position.z) {
-        let rest = rest_cylinder_on_heightmap(slid_body.translated(-t.origin), &t.heightmap, TERRAIN_REST_WALKABLE_COS);
+        let local = slid_body.translated(-t.origin);
+        let rest = rest_cylinder_on_heightmap(local, &t.heightmap, TERRAIN_REST_WALKABLE_COS);
         position = rest.position + t.origin;
+        grounded = rest.grounded;
         if position.y > slid.position.y {
+            // Lifted onto the surface from below - a landing or standing - so its descent stops here.
             velocity.y = 0.0;
+        } else if player.grounded && velocity.y <= 0.0 {
+            // The body floated free of a surface that fell away beneath this step. It was on the
+            // ground last step and is not rising (a jump's launch keeps velocity.y > 0, so a jump is
+            // never snapped down), so glue it to the surface if that surface is within reach - the
+            // terrain a step down the steepest glued slope falls away. Beyond the reach it is a real
+            // drop (a ledge), so the body falls instead. The reach scales with the per-step distance,
+            // so it tracks a retuned run speed.
+            let gap = local.base().y - cylinder_support_height(&local, &t.heightmap);
+            let reach = GROUND_SNAP_GRADE * tuning.move_speed * SIM_DT;
+            if gap > 0.0 && gap <= reach {
+                position.y -= gap;
+                velocity.y = 0.0;
+                grounded = true;
+            }
         }
     }
 
     // The jump counter refills by vertical stillness, not ground detection: resting on the ground or
     // a surface pins the vertical velocity to zero (the slide projects out a landing's descent, the
-    // terrain rest's lift zeroes it just above), so the still timer fills while at rest and, after a
-    // brief dwell - just long enough to reject the apex's single still step - refills the counter, so
-    // a landing restores the jumps at once.
+    // terrain rest's lift and the ground-snap zero it), so the still timer fills while at rest and,
+    // after a brief dwell - just long enough to reject the apex's single still step - refills the
+    // counter, so a landing restores the jumps at once.
     let still_time = if velocity.y.abs() <= STILL_VY { player.still_time + SIM_DT } else { 0.0 };
     let jumps_remaining = if still_time >= JUMP_RESET_DWELL { tuning.max_jumps } else { jumps };
 
-    Player { motion: Motion { position, velocity }, jumps_remaining, still_time }
+    Player { motion: Motion { position, velocity }, jumps_remaining, still_time, grounded }
 }
 
 #[cfg(test)]
@@ -171,7 +204,7 @@ pub fn step(player: Player, input: StepInput, world: &World, tuning: &Tuning) ->
 mod tests {
     use super::*;
     use crate::world::ChunkTerrain;
-    use wok_scene::{CHUNK_GRID_LEN, Heightmap, SurfaceTag};
+    use wok_scene::{CHUNK_GRID_DIM, CHUNK_GRID_LEN, Heightmap, SurfaceTag};
 
     const EPS: f32 = 1e-5;
 
@@ -219,6 +252,7 @@ mod tests {
             motion: Motion { position, velocity: Vec3::ZERO },
             jumps_remaining: Tuning::default().max_jumps,
             still_time: 0.0,
+            grounded: false,
         }
     }
 
@@ -248,6 +282,17 @@ mod tests {
         World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }], ..World::default() }
     }
 
+    /// A world whose terrain climbs `delta` raw units per cell along +X, so walking toward -X walks
+    /// downhill. 600 raw/cell is ~30 degrees (raw maps 0..=u16::MAX over 64m, cells are 1m), well
+    /// inside the walkable limit - the fixture for the descending-slope ground-snap.
+    fn ramp_up_x_world(delta: u16) -> World {
+        let heights = (0..CHUNK_GRID_LEN)
+            .map(|i| ((i % CHUNK_GRID_DIM) as u32 * delta as u32).min(u16::MAX as u32) as u16)
+            .collect();
+        let heightmap = Heightmap::new(heights, vec![SurfaceTag::new("g")], vec![0; CHUNK_GRID_LEN]).unwrap();
+        World { statics: vec![], terrains: vec![ChunkTerrain { origin: Vec3::ZERO, heightmap }], ..World::default() }
+    }
+
     /// A player settled at rest mid-chunk: the cylinder's flat base on the surface, vertically still
     /// long enough that its jumps are full.
     fn at_rest(world: &World) -> Player {
@@ -257,12 +302,18 @@ mod tests {
             motion: Motion { position: Vec3::new(64.0, ground + PLAYER_HEIGHT * 0.5, 64.0), velocity: Vec3::ZERO },
             jumps_remaining: t.max_jumps,
             still_time: JUMP_RESET_DWELL,
+            grounded: true,
         }
     }
 
     /// Airborne high over the terrain, moving at `velocity`, jumps full and the still timer reset.
     fn airborne_at(position: Vec3, velocity: Vec3) -> Player {
-        Player { motion: Motion { position, velocity }, jumps_remaining: Tuning::default().max_jumps, still_time: 0.0 }
+        Player {
+            motion: Motion { position, velocity },
+            jumps_remaining: Tuning::default().max_jumps,
+            still_time: 0.0,
+            grounded: false,
+        }
     }
 
     fn horizontal_speed(p: &Player) -> f32 {
@@ -418,5 +469,41 @@ mod tests {
         let base = p.motion.position.y - PLAYER_HEIGHT * 0.5;
         assert!((base - ground).abs() < 1e-2, "the base should rest on the surface: base {base}, ground {ground}");
         assert!(p.motion.velocity.y.abs() <= STILL_VY, "a rested body is vertically still: {}", p.motion.velocity.y);
+    }
+
+    #[test]
+    fn walking_down_a_slope_stays_glued_to_the_surface_without_floating() {
+        // The descending-slope fix: a grounded body walking downhill follows the surface with its
+        // vertical velocity pinned to zero, instead of floating off the falling ground each step and
+        // free-falling to catch up (the jitter). On a ~30-degree ramp (well inside walkable), every
+        // downhill step stays grounded, vertically still, and on the surface, descending monotonically.
+        let world = ramp_up_x_world(600);
+        let surface = |x: f32, z: f32| world.terrains[0].heightmap.height_at(x, z);
+        let t = Tuning::default();
+
+        // Settle onto the ramp at mid-chunk (drop from just above and let the fall land + ground it).
+        let mut p = airborne_at(Vec3::new(64.0, surface(64.0 + PLAYER_RADIUS, 64.0) + 3.0, 64.0), Vec3::ZERO);
+        for _ in 0..120 {
+            p = step(p, StepInput::default(), &world, &t);
+        }
+        assert!(p.grounded, "the body should have landed and grounded before the walk");
+        let start_base = p.motion.position.y - PLAYER_HEIGHT * 0.5;
+
+        // Walk downhill (-X) for a stretch, checking every step. Without the ground-snap the body
+        // would float off the falling surface and vy would oscillate past the stillness margin.
+        let downhill = StepInput { move_dir: Vec3::NEG_X, jump: false };
+        let mut last_base = start_base;
+        for n in 0..120 {
+            p = step(p, downhill, &world, &t);
+            let base = p.motion.position.y - PLAYER_HEIGHT * 0.5;
+            // The flat disc bears on the up-slope (+X) rim, so the base rests at the surface there.
+            let support = surface(p.motion.position.x + PLAYER_RADIUS, p.motion.position.z);
+            assert!(p.grounded, "step {n}: walking downhill must stay grounded");
+            assert!(p.motion.velocity.y.abs() <= STILL_VY, "step {n}: vy {} floats off the surface", p.motion.velocity.y);
+            assert!((base - support).abs() < 1e-2, "step {n}: base {base} should track the surface {support}");
+            assert!(base <= last_base + EPS, "step {n}: walking downhill the base must not rise");
+            last_base = base;
+        }
+        assert!(last_base < start_base - 1.0, "the walk should descend the slope: {start_base} -> {last_base}");
     }
 }

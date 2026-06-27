@@ -24,6 +24,24 @@ use crate::terrain::{GROUND_EPS, TerrainRest};
 /// Still deliberately coarse (a peak between samples can poke through), like every rest here.
 const RIM_SAMPLES: usize = 8;
 
+/// The terrain height the flat-bottomed cylinder's bottom rests on: the footprint-MAX over the disc's
+/// centre and [`RIM_SAMPLES`] rim samples (a flat disc bears on the highest point under it - see the
+/// module docs, no per-sample discount). This is the support [`rest_cylinder_on_heightmap`] lifts the
+/// base to, exposed on its own so the game's ground-snap can read the surface height it would rest on
+/// without the lift - to glue a grounded body to a surface that fell away beneath a step (walking down
+/// a slope) instead of letting it float off and free-fall to catch up. Chunk-local like the rest:
+/// pass a cylinder already in the terrain's frame; the returned height is in that frame.
+pub fn cylinder_support_height(cylinder: &Cylinder, terrain: &Heightmap) -> f32 {
+    let base = cylinder.base();
+    let r = cylinder.radius;
+    let mut ground = terrain.height_at(base.x, base.z);
+    for i in 0..RIM_SAMPLES {
+        let angle = std::f32::consts::TAU * (i as f32 / RIM_SAMPLES as f32);
+        ground = ground.max(terrain.height_at(base.x + r * angle.cos(), base.z + r * angle.sin()));
+    }
+    ground
+}
+
 /// Lift a [`Cylinder`] so its flat bottom stays on (not below) the terrain, and report whether it
 /// is grounded.
 ///
@@ -43,12 +61,7 @@ const RIM_SAMPLES: usize = 8;
 /// `walkable_cos = cos(max_slope_angle)`, the limit the game owns.
 pub fn rest_cylinder_on_heightmap(cylinder: Cylinder, terrain: &Heightmap, walkable_cos: f32) -> TerrainRest {
     let base = cylinder.base();
-    let r = cylinder.radius;
-    let mut ground = terrain.height_at(base.x, base.z);
-    for i in 0..RIM_SAMPLES {
-        let angle = std::f32::consts::TAU * (i as f32 / RIM_SAMPLES as f32);
-        ground = ground.max(terrain.height_at(base.x + r * angle.cos(), base.z + r * angle.sin()));
-    }
+    let ground = cylinder_support_height(&cylinder, terrain);
 
     let resting = base.y <= ground + GROUND_EPS;
     let rested = if base.y < ground {
@@ -157,6 +170,21 @@ mod tests {
             let (x, z) = (60.5 + 0.45 * a.cos(), 64.0 + 0.45 * a.sin());
             assert!(base_y >= terrain.height_at(x, z) - 1e-4, "rim sample ({x}, {z}) sinks");
         }
+    }
+
+    #[test]
+    fn support_height_is_the_footprint_max_the_rest_lifts_to() {
+        // The exposed support is the highest sample under the disc - the up-slope rim on a ramp - and
+        // is exactly the base height the lift-only rest puts a sunk body at. The game's ground-snap
+        // reads this to glue a grounded body to a descended surface without the rest's lift.
+        let terrain = ramp_x(0, 300);
+        let c = player(Vec3::new(60.5, 5.0, 64.0)); // floating above the ramp
+        let support = cylinder_support_height(&c, &terrain);
+        let rim_ground = terrain.height_at(60.5 + 0.45, 64.0);
+        assert!((support - rim_ground).abs() < 1e-4, "support {support} is the up-slope rim {rim_ground}");
+        // A body sunk into the same column lifts to exactly this support height.
+        let lifted = rest_cylinder_on_heightmap(player(Vec3::new(60.5, -50.0, 64.0)), &terrain, WALKABLE_COS);
+        assert!((lifted.position.y - 0.75 - support).abs() < 1e-4, "the rest lifts the base to the support");
     }
 
     #[test]
