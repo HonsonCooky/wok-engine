@@ -11,6 +11,11 @@
 //! the same grammar maps onto a controller later (gilrs is in wok-platform); the chrome's egui shortcuts
 //! (Ctrl+S, Esc) stay separate.
 //!
+//! Auto-frame: [`autoframe`] runs after the render residency reconciles (so the selection's bounds are
+//! current) and keeps the camera framed on the selection - a new selection or the recenter key frames it
+//! and couples the follow, and while coupled the focus tracks it so a move keeps it framed. A manual
+//! Look-nav decouples the follow (survey mode); recenter re-couples (`crate::camera`).
+//!
 //! The mouse is for the big jump: [`Interaction::gesture`] resolves the viewport pointer gestures the
 //! well raises (`crate::workspace::editor_area`) - a click selects the instance under the cursor, and a
 //! drag grabs it and drops it on the surface under the cursor (drag-and-drop, snapped to the grid). The
@@ -39,7 +44,7 @@ use wok_platform::winit::keyboard::NamedKey;
 use wok_scene::{InstanceId, Transform};
 
 use crate::action::{Action, Gesture};
-use crate::camera::Camera;
+use crate::camera::{Camera, Mode};
 use crate::geom;
 use crate::loaded::LoadedScene;
 use crate::model::{Model, Target};
@@ -64,6 +69,10 @@ const TOGGLE: NamedKey = NamedKey::Space;
 /// The camera-mode cycle (Layout <-> Orbit) - a one-shot tap, separate from the target toggle.
 const MODE_CYCLE: char = 'c';
 
+/// The recenter / Go-to-frame key: re-snap the camera onto the selection and re-couple the follow (an
+/// explicit verb, never an automatic jump). A one-shot tap, read in [`autoframe`].
+const RECENTER: char = 'f';
+
 /// The 1m world grid the keyboard move and the drag both snap to (the surviving grid-snap;
 /// movement-camera-design.md "Move"). World placement is grid-locked - fine work is the inspector.
 const GRID_STEP: f32 = 1.0;
@@ -77,10 +86,11 @@ const GRID_STEP: f32 = 1.0;
 ///
 /// Look drives the [`Camera`] by mode: in Layout the cluster pans and the vertical pair zooms, in Orbit
 /// the cluster orbits (yaw/pitch) and the vertical pair dollies. Move grid-steps the selection one cell
-/// per input: the screen cardinals ARE the world cardinals (exact under the top-down Layout view; the
-/// camera-relative Orbit mapping is a later commit), the vertical pair stepping world Y. All Move steps
-/// snap to the grid (grid-locked, no fine nudge) and route through the single writer, so the edit dirties
-/// the scene and Ctrl+S persists it.
+/// per input: in Layout the screen cardinals ARE the world cardinals (exact, the view looks straight
+/// down); in Orbit the cluster maps to the world grid axis nearest the camera's ground-facing direction
+/// ([`camera_relative_step`]), so a step is always grid-aligned, never diagonal. The vertical pair is
+/// world-Y in both, camera-independent. All Move steps snap to the grid (grid-locked, no fine nudge) and
+/// route through the single writer, so the edit dirties the scene and Ctrl+S persists it.
 ///
 /// Focus-gated: `typing` is true when a text field holds keyboard focus, and a held Ctrl is a chrome
 /// chord (Ctrl+S and friends), so in either case the spatial verbs stay inert and the keys reach the
@@ -123,15 +133,16 @@ pub fn keyboard(
             }
         }
         Target::Move => {
-            // The cluster grid-steps the selection one cell per input (camera-relative: in the top-down
-            // Layout the screen cardinals ARE the world cardinals, exact - the view looks straight down;
-            // the Orbit-relative mapping is a later commit); the vertical pair steps its world Y,
-            // camera-independent. All snapped to the grid (grid-locked, no fine nudge) and routed through
-            // the single writer, so the edit dirties the scene and Ctrl+S persists it.
             if dx != 0 || dz != 0 || dy != 0 {
                 if let (Some(id), Some(loaded)) = (model.shell.selection(), loaded) {
                     if let Some(placement) = loaded.placement(id) {
-                        let translation = grid_step(placement.transform.translation, dx, dy, dz, GRID_STEP);
+                        // Camera-relative: Layout maps the screen cardinals straight to world cardinals;
+                        // Orbit snaps the cluster to the world grid axis nearest the camera's facing.
+                        let (wx, wz) = match camera.mode() {
+                            Mode::Layout => (dx, dz),
+                            Mode::Orbit => camera_relative_step(dx, dz, camera.ground_forward()),
+                        };
+                        let translation = grid_step(placement.transform.translation, wx, dy, wz, GRID_STEP);
                         actions.push(Action::SetInstanceTransform(id, Transform { translation, ..placement.transform }));
                     }
                 }
@@ -139,6 +150,42 @@ pub fn keyboard(
         }
     }
     actions
+}
+
+/// Keep the camera framed on the selection, after the render residency reconciles so the selection's
+/// world bounds are current (the selection rung of the framing ladder, designs/movement-camera-design.md).
+/// A new selection or the recenter key (re)frames it and couples the follow; while coupled the focus
+/// tracks the selection so a keyboard move or a drag-and-drop keeps it framed. A manual Look-nav has
+/// decoupled the follow (survey mode); recenter re-couples - explicit, never an automatic jump.
+///
+/// Focus-gated like [`keyboard`]: a focused text field or a Ctrl/Super chord leaves the recenter key to
+/// the chrome. The recenter key is the press edge only (a one-shot snap, not a repeat). The selection's
+/// bounds come from the render residency's [`instance_aabb`](RenderScene::instance_aabb); an instance with
+/// no resolvable bounds (or no scene) simply does not frame.
+///
+/// `dragging` is whether a mouse drag-and-drop is in progress ([`Interaction::is_grabbing`]): while it is,
+/// the camera holds still rather than following (a drag positions against the current view, so a follow
+/// would feed the moved focus back into the cursor's world mapping and run away). The drop frame, no
+/// longer dragging, re-centers a coupled selection so it stays framed.
+pub fn autoframe(
+    input: &InputState,
+    typing: bool,
+    model: &Model,
+    render_scene: Option<&RenderScene>,
+    camera: &mut Camera,
+    dragging: bool,
+) {
+    let selection = model.shell.selection();
+    if dragging {
+        camera.hold_selection(selection);
+        return;
+    }
+    let recenter = !typing
+        && !input.key_held(NamedKey::Control)
+        && !input.key_held(NamedKey::Super)
+        && input.char_pressed(RECENTER);
+    let bounds = selection.and_then(|id| render_scene.and_then(|scene| scene.instance_aabb(id)));
+    camera.track_selection(selection, bounds, recenter);
 }
 
 /// The interaction's cross-frame state: the drag-and-drop grab. The keyboard verbs are stateless
@@ -152,6 +199,12 @@ pub struct Interaction {
 impl Interaction {
     pub fn new() -> Interaction {
         Interaction::default()
+    }
+
+    /// Whether a drag-and-drop grab is in progress. The auto-frame holds the camera still while it is,
+    /// since a drag positions against the current view ([`autoframe`]).
+    pub fn is_grabbing(&self) -> bool {
+        self.grabbed.is_some()
     }
 
     /// Resolve one viewport pointer [`Gesture`] (egui-gated to the well) into the selection and transform
@@ -261,6 +314,35 @@ fn cluster_step(forward: bool, back: bool, left: bool, right: bool) -> (i32, i32
     (dx, dz)
 }
 
+/// Map the directional cluster `(dx, dz)` to a world-grid step in Orbit, camera-relative: the cluster's
+/// forward steps the selection along the world grid axis nearest the camera's ground-facing direction
+/// (away from the camera), back the opposite, and left/right along the perpendicular axis - so a step is
+/// always grid-aligned, never diagonal (designs/movement-camera-design.md "Move", the Orbit case). As the
+/// camera orbits past the diagonal the axis that forward means flips; the accepted cost of camera-relative
+/// stepping, and a reason Layout is the default home.
+///
+/// `ground_forward` is the camera forward projected onto the XZ plane (its `.y` holds the world `Z`); only
+/// its sign and dominant axis matter, so it need not be normalized. At yaw 0 (facing world `-Z`) this
+/// reduces to Layout's exact screen-cardinal mapping. Pure, so it is unit tested.
+fn camera_relative_step(dx: i32, dz: i32, ground_forward: Vec2) -> (i32, i32) {
+    let (ax, az) = nearest_cardinal(ground_forward); // unit world step "away from the camera"
+    let (rx, rz) = (-az, ax); // 90 degrees clockwise (north -> east): the screen-right axis
+    // The cluster: forward is dz = -1 (one cell along `away`), right is dx = +1 (one cell along `right`).
+    (-dz * ax + dx * rx, -dz * az + dx * rz)
+}
+
+/// The world grid cardinal a ground direction leans most toward, as a unit `(dx, dz)` in `{+/-X, +/-Z}`.
+/// `v.x` is world X and `v.y` is world Z; the axis with the larger magnitude wins, ties on the diagonal
+/// resolving to X (arbitrary but consistent). `signum` never returns zero for `f32`, so an on-axis input
+/// still yields a unit step.
+fn nearest_cardinal(v: Vec2) -> (i32, i32) {
+    if v.x.abs() >= v.y.abs() {
+        (v.x.signum() as i32, 0)
+    } else {
+        (0, v.y.signum() as i32)
+    }
+}
+
 /// Step a translation by whole grid cells and snap to the grid, so a keyboard move always lands on it
 /// (movement-camera-design.md: grid-locked, no fine nudge). Snap-then-step: the position snaps to its
 /// nearest cell, then moves exactly `(dx, dy, dz)` cells of `step` - so each input is one clean cell from
@@ -314,6 +396,31 @@ mod tests {
     }
 
     #[test]
+    fn camera_relative_step_snaps_to_the_grid_axis_nearest_the_camera_facing() {
+        // Facing north (-Z), the Orbit move matches Layout exactly: forward north, right east, back
+        // south, left west - so Orbit at yaw 0 lands on the same cells as the top-down home.
+        let north = Vec2::new(0.0, -1.0);
+        assert_eq!(camera_relative_step(0, -1, north), (0, -1), "forward steps north (-Z)");
+        assert_eq!(camera_relative_step(1, 0, north), (1, 0), "right steps east (+X)");
+        assert_eq!(camera_relative_step(0, 1, north), (0, 1), "back steps south (+Z)");
+        assert_eq!(camera_relative_step(-1, 0, north), (-1, 0), "left steps west (-X)");
+        // Facing east (+X): the whole frame rotates 90 degrees - forward steps the way the camera faces
+        // (east), right steps south.
+        let east = Vec2::new(1.0, 0.0);
+        assert_eq!(camera_relative_step(0, -1, east), (1, 0), "forward steps east, the camera's facing");
+        assert_eq!(camera_relative_step(1, 0, east), (0, 1), "right steps south");
+        // A diagonal facing snaps to its dominant axis, so a step is never diagonal (a mostly-south aim).
+        assert_eq!(camera_relative_step(0, -1, Vec2::new(0.4, 0.9)), (0, 1), "forward snaps to the nearest axis");
+    }
+
+    #[test]
+    fn nearest_cardinal_picks_the_dominant_axis() {
+        assert_eq!(nearest_cardinal(Vec2::new(0.2, -0.9)), (0, -1), "z dominates -> north");
+        assert_eq!(nearest_cardinal(Vec2::new(-0.8, 0.1)), (-1, 0), "x dominates -> west");
+        assert_eq!(nearest_cardinal(Vec2::new(1.0, 1.0)), (1, 0), "a 45-degree tie resolves to X");
+    }
+
+    #[test]
     fn keyboard_look_drives_the_layout_camera_with_no_model_action() {
         // Look in the default Layout mode pans and zooms, observed through the public eye: the precise pan
         // and zoom math is camera.rs's; here we pin that the Look target routes the cluster to the camera
@@ -335,7 +442,6 @@ mod tests {
     fn keyboard_cycles_the_camera_mode_on_the_press_edge() {
         // The mode key flips Layout <-> Orbit on a tap (camera residency, so no action routes), and the
         // status bar reads the result through `mode()`.
-        use crate::camera::Mode;
         let model = Model::default();
         let mut cam = Camera::over(Vec3::ZERO);
         assert_eq!(cam.mode(), Mode::Layout, "the default home");

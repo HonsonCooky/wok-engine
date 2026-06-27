@@ -6,12 +6,12 @@
 //! keyboard-first camera model
 //! (designs/movement-camera-design.md). It builds the orthographic [`view_proj`](LayoutCamera::view_proj)
 //! the renderer draws with and the straight-down [`cursor_ray`](LayoutCamera::cursor_ray) that picking
-//! and the drag-and-drop cast through, and the Look target pans and zooms it ([`pan`](LayoutCamera::pan)
-//! / [`zoom`](LayoutCamera::zoom)). [`FlyCamera`] is the perspective basis
-//! ([`forward`](FlyCamera::forward) / [`right`](FlyCamera::right) / [`up`](FlyCamera::up) /
-//! [`view_proj`](FlyCamera::view_proj) / [`cursor_ray`](FlyCamera::cursor_ray)); the Orbit camera
-//! ([`modes`]) builds on it. [`frame`] (parked) fits a bounds into the fov for the auto-frame, a later
-//! commit. Everything here is pure - no egui, no input, no window - and unit tested below.
+//! and the drag-and-drop cast through, the Look target pans and zooms it ([`pan`](LayoutCamera::pan) /
+//! [`zoom`](LayoutCamera::zoom)), and [`fit_to`](LayoutCamera::fit_to) frames a bounds top-down.
+//! [`FlyCamera`] is the perspective basis ([`forward`](FlyCamera::forward) / [`right`](FlyCamera::right)
+//! / [`up`](FlyCamera::up) / [`view_proj`](FlyCamera::view_proj) / [`cursor_ray`](FlyCamera::cursor_ray));
+//! the Orbit camera ([`modes`]) builds on it and [`frame`] fits a bounds into its fov. Everything here is
+//! pure - no egui, no input, no window - and unit tested below.
 //!
 //! Conventions: right-handed, `+Y` up. For `FlyCamera`, `yaw` is radians about `+Y` with `0` facing
 //! `-Z`, positive turning right (toward `+X`); `pitch` is radians with positive looking up. `forward`
@@ -132,6 +132,14 @@ const ZOOM_STEP: f32 = 1.05;
 /// the view at any zoom (Look target).
 const PAN_FRACTION: f32 = 0.06;
 
+/// Margin on the framed zoom: the bounds' larger horizontal extent is the half-height times this, so the
+/// selection sits inside the view with breathing room rather than touching the edges.
+const FIT_MARGIN: f32 = 1.3;
+
+/// Smallest half-height framing zooms to, so a tiny placement gets a readable working view instead of the
+/// camera diving onto it (an 8m-tall view at this floor) - the orthographic analogue of [`FRAME_MIN_RADIUS`].
+const FIT_MIN_HALF_HEIGHT: f32 = 4.0;
+
 /// A top-down orthographic camera over a focus point on the world plane. The default Layout camera: the
 /// world reads as a map, the grid is exact, and a grid step is unambiguous. The focus is the pan
 /// position (its XZ) on the plane it pans over (its Y, the ground); `half_height` is the zoom.
@@ -211,12 +219,25 @@ impl LayoutCamera {
         let factor = ZOOM_STEP.powi(steps);
         self.half_height = (self.half_height * factor).clamp(MIN_HALF_HEIGHT, MAX_HALF_HEIGHT);
     }
+
+    /// Frame an axis-aligned bounds top-down (the selection rung of the framing ladder,
+    /// designs/movement-camera-design.md): centre the focus on it and size the zoom so the bounds' larger
+    /// horizontal extent fits the view with margin, floored so a tiny placement still reads and clamped to
+    /// the zoom band. Half-height is a half-extent, so fitting the larger of the X/Z extents covers both
+    /// axes for any landscape aspect; the wide axis sits a touch looser than the tall one, which the
+    /// margin absorbs. The combined [`Camera`] calls this for the Layout half of an auto-frame.
+    pub fn fit_to(&mut self, min: Vec3, max: Vec3) {
+        self.focus = (min + max) * 0.5;
+        let extent = (max - min).max(Vec3::ZERO);
+        let half = extent.x.max(extent.z) * 0.5 * FIT_MARGIN;
+        self.half_height = half.max(FIT_MIN_HALF_HEIGHT).clamp(MIN_HALF_HEIGHT, MAX_HALF_HEIGHT);
+    }
 }
 
 // ---- framing ----
-// Parked under `#[allow(dead_code)]`: [`frame`] fits a bounds into the perspective fov - the
-// framing-ladder primitive the Orbit camera's auto-frame ([`modes`]) calls, a later commit. [`look_at`]
-// lands with the macro tier's canonical vantages (the next bite), where a fixed yaw/pitch aims at a chunk.
+// [`frame`] fits a bounds into the perspective fov - the framing-ladder primitive the [`OrbitCamera`]
+// uses to frame the selection (modes). [`look_at`] stays parked under `#[allow(dead_code)]`: it lands
+// with the macro tier's canonical vantages (the next bite), where a fixed yaw/pitch aims at a chunk.
 
 /// The `(yaw, pitch)` that aim a camera at `position` toward `target`, in [`FlyCamera`]'s
 /// convention (yaw about `+Y`, `0` facing `-Z`; pitch positive looking up). The inverse of
@@ -232,28 +253,23 @@ pub fn look_at(position: Vec3, target: Vec3) -> (f32, f32) {
 
 /// Margin factor on the framing distance: the framed bounds' enclosing sphere fills roughly 70%
 /// of the vertical field of view instead of touching its edges.
-#[allow(dead_code)]
 const FRAME_MARGIN: f32 = 1.4;
 
 /// Smallest radius framing treats as real, so a tiny or flat placement still gets a readable
 /// view instead of the camera diving onto it.
-#[allow(dead_code)]
 const FRAME_MIN_RADIUS: f32 = 1.0;
 
 /// The framing pitch band, radians: a gentle look down at the subject. Framing keeps the user's
 /// yaw (their sense of direction survives the jump) but a level or upward pitch would frame the
 /// subject against the sky edge-on, so pitch is clamped into this band.
-#[allow(dead_code)]
 const FRAME_PITCH_MIN: f32 = -0.9;
-#[allow(dead_code)]
 const FRAME_PITCH_MAX: f32 = -0.15;
 
 /// Move the camera to a sensible view of an axis-aligned bounds (the frame-to-subject jump):
 /// keep the current yaw, clamp pitch into the gentle downward band, and back off along the
 /// resulting forward until the bounds' enclosing sphere fits the vertical fov with margin. Pure:
 /// camera and bounds in, camera out. The Orbit camera's `fit_to` ([`modes`]) reads the fit distance and
-/// clamped pitch back off the result - the auto-frame, a later commit, so it is parked until then.
-#[allow(dead_code)]
+/// clamped pitch back off the result.
 pub fn frame(camera: &FlyCamera, min: Vec3, max: Vec3) -> FlyCamera {
     let center = (min + max) * 0.5;
     let radius = ((max - min).length() * 0.5).max(FRAME_MIN_RADIUS);

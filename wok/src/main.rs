@@ -23,8 +23,10 @@
 //! (`crate::interaction`), between the action drain and the draw, where the old mouse interaction used
 //! to plug in: the status-bar target toggle aims the directional cluster, which drives the camera (the
 //! Look target) or grid-steps the selection (the Move target), and a dedicated key cycles the camera
-//! between its two modes (top-down Layout and perspective Orbit). The mouse resolves a click to a
-//! selection and a drag to a drag-and-drop move. The inspector stays the precise editing surface.
+//! between its two modes (top-down Layout and perspective Orbit). After the render residency reconciles
+//! the auto-frame (`interaction::autoframe`) keeps the camera framed on the selection. The mouse resolves
+//! a click to a selection and a drag to a drag-and-drop move. The inspector stays the precise editing
+//! surface.
 //!
 //! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish` (inside `render::draw`):
 //! each frame runs the egui pass (building the chrome), draws the 3D into the well rect (or clears the
@@ -242,6 +244,14 @@ impl App for Editor {
                 self.camera = scene.spawn_camera();
             }
         }
+
+        // Keep the camera framed on the selection (the selection rung of the framing ladder). It runs
+        // here, after the render residency reconciles, so the selection's world bounds reflect a keyboard
+        // move just applied this frame - the camera follows it the same frame. The recenter key is read
+        // here too, focus-gated like the keyboard verbs. During a mouse drag the camera holds still (a
+        // follow would run away against the drag's own cursor ray), re-centering once on the drop frame.
+        let dragging = self.interaction.is_grabbing();
+        interaction::autoframe(&ctx.input, typing, &self.model, self.render_scene.as_ref(), &mut self.camera, dragging);
 
         render::draw(ctx.platform, gpu, self.render_scene.as_ref(), self.camera, editor_rect, editor_bg, gui, output);
 
