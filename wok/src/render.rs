@@ -24,7 +24,6 @@ use wok_platform::{Platform, gfx};
 use wok_render::{Camera, RenderItem, Renderer, ViewportRect};
 use wok_scene::{ChunkCoord, Primitive, SurfaceTag, VisibleItem};
 
-use crate::camera::LayoutCamera;
 use crate::gui::Gui;
 use crate::render_scene::{RenderScene, chunk_origin};
 
@@ -127,7 +126,7 @@ pub fn draw(
     platform: &mut Platform,
     gpu: &mut Gpu,
     scene: Option<&RenderScene>,
-    camera: LayoutCamera,
+    camera: crate::camera::Camera,
     editor_rect: egui::Rect,
     editor_bg: egui::Color32,
     gui: &mut Gui,

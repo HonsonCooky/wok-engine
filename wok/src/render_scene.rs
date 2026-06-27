@@ -31,7 +31,7 @@ use wok_scene::{
     Primitive, Scene, VisibleItem,
 };
 
-use crate::camera::LayoutCamera;
+use crate::camera::Camera;
 use crate::loaded::LoadedScene;
 use crate::render::Gpu;
 
@@ -147,17 +147,18 @@ impl RenderScene {
         self.source_chunks = chunks.to_vec();
     }
 
-    /// Spawn the Layout camera over the first loaded chunk: looking straight down at its centre, focused
-    /// on the terrain height there (or the origin plane when the chunk has no terrain), at the default
-    /// zoom. Called right after a fresh [`build`](Self::build), where the store still carries the chunks'
+    /// Spawn the editor camera over the first loaded chunk: in the Layout home, looking straight down at
+    /// its centre, focused on the terrain height there (or the origin plane when the chunk has no
+    /// terrain), at the default zoom. Both modes share that focus, so cycling to Orbit looks at the same
+    /// place. Called right after a fresh [`build`](Self::build), where the store still carries the chunks'
     /// heightmaps.
-    pub fn spawn_camera(&self) -> LayoutCamera {
+    pub fn spawn_camera(&self) -> Camera {
         let half = CHUNK_SIZE_M * 0.5;
         let (origin, ground) = self.store.iter_loaded().next().map_or((Vec3::ZERO, 0.0), |(coord, runtime)| {
             let ground = runtime.heightmap.as_ref().map_or(0.0, |h| h.height_at(half, half));
             (chunk_origin(coord), ground)
         });
-        LayoutCamera::over(origin + Vec3::new(half, ground, half))
+        Camera::over(origin + Vec3::new(half, ground, half))
     }
 
     /// The far clip distance: the scene's streaming extent (`load_radius` chunks, the farthest
@@ -601,10 +602,11 @@ mod tests {
         // from fog - the decoupling.
         assert!(scene.far_plane() >= 50.0);
         assert_eq!(scene.far_plane(), 3.0 * CHUNK_SIZE_M);
-        // The Layout camera spawns over the scene centre, finite, at a positive zoom, the eye above it.
+        // The camera spawns in the Layout home over the scene centre, well-formed (the precise focus and
+        // zoom are camera.rs's tests; here only that spawn produces a usable Layout camera).
         let cam = scene.spawn_camera();
-        assert!(cam.focus.is_finite() && cam.half_height > 0.0);
-        assert!(cam.eye().y > cam.focus.y, "the eye floats above the focus plane");
+        assert_eq!(cam.mode(), crate::camera::Mode::Layout, "spawns in the Layout home");
+        assert!(cam.eye().is_finite(), "the spawn camera is well-formed");
 
         let _ = std::fs::remove_dir_all(&root);
     }

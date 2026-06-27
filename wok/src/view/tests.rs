@@ -71,8 +71,9 @@ fn chrome_harness(
         let editor_bg = crate::theme::palette(ctx).editor_bg;
         ctx.layer_painter(egui::LayerId::background()).rect_filled(ctx.screen_rect(), 0.0, editor_bg);
         // The viewport interaction draws no chrome visual (it is live-input, verified by a run, not a
-        // PNG), so the snapshot renders the chrome exactly as the app does.
-        let _ = chrome(ctx, &model, loaded_scene.as_ref());
+        // PNG), so the snapshot renders the chrome exactly as the app does. The camera mode is frame-loop
+        // residency the snapshots have no camera for, so they pin the default Layout home.
+        let _ = chrome(ctx, &model, loaded_scene.as_ref(), crate::camera::Mode::Layout);
     })
 }
 

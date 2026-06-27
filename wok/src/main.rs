@@ -21,10 +21,10 @@
 //! The viewport interaction is the keyboard-first camera and selection model
 //! (designs/movement-camera-design.md), rebuilt on the cleared state. It runs in the interaction seam
 //! (`crate::interaction`), between the action drain and the draw, where the old mouse interaction used
-//! to plug in: the status-bar target toggle aims the directional cluster, which pans and zooms the
-//! top-down Layout camera (the Look target) or grid-steps the selection (the Move target); the mouse
-//! resolves a click to a selection and a drag to a drag-and-drop move. The inspector stays the precise
-//! editing surface.
+//! to plug in: the status-bar target toggle aims the directional cluster, which drives the camera (the
+//! Look target) or grid-steps the selection (the Move target), and a dedicated key cycles the camera
+//! between its two modes (top-down Layout and perspective Orbit). The mouse resolves a click to a
+//! selection and a drag to a drag-and-drop move. The inspector stays the precise editing surface.
 //!
 //! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish` (inside `render::draw`):
 //! each frame runs the egui pass (building the chrome), draws the 3D into the well rect (or clears the
@@ -53,7 +53,7 @@ mod view;
 mod workspace;
 
 use action::Action;
-use camera::LayoutCamera;
+use camera::Camera;
 use glam::Vec3;
 use gui::Gui;
 use interaction::Interaction;
@@ -82,10 +82,11 @@ struct Editor {
     /// `loaded_scene` and reconciled to it each frame so edits show. Separate from the editable model;
     /// `None` when no scene is open or it failed to load.
     render_scene: Option<RenderScene>,
-    /// The Layout camera the viewport renders through: top-down orthographic over a focus point.
-    /// Positioned over the scene when one loads (`RenderScene::spawn_camera`), then panned and zoomed by
-    /// the interaction seam's Look target (`crate::interaction`).
-    camera: LayoutCamera,
+    /// The camera the viewport renders through: the two-mode editor camera (Layout top-down ortho /
+    /// Orbit perspective) over a shared focus point (`crate::camera`). Positioned over the scene when one
+    /// loads (`RenderScene::spawn_camera`), then driven by the interaction seam's Look target and kept
+    /// framed on the selection (`crate::interaction`).
+    camera: Camera,
     /// The keyboard-first interaction's cross-frame state (`crate::interaction`): the drag-and-drop grab.
     /// The keyboard verbs are stateless; only the mouse drag remembers its grab between frames.
     interaction: Interaction,
@@ -168,11 +169,14 @@ impl App for Editor {
         // editor-well rect the 3D viewport scopes to.
         let mut actions = Vec::new();
         let mut editor_rect = egui::Rect::NOTHING;
+        // The camera mode is frame-loop residency (not model state), so the status bar reads it as a
+        // value passed into the chrome, the same way the dirty flag comes from the loaded scene.
+        let camera_mode = self.camera.mode();
         let output = {
             let model = &self.model;
             let loaded_scene = self.loaded_scene.as_ref();
             gui.run(&ctx.platform.window, |egui_ctx| {
-                let (acts, rect) = view::chrome(egui_ctx, model, loaded_scene);
+                let (acts, rect) = view::chrome(egui_ctx, model, loaded_scene, camera_mode);
                 actions.extend(acts);
                 editor_rect = rect;
             })
@@ -238,6 +242,7 @@ impl App for Editor {
                 self.camera = scene.spawn_camera();
             }
         }
+
         render::draw(ctx.platform, gpu, self.render_scene.as_ref(), self.camera, editor_rect, editor_bg, gui, output);
 
         // Keep the window title on the open project's name (or just the app name when none).
@@ -249,8 +254,8 @@ impl App for Editor {
 
 /// The camera before any scene loads - never rendered (the empty well just clears), but the field
 /// needs a value; [`RenderScene::spawn_camera`] overwrites it when a scene opens.
-fn default_camera() -> LayoutCamera {
-    LayoutCamera::over(Vec3::ZERO)
+fn default_camera() -> Camera {
+    Camera::over(Vec3::ZERO)
 }
 
 fn main() {

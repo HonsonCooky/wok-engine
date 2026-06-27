@@ -1,15 +1,17 @@
 //! The editor's camera state and the pure matrix and framing math the renderer and picking read.
 //!
-//! Two cameras live here. [`LayoutCamera`] is the active one (brief 2): a top-down orthographic camera
-//! over a focus point - the Layout home of the keyboard-first camera model
+//! The view-math primitives live here; the mode-switching editor camera that holds them is in
+//! [`modes`] (re-exported as [`Camera`] and [`Mode`], with the Orbit-mode `OrbitCamera` private to it).
+//! [`LayoutCamera`] is the top-down orthographic camera over a focus point - the Layout home of the
+//! keyboard-first camera model
 //! (designs/movement-camera-design.md). It builds the orthographic [`view_proj`](LayoutCamera::view_proj)
 //! the renderer draws with and the straight-down [`cursor_ray`](LayoutCamera::cursor_ray) that picking
-//! and the drag-and-drop cast through, and the Look target pans and zooms it
-//! ([`pan`](LayoutCamera::pan) / [`zoom`](LayoutCamera::zoom)). [`FlyCamera`] is the perspective camera
-//! state with a yaw/pitch basis ([`forward`](FlyCamera::forward) / [`right`](FlyCamera::right) /
-//! [`up`](FlyCamera::up)); it is parked for the Orbit mode (brief 3), the basis the framing math
-//! ([`look_at`], [`frame`]) and the orbit nav will build on. Everything here is pure - no egui, no
-//! input, no window - and unit tested below.
+//! and the drag-and-drop cast through, and the Look target pans and zooms it ([`pan`](LayoutCamera::pan)
+//! / [`zoom`](LayoutCamera::zoom)). [`FlyCamera`] is the perspective basis
+//! ([`forward`](FlyCamera::forward) / [`right`](FlyCamera::right) / [`up`](FlyCamera::up) /
+//! [`view_proj`](FlyCamera::view_proj) / [`cursor_ray`](FlyCamera::cursor_ray)); the Orbit camera
+//! ([`modes`]) builds on it. [`frame`] (parked) fits a bounds into the fov for the auto-frame, a later
+//! commit. Everything here is pure - no egui, no input, no window - and unit tested below.
 //!
 //! Conventions: right-handed, `+Y` up. For `FlyCamera`, `yaw` is radians about `+Y` with `0` facing
 //! `-Z`, positive turning right (toward `+X`); `pitch` is radians with positive looking up. `forward`
@@ -19,15 +21,17 @@
 
 use glam::{Mat4, Vec2, Vec3};
 
+/// The mode-switching editor camera (the two-mode Layout/Orbit camera and the Orbit-mode state).
+mod modes;
+pub use modes::{Camera, Mode};
+
 /// Vertical field of view and near plane for the projection. The far plane is per-frame data (the
 /// scene's render distance - its streaming extent, per the HLD), so it is a [`view_proj`] parameter.
 const FOV_Y_RADIANS: f32 = std::f32::consts::FRAC_PI_3;
 const NEAR_PLANE: f32 = 0.1;
 
-/// The perspective camera's whole state between frames. Parked for the Orbit mode (brief 3): the
-/// active editor camera is [`LayoutCamera`], so nothing constructs this outside the tests until the
-/// orbit nav lands - the same parked-not-dead treatment the framing math below carries.
-#[allow(dead_code)]
+/// The perspective camera's whole state between frames - the basis the Orbit camera ([`modes`]) derives
+/// its eye position and view from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlyCamera {
     pub position: Vec3,
@@ -37,15 +41,15 @@ pub struct FlyCamera {
 
 impl FlyCamera {
     /// The unit vector the camera looks along.
-    #[allow(dead_code)]
     pub fn forward(&self) -> Vec3 {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
         Vec3::new(sin_yaw * cos_pitch, sin_pitch, -cos_yaw * cos_pitch)
     }
 
-    /// The unit vector to the camera's right, always horizontal (roll is never introduced). Parked for
-    /// the rebuilt camera (brief 2) like the framing math: only the tests exercise it until then.
+    /// The unit vector to the camera's right, always horizontal (roll is never introduced). Still parked:
+    /// the Orbit-relative move derives its right grid axis from the snapped forward rather than this, so
+    /// only the tests exercise it for now (it lands with the macro tier's canonical vantages).
     #[allow(dead_code)]
     pub fn right(&self) -> Vec3 {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
@@ -54,8 +58,8 @@ impl FlyCamera {
 
     /// The unit vector for the camera's up across the view plane: perpendicular to forward and right,
     /// so it tilts with pitch (unlike world up). Equals `+Y` when the view is level. The basis
-    /// (`right`, `up`, `-forward`) is orthonormal at any orientation. Parked for the rebuilt camera
-    /// (brief 2) like [`right`](Self::right): only the tests exercise it until then.
+    /// (`right`, `up`, `-forward`) is orthonormal at any orientation. Still parked like
+    /// [`right`](Self::right): only the tests exercise it for now.
     #[allow(dead_code)]
     pub fn up(&self) -> Vec3 {
         self.right().cross(self.forward())
@@ -64,7 +68,6 @@ impl FlyCamera {
     /// The combined view-projection matrix for a target with the given aspect ratio, with the far
     /// plane supplied per frame (the editor derives it from the fog distance). `perspective_rh`
     /// maps depth to `0..=1`, which is wgpu's clip-space convention.
-    #[allow(dead_code)]
     pub fn view_proj(&self, aspect: f32, far: f32) -> Mat4 {
         let projection = Mat4::perspective_rh(FOV_Y_RADIANS, aspect, NEAR_PLANE, far);
         let view = Mat4::look_to_rh(self.position, self.forward(), Vec3::Y);
@@ -85,7 +88,6 @@ impl FlyCamera {
     /// coordinates, so the result is identical whether measured in points or pixels.
     ///
     /// [`view_proj`]: Self::view_proj
-    #[allow(dead_code)]
     pub fn cursor_ray(&self, pos_in_rect: Vec2, rect_size: Vec2, far: f32) -> (Vec3, Vec3) {
         let ndc_x = 2.0 * pos_in_rect.x / rect_size.x - 1.0;
         let ndc_y = 1.0 - 2.0 * pos_in_rect.y / rect_size.y;
@@ -212,14 +214,16 @@ impl LayoutCamera {
 }
 
 // ---- framing ----
-// Exercised by the unit tests below and built on by the rebuilt camera (brief 2: the framing ladder
-// and an explicit Go action); nothing calls them yet, so they are parked under `#[allow(dead_code)]`.
+// Parked under `#[allow(dead_code)]`: [`frame`] fits a bounds into the perspective fov - the
+// framing-ladder primitive the Orbit camera's auto-frame ([`modes`]) calls, a later commit. [`look_at`]
+// lands with the macro tier's canonical vantages (the next bite), where a fixed yaw/pitch aims at a chunk.
 
 /// The `(yaw, pitch)` that aim a camera at `position` toward `target`, in [`FlyCamera`]'s
 /// convention (yaw about `+Y`, `0` facing `-Z`; pitch positive looking up). The inverse of
 /// [`FlyCamera::forward`]: feeding these back through `forward` points at the target. Degenerate
 /// (`position == target`) yields a level forward rather than a NaN, and the `asin` domain is
-/// guarded against float drift past `+/-1`.
+/// guarded against float drift past `+/-1`. Parked for the macro tier's canonical vantages (the orbit
+/// nav and framing it aims at the focus by construction, so it needs no aim solve yet).
 #[allow(dead_code)]
 pub fn look_at(position: Vec3, target: Vec3) -> (f32, f32) {
     let dir = (target - position).normalize_or_zero();
@@ -247,7 +251,8 @@ const FRAME_PITCH_MAX: f32 = -0.15;
 /// Move the camera to a sensible view of an axis-aligned bounds (the frame-to-subject jump):
 /// keep the current yaw, clamp pitch into the gentle downward band, and back off along the
 /// resulting forward until the bounds' enclosing sphere fits the vertical fov with margin. Pure:
-/// camera and bounds in, camera out. Kept for a later explicit Go action; nothing calls it yet.
+/// camera and bounds in, camera out. The Orbit camera's `fit_to` ([`modes`]) reads the fit distance and
+/// clamped pitch back off the result - the auto-frame, a later commit, so it is parked until then.
 #[allow(dead_code)]
 pub fn frame(camera: &FlyCamera, min: Vec3, max: Vec3) -> FlyCamera {
     let center = (min + max) * 0.5;
