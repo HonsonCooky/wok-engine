@@ -23,7 +23,7 @@ use crate::recent::Recents;
 
 /// The shell's enumerated vocabulary - the nav views, the instance sort, the dock side, the tab kind.
 mod kinds;
-pub use kinds::{InstanceSort, NavSide, NavView, Tab, Target};
+pub use kinds::{InstanceSort, NavSide, NavView, Tab};
 
 /// The editor's top-level state: what project is open, the recent-projects list, and how the shell
 /// around the content is arranged.
@@ -66,10 +66,6 @@ pub struct Shell {
     /// the stable identity, and the view resolves it against the loaded scene at read time, so a
     /// selection whose id is absent simply resolves to nothing.
     selected: Option<InstanceId>,
-    /// What the directional cluster drives - the persistent [`Target`] toggle, resting in `Move`. The
-    /// interaction layer reads it each frame to aim the cluster (step the selection in `Move`, pan and
-    /// zoom the camera in `Look`); the status bar shows it. Flipped by [`toggle_target`](Self::toggle_target).
-    target: Target,
 }
 
 impl Default for Shell {
@@ -82,7 +78,6 @@ impl Default for Shell {
             active_tab: None,
             instance_sort: InstanceSort::default(),
             selected: None,
-            target: Target::default(),
         }
     }
 }
@@ -130,12 +125,6 @@ impl Shell {
         self.selected
     }
 
-    /// What the directional cluster currently drives (the persistent target toggle). The interaction
-    /// layer reads it to aim the cluster; the status bar shows it.
-    pub fn target(&self) -> Target {
-        self.target
-    }
-
     // ---- mutations (only action::handle calls these) ----
 
     /// Switch the panel to show `view`.
@@ -165,15 +154,10 @@ impl Shell {
         self.selected = Some(id);
     }
 
-    /// Clear the selection (Esc, a click on empty space, or switching to a different scene, where the
-    /// per-scene id no longer applies).
+    /// Clear the selection (Esc, or switching to a different scene, where the per-scene id no longer
+    /// applies).
     pub(crate) fn deselect(&mut self) {
         self.selected = None;
-    }
-
-    /// Flip the cluster target (`Move` <-> `Look`) - the thumb-tap toggle.
-    pub(crate) fn toggle_target(&mut self) {
-        self.target = self.target.toggled();
     }
 
     /// Open `tab`, or focus it if an equal tab is already open - the no-duplicate rule (one obvious
@@ -295,18 +279,6 @@ mod tests {
         assert_eq!(shell.selection(), Some(InstanceId(7)));
         shell.deselect();
         assert_eq!(shell.selection(), None);
-    }
-
-    // ---- target toggle ----
-
-    #[test]
-    fn the_cluster_target_rests_in_move_and_the_toggle_flips_it() {
-        let mut shell = Shell::default();
-        assert_eq!(shell.target(), Target::Move, "the cluster rests in Move");
-        shell.toggle_target();
-        assert_eq!(shell.target(), Target::Look, "a tap flips it to Look");
-        shell.toggle_target();
-        assert_eq!(shell.target(), Target::Move, "and back to Move");
     }
 
     // ---- tabs ----

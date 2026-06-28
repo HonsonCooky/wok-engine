@@ -210,6 +210,10 @@ impl RenderScene {
     /// authored footprint. Tolerant like [`build`](Self::build) and [`rederive`](Self::rederive): a
     /// placement whose prefab or active state is absent is skipped rather than failing the pick.
     /// Terrain is not a placement, so a ray meeting only terrain returns `None`.
+    ///
+    /// Parked with the surface query (the interaction demolition removed the click-to-select that drove
+    /// it); the click-to-select workflow (a rebuild bite) is its caller.
+    #[allow(dead_code)]
     pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<InstanceId> {
         let mut best: Option<(f32, InstanceId)> = None;
         for chunk in &self.source_chunks {
@@ -247,8 +251,8 @@ impl RenderScene {
     /// path). Returns `origin + dir * t` for the winning `t`.
     ///
     /// Parked under `#[allow(dead_code)]` with [`instance_aabb`](Self::instance_aabb) and the private
-    /// surface-query helpers below: the held-key move that drove it was removed in the interaction
-    /// demolition, and brief 2's drag-and-drop is its caller (designs/movement-camera-design.md).
+    /// surface-query helpers below: the move that drove it was removed in the interaction demolition, and
+    /// the move workflow (a rebuild bite) is its caller (designs/orchestrator-state.md).
     #[allow(dead_code)]
     pub fn surface_ray(&self, origin: Vec3, dir: Vec3, exclude: InstanceId) -> Option<Vec3> {
         // Nearest prefab-collider hit, skipping the moving instance.

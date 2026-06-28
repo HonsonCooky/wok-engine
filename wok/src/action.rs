@@ -23,32 +23,11 @@
 
 use std::path::PathBuf;
 
-use glam::Vec2;
 use wok_scene::{InstanceId, Transform};
 
 use crate::loaded::LoadedScene;
 use crate::model::{InstanceSort, Model, NavSide, NavView, Tab};
 use crate::project::Project;
-
-/// A pointer gesture in the 3D viewport well, raised by the well (`crate::workspace::editor_area`) and
-/// carried by [`Action::ViewportGesture`]. egui assigns the gesture to the topmost area, so one over the
-/// floating inspector or a menu never reaches the well. The frame loop (`crate::interaction`) resolves
-/// it - it owns the camera, the render residency, the well rect, and the drag state a pick and a
-/// surface-follow need. All positions are window-space egui points.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Gesture {
-    /// A press and release with no drag, at this position: select the instance under the cursor, or
-    /// deselect over empty space / terrain. The surviving click-to-select (the specific grab).
-    Click(Vec2),
-    /// A drag began at this position: grab and select the instance under the cursor - the start of a
-    /// drag-and-drop move. A drag begun on empty space grabs nothing.
-    GrabStart(Vec2),
-    /// The drag continued, now at this position: the grabbed instance follows the cursor's surface
-    /// point (snapped to the grid, rested on the surface).
-    GrabMove(Vec2),
-    /// The drag ended (the button released): drop the grabbed instance (already committed each frame).
-    GrabEnd,
-}
 
 /// A menu choice, keybind, or chrome interaction, emitted by the view and applied by [`handle`].
 ///
@@ -68,12 +47,6 @@ pub enum Action {
     /// panel header's sort control while the Instances view is active.
     SetInstanceSort(InstanceSort),
 
-    // ---- interaction ----
-    /// Flip the directional cluster's target (`Move` <-> `Look`). Emitted by the interaction layer's
-    /// toggle key (the thumb tap); the status bar shows the result. Persistent shell state, so it routes
-    /// through the single writer like the navigation actions.
-    ToggleTarget,
-
     // ---- tabs ----
     /// Open the named scene as a tab over the editor area, focusing it if already open (no
     /// duplicate). Emitted by a Scenes nav row. Scene-specific for now; opening prefab or lighting
@@ -87,20 +60,13 @@ pub enum Action {
 
     // ---- selection ----
     /// Select the placement with this instance id. Emitted by clicking an Instances-tree row (viewport
-    /// picking is a later bite). The id is set as given; the view resolves it against the loaded scene
-    /// when it reads, so an id with no matching placement resolves to nothing rather than erroring.
+    /// click-to-select is a later workflow). The id is set as given; the view resolves it against the
+    /// loaded scene when it reads, so an id with no matching placement resolves to nothing rather than
+    /// erroring.
     Select(InstanceId),
-    /// Clear the selection. Emitted by Esc or a click on empty space, and applied by the frame loop
-    /// when it switches to a different scene (the per-scene id no longer applies).
+    /// Clear the selection. Emitted by Esc, and applied by the frame loop when it switches to a
+    /// different scene (the per-scene id no longer applies).
     Deselect,
-    /// A pointer [`Gesture`] in the 3D viewport well - a click-to-select or a drag-and-drop move.
-    /// Resolved by the frame loop (`crate::interaction`), which owns the camera, the render residency,
-    /// the well rect, and the drag state a pick and a surface-follow need, which the egui- and
-    /// residency-free [`handle`] cannot - into the [`Select`](Action::Select) /
-    /// [`Deselect`](Action::Deselect) / [`SetInstanceTransform`](Action::SetInstanceTransform) the
-    /// gesture implies, each applied through this same handler. So it never reaches [`handle`] itself;
-    /// the arm there is an inert guard.
-    ViewportGesture(Gesture),
 
     // ---- editing ----
     /// Set the display name of the placement with this instance id, renaming it in the loaded scene.
@@ -171,10 +137,6 @@ pub fn handle(model: &mut Model, loaded: Option<&mut LoadedScene>, action: Actio
             model.shell.set_instance_sort(sort);
             Handled::default()
         }
-        Action::ToggleTarget => {
-            model.shell.toggle_target();
-            Handled::default()
-        }
         Action::OpenScene(name) => {
             model.shell.open_tab(Tab::Scene(name));
             Handled::default()
@@ -193,13 +155,6 @@ pub fn handle(model: &mut Model, loaded: Option<&mut LoadedScene>, action: Actio
         }
         Action::Deselect => {
             model.shell.deselect();
-            Handled::default()
-        }
-        Action::ViewportGesture(_) => {
-            // The frame loop resolves a viewport gesture into Select / Deselect / SetInstanceTransform
-            // before it reaches the writer (it owns the camera, the render residency, the well rect, and
-            // the drag state a pick / surface-follow need; handle is egui- and residency-free). Reaching
-            // here means nothing was resolved, so do nothing.
             Handled::default()
         }
         Action::SetInstanceName(id, name) => {
@@ -253,7 +208,6 @@ pub fn handle(model: &mut Model, loaded: Option<&mut LoadedScene>, action: Actio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Target;
     use std::path::Path;
 
     // ---- navigation panel ----
@@ -309,16 +263,6 @@ mod tests {
         assert_eq!(model.shell.instance_sort(), InstanceSort::Flat);
         handle(&mut model, None, Action::SetInstanceSort(InstanceSort::Group));
         assert_eq!(model.shell.instance_sort(), InstanceSort::Group);
-    }
-
-    #[test]
-    fn toggle_target_flips_the_cluster_target() {
-        let mut model = Model::default();
-        assert_eq!(model.shell.target(), Target::Move, "the cluster rests in Move");
-        handle(&mut model, None, Action::ToggleTarget);
-        assert_eq!(model.shell.target(), Target::Look);
-        handle(&mut model, None, Action::ToggleTarget);
-        assert_eq!(model.shell.target(), Target::Move);
     }
 
     // ---- tabs ----
@@ -381,18 +325,6 @@ mod tests {
         handle(&mut model, None, Action::Select(InstanceId(1)));
         handle(&mut model, None, Action::Select(InstanceId(2)));
         assert_eq!(model.shell.selection(), Some(InstanceId(2)));
-    }
-
-    #[test]
-    fn viewport_gesture_is_an_inert_no_op_in_the_handler() {
-        // The frame loop resolves a viewport gesture into Select / Deselect / SetInstanceTransform (it
-        // owns the camera, residency, and drag state); if one ever reaches handle it must leave the
-        // model untouched.
-        let mut model = Model::default();
-        handle(&mut model, None, Action::Select(InstanceId(3)));
-        let handled = handle(&mut model, None, Action::ViewportGesture(Gesture::Click(Vec2::new(10.0, 20.0))));
-        assert_eq!(handled, Handled::default());
-        assert_eq!(model.shell.selection(), Some(InstanceId(3)), "handle leaves the selection untouched");
     }
 
     // ---- project lifecycle ----

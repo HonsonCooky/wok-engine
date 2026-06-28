@@ -46,11 +46,10 @@ use crate::workspace;
 /// which the Instances nav view lists; it is `None` when no scene tab is active. The model alone cannot
 /// carry it - it is filesystem residency, not pure model state - so it is threaded in separately.
 ///
-/// The viewport interaction - the camera and the transform grammar - lives in the frame loop
-/// (`crate::main` / `crate::interaction`), not the chrome: the keyboard verbs read wok-platform input
-/// there. The chrome raises only the well's mouse gestures (`crate::workspace::editor_area`) - a click
-/// to select or a drag-and-drop to move - as a `ViewportGesture` the frame loop resolves into selection
-/// and transform edits.
+/// The viewport is render-only in this baseline: the interaction layer was demolished, so the well
+/// (`crate::workspace::editor_area`) raises no gestures and the chrome drives no camera. The next
+/// workflow bite plugs its viewport input into the frame loop's seam (`crate::main`); the chrome stays
+/// the data surface (the Instances tree selects, the floating inspector edits).
 pub fn chrome(
     ctx: &egui::Context,
     model: &Model,
@@ -66,13 +65,13 @@ pub fn chrome(
     // The status bar shows the save dot when the open scene has unsaved edits (residency state, not
     // model state, so it is read from the loaded scene here and passed in).
     let dirty = loaded_scene.is_some_and(|scene| scene.dirty());
-    menu::status_bar(ctx, model.project.as_ref(), model.shell.target(), dirty, &mut actions);
+    menu::status_bar(ctx, model.project.as_ref(), dirty, &mut actions);
     workspace::tab_bar(ctx, model, &mut actions);
     // The editor area is the central region left after the three bounding panels; capture it now, before
     // the central panel consumes it, so the floating inspector can anchor to and clip to it. The
     // inspector is shown after the well so it layers over it; it appears only when a selection resolves.
     let editor_rect = ctx.available_rect();
-    workspace::editor_area(ctx, &mut actions);
+    workspace::editor_area(ctx);
     inspector::floating(ctx, model, loaded_scene, editor_rect, &mut actions);
     // Esc clears the selection (editor-design.md: Esc unwinds the selection). Gated on there being one,
     // so it is inert otherwise and never fights for the key when nothing is selected.
