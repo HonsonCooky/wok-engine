@@ -19,14 +19,13 @@
 //! the chrome painted over it (`crate::render`).
 //!
 //! The viewport interaction is the keyboard-first camera and selection model
-//! (designs/movement-camera-design.md), rebuilt on the cleared state. It runs in the interaction seam
-//! (`crate::interaction`), between the action drain and the draw, where the old mouse interaction used
-//! to plug in: the status-bar target toggle aims the directional cluster, which drives the camera (the
-//! Look target) or grid-steps the selection (the Move target), and a dedicated key cycles the camera
-//! between its two modes (top-down Layout and perspective Orbit). After the render residency reconciles
-//! the auto-frame (`interaction::autoframe`) keeps the camera framed on the selection. The mouse resolves
-//! a click to a selection and a drag to a drag-and-drop move. The inspector stays the precise editing
-//! surface.
+//! (designs/movement-camera-design.md, the 2026-06-29 revision: one free-fly god camera). It runs in the
+//! interaction seam (`crate::interaction`), between the action drain and the draw: the status-bar target
+//! toggle aims the directional cluster, which flies the camera (the Look target) or grid-steps the
+//! selection (the Move target); a held right-drag looks (the cursor locked for the drag). After the
+//! render residency reconciles, the Frame key (`f`) eases the camera onto the selection
+//! (`interaction::framing`) - explicit, never automatic. The mouse resolves a left click to a selection
+//! and a left drag to a drag-and-drop move. The inspector stays the precise editing surface.
 //!
 //! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish` (inside `render::draw`):
 //! each frame runs the egui pass (building the chrome), draws the 3D into the well rect (or clears the
@@ -56,7 +55,7 @@ mod workspace;
 
 use action::Action;
 use camera::Camera;
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use gui::Gui;
 use interaction::Interaction;
 use loaded::LoadedScene;
@@ -64,6 +63,7 @@ use model::Model;
 use render::Gpu;
 use render_scene::RenderScene;
 use std::path::Path;
+use wok_platform::winit::dpi::PhysicalPosition;
 use wok_platform::winit::event::WindowEvent;
 use wok_platform::{App, Desc, FrameCtx, Platform};
 
@@ -84,14 +84,17 @@ struct Editor {
     /// `loaded_scene` and reconciled to it each frame so edits show. Separate from the editable model;
     /// `None` when no scene is open or it failed to load.
     render_scene: Option<RenderScene>,
-    /// The camera the viewport renders through: the two-mode editor camera (Layout top-down ortho /
-    /// Orbit perspective) over a shared focus point (`crate::camera`). Positioned over the scene when one
-    /// loads (`RenderScene::spawn_camera`), then driven by the interaction seam's Look target and kept
-    /// framed on the selection (`crate::interaction`).
+    /// The camera the viewport renders through: one free-fly god camera (`crate::camera`). Positioned over
+    /// the scene when one loads (`RenderScene::spawn_camera`), then flown by the interaction seam's Look
+    /// target and the right-drag look, and eased onto the selection by the Frame verb (`crate::interaction`).
     camera: Camera,
     /// The keyboard-first interaction's cross-frame state (`crate::interaction`): the drag-and-drop grab.
     /// The keyboard verbs are stateless; only the mouse drag remembers its grab between frames.
     interaction: Interaction,
+    /// The cursor-lock anchor while a right-drag look is held: the press position the cursor is hidden and
+    /// pinned at, restored there on release so it never jumps (`interaction::update_cursor_grab`). `None`
+    /// when no look drag is active.
+    cursor_grab: Option<PhysicalPosition<f64>>,
     /// The window title last pushed to the OS, so `set_title` fires only when it changes.
     title: String,
 }
@@ -119,6 +122,7 @@ impl Editor {
             render_scene: None,
             camera: default_camera(),
             interaction: Interaction::new(),
+            cursor_grab: None,
             title: String::new(),
         }
     }
@@ -171,14 +175,11 @@ impl App for Editor {
         // editor-well rect the 3D viewport scopes to.
         let mut actions = Vec::new();
         let mut editor_rect = egui::Rect::NOTHING;
-        // The camera mode is frame-loop residency (not model state), so the status bar reads it as a
-        // value passed into the chrome, the same way the dirty flag comes from the loaded scene.
-        let camera_mode = self.camera.mode();
         let output = {
             let model = &self.model;
             let loaded_scene = self.loaded_scene.as_ref();
             gui.run(&ctx.platform.window, |egui_ctx| {
-                let (acts, rect) = view::chrome(egui_ctx, model, loaded_scene, camera_mode);
+                let (acts, rect) = view::chrome(egui_ctx, model, loaded_scene);
                 actions.extend(acts);
                 editor_rect = rect;
             })
@@ -218,26 +219,34 @@ impl App for Editor {
 
         // ---- interaction seam (designs/movement-camera-design.md) ----
         // The keyboard-first verbs read wok-platform InputState (not egui), here between the drain and
-        // the draw - the spot the old mouse interaction plugged into. Focus-gated by egui's
-        // keyboard-want, so a focused text field types instead of driving the editor. The Look target
-        // pans / zooms the Layout camera in place (camera state is frame-loop residency, not the model);
-        // the Move target grid-steps the selection and the target toggle both route through the single
-        // writer like every other action.
+        // the draw. Focus-gated by egui's keyboard-want, so a focused text field types instead of driving
+        // the editor. The Look target flies the camera in place (camera state is frame-loop residency, not
+        // the model); the Move target grid-steps the selection and the target toggle both route through the
+        // single writer like every other action.
         let typing = gui.ctx.wants_keyboard_input();
         for action in interaction::keyboard(&ctx.input, typing, &self.model, self.loaded_scene.as_ref(), &mut self.camera) {
             action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
         }
+
+        // The mouse looks the camera only over the well: the pointer is in the well rect and under no
+        // foreground egui layer (a menu, the floating inspector). The well is egui's background layer under
+        // a CentralPanel, so is_pointer_over_area is always true over it and cannot tell the viewport from
+        // a panel - gate on the rect plus the layer order (sharp-edges 2). `over_well` omits
+        // is_using_pointer so a right-press engages the cursor lock on its press frame (the well's own
+        // click-sense sets is_using_pointer then; gating on it would miss the engage).
+        let pointer = gui.ctx.pointer_latest_pos();
+        let over_well = pointer.is_some_and(|p| editor_rect.contains(p))
+            && pointer.and_then(|p| gui.ctx.layer_id_at(p)).is_none_or(|layer| layer.order == egui::Order::Background);
 
         // The editor well is a transparent egui panel, so the surface clear behind it (when no scene
         // draws) is the well's colour: the active theme's editor background. The surface is sRGB and
         // wgpu reads the clear value as linear; `render::draw` decodes it through Rgba.
         let editor_bg = theme::palette(&gui.ctx).editor_bg;
 
-        // The render residency and the 3D pass need the device. Reconcile the residency to the open
-        // scene (a fresh build positions the Layout camera over it; an in-memory edit just applied is
-        // re-derived here so it shows this frame), then draw the 3D into the well and paint the chrome
-        // over it. The interaction seam above has already panned or zoomed the camera this frame, so the
-        // draw reflects it.
+        // The render residency and the 3D pass need the device. Reconcile the residency to the open scene
+        // (a fresh build spawns the god-cam over it; an in-memory edit just applied is re-derived here so
+        // it shows this frame), then drive the camera from the mouse and ease any Frame transition, then
+        // draw the 3D into the well and paint the chrome over it.
         let Some(gpu) = self.gpu.as_mut() else { return };
         if render_scene::reconcile(&mut self.render_scene, gpu, ctx.platform, self.loaded_scene.as_ref()) {
             if let Some(scene) = self.render_scene.as_ref() {
@@ -245,13 +254,20 @@ impl App for Editor {
             }
         }
 
-        // Keep the camera framed on the selection (the selection rung of the framing ladder). It runs
-        // here, after the render residency reconciles, so the selection's world bounds reflect a keyboard
-        // move just applied this frame - the camera follows it the same frame. The recenter key is read
-        // here too, focus-gated like the keyboard verbs. During a mouse drag the camera holds still (a
-        // follow would run away against the drag's own cursor ray), re-centering once on the drop frame.
-        let dragging = self.interaction.is_grabbing();
-        interaction::autoframe(&ctx.input, typing, &self.model, self.render_scene.as_ref(), &mut self.camera, dragging);
+        // Hide and pin the cursor while a right-drag look pressed over the viewport is held, restoring it
+        // on release (`interaction::update_cursor_grab`). The look fires exactly while the cursor is
+        // locked, reading raw motion (which a synthetic warp never produces, so the per-frame re-warp pins
+        // the cursor without feeding the look). lock_active drives from the press frame and keeps driving
+        // even as a confined cursor drifts off the well.
+        let lock_active = interaction::update_cursor_grab(&mut self.cursor_grab, &ctx.platform.window, &ctx.input, over_well);
+        if lock_active {
+            self.camera.look(Vec2::new(ctx.input.mouse_motion.0 as f32, ctx.input.mouse_motion.1 as f32));
+        }
+
+        // The Frame verb (f) and the per-frame ease advance, after the residency reconciles so the
+        // selection's world bounds are current. Framing is explicit: a selection change moves nothing on
+        // its own (`interaction::framing`).
+        interaction::framing(&ctx.input, typing, &self.model, self.render_scene.as_ref(), &mut self.camera);
 
         render::draw(ctx.platform, gpu, self.render_scene.as_ref(), self.camera, editor_rect, editor_bg, gui, output);
 

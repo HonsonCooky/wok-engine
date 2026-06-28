@@ -1,337 +1,159 @@
-//! The mode-switching editor camera: the [`Mode`] the viewport is in, the `OrbitCamera` the Orbit mode
-//! adds, and the combined [`Camera`] the frame loop, the interaction layer, and the renderer hold.
+//! The editor's one free-fly god camera: the [`Camera`] the frame loop, the interaction layer, and the
+//! renderer hold, and its eased Frame transition.
 //!
-//! `super` (`crate::camera`) holds the view-math primitives - the orthographic [`LayoutCamera`], the
-//! perspective [`FlyCamera`] basis, and the [`frame`](crate::camera::frame) helper. This module is the
-//! layer above them: the everyday two-mode camera of the keyboard-first model
-//! (designs/movement-camera-design.md "Camera"). [`Camera`] carries both views, shares one focus point
-//! between them so a mode switch keeps you looking at the same place, dispatches the matrices / picking
-//! / nav by the current [`Mode`], and keeps the selection auto-framed (the selection rung of the framing
-//! ladder).
+//! `super` (`crate::camera`) holds the view-math primitives - the perspective [`FlyCamera`] basis, the
+//! parked orthographic [`LayoutCamera`], and the [`frame`](crate::camera::frame) helper. This module is
+//! the layer above them: the single free-roaming camera of the keyboard-first model
+//! (designs/movement-camera-design.md "Camera", the 2026-06-29 revision). [`Camera`] wraps one
+//! [`FlyCamera`] and is the whole editor camera - there are no modes to cycle. It flies the camera (the
+//! Look target's cluster forward/back along the ground facing and strafe left/right, a right-drag mouse
+//! look, and the vertical pair in world Y), dispatches the matrices and the cursor ray the renderer and
+//! picking read, and eases to a [`frame`](crate::camera::frame) pose when the Frame verb asks. Pure like
+//! the primitives: no egui, no input, no window.
 //!
-//! `OrbitCamera` is the Orbit mode's state - a focus, a distance, and a yaw/pitch about it - built into a
-//! [`FlyCamera`] at a derived position (`fly`) so the perspective matrices and the cursor ray come
-//! straight from the parked basis the brief un-parks here. Pure like the primitives: no egui, no input,
-//! no window. It does name two wok-scene data types (`InstanceId`, `Aabb`) for the auto-frame coupling -
-//! identity and bounds, not residency - which the frame loop feeds in.
+//! Framing is explicit, never automatic (the doc's fix for the auto-frame zoom-jump): a selection change
+//! moves nothing on its own. The Frame verb ([`frame_to`](Camera::frame_to)) centres the camera on a
+//! bounds, keeping the current view direction and easing the live pose to the fit over a few frames
+//! ([`advance`](Camera::advance)); any direct fly or look ([`fly`](Camera::fly) / [`look`](Camera::look))
+//! cancels an ease in flight, so a manual nav is immediate and never fights the glide.
 //!
-//! Walk (player eye height) is the reserved third mode (the doc): deferred, so it is not a [`Mode`]
-//! variant yet - it joins with its own [`view_proj`](Camera::view_proj) arm and a slot in `Mode::cycled`
-//! when built. The macro chunk-framing tier (framing chunks, snap-cycling canonical vantages) is the
-//! next bite; this module is the object/selection altitude only.
+//! Angle presets (canonical top-down / elevation / oblique vantages) and a Walk mode are R2 and a later
+//! tier; the parked [`LayoutCamera`] and [`frame`](crate::camera::frame) are the pieces those reuse.
 
 use glam::{Mat4, Vec2, Vec3};
-use wok_scene::{Aabb, InstanceId};
+use wok_scene::Aabb;
 
-use super::{FlyCamera, LayoutCamera, frame};
+use super::{FlyCamera, frame};
 
-// ---- orbit camera ----
+/// Distance the spawn camera sits back from the scene focus, in metres - far enough to read an
+/// object-placement working view, near enough to stay inside the scene fog. Camera feel is tunable.
+const SPAWN_DISTANCE: f32 = 40.0;
+/// Spawn pitch (radians): a gentle look-down over the scene, the same vantage the first cut spawned at
+/// (form and height read without being top-down). Yaw spawns at `0` (facing world `-Z`, a map read).
+const SPAWN_PITCH: f32 = -0.6;
 
-/// Default orbit distance from the focus, in metres - the spawn-over-a-scene framing: far enough to read
-/// an object-placement working view (a vertical span comparable to the Layout default zoom under the
-/// perspective fov), near enough to stay inside the scene fog. Camera feel is the brief's to settle.
-const DEFAULT_DISTANCE: f32 = 40.0;
-/// Default orbit yaw (radians): `0` faces world `-Z` (north), so Orbit looks from the south like a map
-/// read from below, the same heading the Layout view's screen-up points to.
-const DEFAULT_YAW: f32 = 0.0;
-/// Default orbit pitch (radians): a gentle look-down (the camera floats above the focus), inside the
-/// framing pitch band so the spawn view reads form and height without being top-down.
-const DEFAULT_PITCH: f32 = -0.6;
+/// Metres the free-fly cluster steps the camera per input. A tap nudges once; a hold repeats at the OS
+/// key-repeat rate (so crossing a ~128m chunk is a short hold). Tunable; camera feel is the parked tweak.
+const FLY_STEP_M: f32 = 2.0;
 
-/// Radians per cluster input the orbit yaw and pitch step by (3 degrees), small enough that a held
-/// cluster sweeps smoothly at the OS key-repeat rate. Tunable; camera feel is the parked tweak.
-const ORBIT_ANGLE_STEP: f32 = std::f32::consts::PI / 60.0;
-/// Pitch clamp, kept off the poles: at exactly `+/-pi/2` the look direction is parallel to world up and
-/// the view matrix degenerates, so the orbit cannot tip past this (the doc's "clamp pitch off the
-/// poles"). ~85.9 degrees either side of level.
-const ORBIT_PITCH_LIMIT: f32 = 1.5;
-/// Multiplicative dolly per vertical-pair input (like the Layout zoom), so each step changes the
-/// distance by a constant ratio rather than a constant span.
-const ORBIT_DOLLY_STEP: f32 = 1.05;
-/// Dolly clamp: in to a couple of metres, out to a few chunks - the same sane band the Layout zoom uses,
-/// since the macro chunk-framing tier (the next bite) owns wider surveys.
-const ORBIT_MIN_DISTANCE: f32 = 2.0;
-const ORBIT_MAX_DISTANCE: f32 = 512.0;
+/// Mouse-look sensitivity, radians per pixel of raw motion (the proven value from the first cut's
+/// mouse-only camera). The right-drag look reads raw `DeviceEvent::MouseMotion`, so the cursor lock does
+/// not change the feel.
+const LOOK_SENSITIVITY: f32 = 0.0035;
 
-/// A perspective camera orbiting a focus point: the Orbit inspect mode (designs/movement-camera-design.md).
-/// The state is the focus, the distance out from it, and the yaw/pitch the camera looks at it from; the
-/// view position is derived (`fly`), never stored, so the camera always looks straight at the focus. The
-/// matrices, the cursor ray, and the basis all come from the [`FlyCamera`] it builds.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct OrbitCamera {
-    /// The world point the camera orbits and looks at - the shared focus (see [`Camera`]).
-    pub focus: Vec3,
-    /// How far the eye sits from the focus, in metres - the dolly (the Look vertical pair drives it).
-    pub distance: f32,
-    /// Yaw about the focus, radians, [`FlyCamera`]'s convention (`0` faces `-Z`, positive turns toward
-    /// `+X`). The Look cluster's left/right drives it.
-    pub yaw: f32,
-    /// Pitch about the focus, radians, positive looking up, clamped off the poles
-    /// ([`ORBIT_PITCH_LIMIT`]). The Look cluster's forward/back drives it.
-    pub pitch: f32,
-}
+/// Pitch clamp for the look, just shy of straight up/down (about 88.8 degrees), so the view never flips
+/// through the pole where the look matrix degenerates.
+const PITCH_LIMIT: f32 = 1.55;
 
-impl OrbitCamera {
-    /// An orbit camera looking at `focus` from the default distance, yaw, and gentle downward pitch - the
-    /// spawn-over-a-scene vantage and the Orbit half of a freshly built [`Camera`].
-    pub fn over(focus: Vec3) -> OrbitCamera {
-        OrbitCamera { focus, distance: DEFAULT_DISTANCE, yaw: DEFAULT_YAW, pitch: DEFAULT_PITCH }
-    }
+/// Fraction of the remaining gap the Frame ease closes each frame - an exponential glide that eases in
+/// hard and settles soft. At ~0.25 it reads as a smooth few-frame transition at the editor's vsync rate.
+const FRAME_EASE: f32 = 0.25;
+/// How close (metres / radians) the live pose must sit to the Frame target before it snaps the rest and
+/// ends the ease, so the glide terminates cleanly rather than creeping forever.
+const FRAME_EASE_EPS: f32 = 0.01;
 
-    /// Build the equivalent [`FlyCamera`]: the same yaw/pitch, positioned back along the look direction by
-    /// `distance` so the eye looks straight at the focus (`position = focus - forward * distance`). The
-    /// perspective matrices and the cursor ray delegate through this, reusing the parked basis.
-    fn fly(&self) -> FlyCamera {
-        let oriented = FlyCamera { position: Vec3::ZERO, yaw: self.yaw, pitch: self.pitch };
-        FlyCamera { position: self.focus - oriented.forward() * self.distance, ..oriented }
-    }
-
-    /// The perspective view-projection (far supplied per frame, like [`LayoutCamera::view_proj`]).
-    pub fn view_proj(&self, aspect: f32, far: f32) -> Mat4 {
-        self.fly().view_proj(aspect, far)
-    }
-
-    /// The eye position the renderer reads (the derived orbit position).
-    pub fn eye(&self) -> Vec3 {
-        self.fly().position
-    }
-
-    /// The world-space ray for a cursor click, through the perspective unprojection ([`FlyCamera::cursor_ray`]).
-    pub fn cursor_ray(&self, pos_in_rect: Vec2, rect_size: Vec2, far: f32) -> (Vec3, Vec3) {
-        self.fly().cursor_ray(pos_in_rect, rect_size, far)
-    }
-
-    /// The camera's forward projected onto the ground plane, as `(x, z)`. Its sign and dominant axis (not
-    /// its length) are what the Orbit-relative move reads to pick the nearest grid axis, so it is left
-    /// unnormalized. Never zero in practice - the pitch clamp keeps the look off vertical.
-    pub fn ground_forward(&self) -> Vec2 {
-        let forward = self.fly().forward();
-        Vec2::new(forward.x, forward.z)
-    }
-
-    /// Orbit about the focus by `(dx, dz)` cluster cells: left/right swing the camera around the focus
-    /// (right/`+dx` swings the eye to the subject's right - `+X` at yaw 0), forward/back step the pitch
-    /// (forward tips the camera up and over toward top-down, the common orbit feel), pitch clamped off
-    /// the poles. The Look target's cluster drives this in Orbit.
-    ///
-    /// The yaw subtracts `dx`: the eye is `focus - forward * distance`, so a `+yaw` (forward toward `+X`)
-    /// pushes the eye toward `-X`. Subtracting flips that, so right input swings the eye right - the
-    /// natural orbit direction.
-    pub fn orbit(&mut self, dx: i32, dz: i32) {
-        self.yaw -= dx as f32 * ORBIT_ANGLE_STEP;
-        self.pitch = (self.pitch + dz as f32 * ORBIT_ANGLE_STEP).clamp(-ORBIT_PITCH_LIMIT, ORBIT_PITCH_LIMIT);
-    }
-
-    /// Dolly the eye in or out by `steps` (positive backs off, negative closes in), multiplicatively and
-    /// clamped to the sane band. The Look target's vertical pair drives this in Orbit.
-    pub fn dolly(&mut self, steps: i32) {
-        self.distance = (self.distance * ORBIT_DOLLY_STEP.powi(steps)).clamp(ORBIT_MIN_DISTANCE, ORBIT_MAX_DISTANCE);
-    }
-
-    /// Frame an axis-aligned bounds: look at its centre from a distance that fits its enclosing sphere in
-    /// the fov, keeping the current yaw (the user's sense of direction) and easing the pitch into the
-    /// gentle downward band. Reuses [`frame`](crate::camera::frame), reading the fit distance and clamped
-    /// pitch back off the [`FlyCamera`] it returns.
-    ///
-    /// Parked: the selection auto-frame only re-centers now (it preserves the zoom and angle), so nothing
-    /// calls this yet. Kept for the macro chunk-framing tier, which frames a chunk's bounds to fit.
-    #[allow(dead_code)]
-    pub fn fit_to(&mut self, min: Vec3, max: Vec3) {
-        let framed = frame(&self.fly(), min, max);
-        self.focus = (min + max) * 0.5;
-        self.distance = (self.focus - framed.position).length().clamp(ORBIT_MIN_DISTANCE, ORBIT_MAX_DISTANCE);
-        self.pitch = framed.pitch;
-        // yaw is kept (frame keeps it), so framing does not spin the view out from under the author.
-    }
-}
-
-// ---- mode ----
-
-/// Which camera the editor is in (designs/movement-camera-design.md "Camera"). Cycled by a dedicated
-/// camera-mode key, separate from the [`Target`](crate::model::Target) toggle that aims the cluster.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Mode {
-    /// Top-down orthographic - the precise placement view, where Move maps the screen cardinals to the
-    /// world axes exactly (the world reads as a map). Cycle to it for grid-true arranging.
-    Layout,
-    /// Perspective, orbiting the focus - the default home, for reading form, silhouette, and height.
-    #[default]
-    Orbit,
-    // Walk (perspective at player eye height) is the reserved third mode (the doc): deferred, so it is
-    // not a variant yet. It joins here with its own view_proj arm and a slot in `cycled` when built.
-}
-
-impl Mode {
-    /// The next mode the camera-mode key steps to. Layout and Orbit cycle between each other; Walk joins
-    /// the rotation when it is built.
-    fn cycled(self) -> Mode {
-        match self {
-            Mode::Layout => Mode::Orbit,
-            Mode::Orbit => Mode::Layout,
-        }
-    }
-
-    /// The mode's status-bar label.
-    pub fn label(self) -> &'static str {
-        match self {
-            Mode::Layout => "Layout",
-            Mode::Orbit => "Orbit",
-        }
-    }
-}
-
-// ---- the editor camera ----
-
-/// The editor's camera: the current [`Mode`] and both the [`LayoutCamera`] and [`OrbitCamera`] states,
-/// kept on one shared focus so cycling the mode keeps you looking at the same place. The frame loop holds
-/// one of these (frame-loop residency, not model state, like the rest of the camera); the interaction
-/// layer aims it (the Look target's cluster), the renderer reads its matrices, and it keeps the selection
-/// framed.
-///
-/// Auto-frame coupling: selecting an instance frames it and couples the follow, so a later move keeps it
-/// framed; a manual Look-nav decouples the follow (survey mode) and the recenter key re-frames and
-/// re-couples ([`track_selection`](Self::track_selection)). The doc's rule: manual nav is for surveying,
-/// not chasing the work, and recenter is explicit, never an automatic jump.
+/// The editor's camera: one free-fly [`FlyCamera`] the frame loop flies, plus an optional in-progress
+/// Frame ease. The frame loop holds one of these (frame-loop residency, not model state, like the rest
+/// of the camera); the interaction layer flies it (the Look target's cluster, the right-drag look, the
+/// vertical pair) and asks it to frame the selection, the renderer reads its matrices, and picking casts
+/// its cursor ray.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
-    mode: Mode,
-    layout: LayoutCamera,
-    orbit: OrbitCamera,
-    /// Whether the focus tracks the selection each frame (coupled), or the author has decoupled it with a
-    /// manual Look-nav to survey. Re-coupled by a new selection or the recenter key.
-    following: bool,
-    /// The selection the camera last framed, so a *new* selection (not a re-pick of the same one)
-    /// auto-frames and re-couples. `None` when nothing was framed.
-    framed: Option<InstanceId>,
+    /// The live perspective camera the renderer and picking read.
+    fly: FlyCamera,
+    /// An in-progress Frame ease: the pose [`advance`](Self::advance) glides the live camera toward, or
+    /// `None` at rest. A direct fly or look clears it (a manual nav cancels the glide).
+    transition: Option<FlyCamera>,
 }
 
 impl Camera {
-    /// A camera over `focus` in the Orbit home (both modes looking at it), not yet following a selection
-    /// - the spawn-over-a-scene and pre-scene default. [`RenderScene::spawn_camera`](crate::render_scene::RenderScene::spawn_camera)
-    /// builds this over a freshly loaded scene.
+    /// A free-fly camera looking at `focus` from the spawn vantage - back along a gentle downward look
+    /// at the default distance, the spawn-over-a-scene and pre-scene default.
+    /// [`RenderScene::spawn_camera`](crate::render_scene::RenderScene::spawn_camera) builds this over a
+    /// freshly loaded scene.
     pub fn over(focus: Vec3) -> Camera {
-        Camera {
-            mode: Mode::Orbit,
-            layout: LayoutCamera::over(focus),
-            orbit: OrbitCamera::over(focus),
-            following: false,
-            framed: None,
+        let oriented = FlyCamera { position: Vec3::ZERO, yaw: 0.0, pitch: SPAWN_PITCH };
+        let position = focus - oriented.forward() * SPAWN_DISTANCE;
+        Camera { fly: FlyCamera { position, ..oriented }, transition: None }
+    }
+
+    /// Fly the camera by `(dx, dz)` cluster cells and `dy` of the vertical pair, one [`FLY_STEP_M`] step
+    /// per unit (a held key repeats at the OS rate). The cluster is camera-relative on the ground plane:
+    /// forward/back (`dz`, `-1` is forward) steps along the camera's ground facing, strafe (`dx`, `+1` is
+    /// right) along its right - so D moves toward `+X` at yaw 0 (screen-right) and A toward `-X`. The
+    /// vertical pair (`dy`, `+1` raises) is world `+Y`, camera-independent. A direct fly cancels any Frame
+    /// ease (a manual nav is immediate).
+    pub fn fly(&mut self, dx: i32, dz: i32, dy: i32) {
+        let forward = self.fly.ground_forward();
+        let right = self.fly.right();
+        let step = (forward * -(dz as f32) + right * dx as f32 + Vec3::Y * dy as f32) * FLY_STEP_M;
+        self.fly.position += step;
+        self.transition = None;
+    }
+
+    /// Turn the camera by a frame of raw mouse motion (pixels): rightward motion yaws right (`+yaw`),
+    /// downward motion pitches down (the view follows the mouse), pitch clamped off the poles. The
+    /// interaction layer feeds this only while a right-drag look is held (the cursor is locked then). A
+    /// direct look cancels any Frame ease.
+    pub fn look(&mut self, motion: Vec2) {
+        self.fly.yaw += motion.x * LOOK_SENSITIVITY;
+        self.fly.pitch = (self.fly.pitch - motion.y * LOOK_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        self.transition = None;
+    }
+
+    /// Frame an axis-aligned bounds - the explicit Frame verb (`f`). Centres the camera on the bounds,
+    /// keeping the current view direction (yaw) and the [`frame`](crate::camera::frame) pose's gentle
+    /// downward pitch, placed back along it at a fit distance, and eases the live pose there over a few
+    /// frames ([`advance`](Self::advance)) rather than cutting. Selection never calls this on its own; it
+    /// is a deliberate verb, so jumping between selections never yanks the view or changes the zoom.
+    pub fn frame_to(&mut self, bounds: Aabb) {
+        self.transition = Some(frame(&self.fly, bounds.min, bounds.max));
+    }
+
+    /// Advance an in-progress Frame ease one frame: glide the live pose a fixed fraction
+    /// ([`FRAME_EASE`]) of the way to the target, snapping the rest and ending the ease once within
+    /// [`FRAME_EASE_EPS`]. A no-op at rest. Called once per frame by the interaction seam, before the
+    /// draw, so the eased view shows the same frame. Yaw needs no wrap handling: [`frame`] keeps the
+    /// current yaw, so the target yaw equals the live yaw and the term is a no-op.
+    pub fn advance(&mut self) {
+        let Some(target) = self.transition else { return };
+        let close = (target.position - self.fly.position).length() < FRAME_EASE_EPS
+            && (target.yaw - self.fly.yaw).abs() < FRAME_EASE_EPS
+            && (target.pitch - self.fly.pitch).abs() < FRAME_EASE_EPS;
+        if close {
+            self.fly = target;
+            self.transition = None;
+            return;
         }
+        self.fly = FlyCamera {
+            position: self.fly.position.lerp(target.position, FRAME_EASE),
+            yaw: self.fly.yaw + (target.yaw - self.fly.yaw) * FRAME_EASE,
+            pitch: self.fly.pitch + (target.pitch - self.fly.pitch) * FRAME_EASE,
+        };
     }
 
-    /// The current camera mode (the status bar shows it; the interaction layer reads it to map the move).
-    pub fn mode(&self) -> Mode {
-        self.mode
-    }
-
-    /// Cycle to the next camera mode, carrying the shared focus across so the switch keeps you looking at
-    /// the same place. Driven by the dedicated camera-mode key.
-    pub fn cycle_mode(&mut self) {
-        let focus = self.focus();
-        self.mode = self.mode.cycled();
-        self.set_focus(focus);
-    }
-
-    /// The active mode's focus point.
-    fn focus(&self) -> Vec3 {
-        match self.mode {
-            Mode::Layout => self.layout.focus,
-            Mode::Orbit => self.orbit.focus,
-        }
-    }
-
-    /// Put both modes' focus on `focus` - the shared-focus update behind cycling, framing, and the
-    /// per-frame follow, so a later mode switch stays on target.
-    fn set_focus(&mut self, focus: Vec3) {
-        self.layout.focus = focus;
-        self.orbit.focus = focus;
-    }
-
-    /// The Look target's cluster, by mode: in Layout it pans the focus across the plane, in Orbit it
-    /// orbits yaw and pitch about the focus. Manual nav, so it decouples the auto-follow (survey mode).
-    pub fn look_cluster(&mut self, dx: i32, dz: i32) {
-        match self.mode {
-            Mode::Layout => self.layout.pan(dx, dz),
-            Mode::Orbit => self.orbit.orbit(dx, dz),
-        }
-        self.following = false;
-    }
-
-    /// The Look target's vertical pair, by mode: in Layout it zooms the orthographic scale, in Orbit it
-    /// dollies the distance. Manual nav, so it decouples the auto-follow.
-    pub fn look_vertical(&mut self, steps: i32) {
-        match self.mode {
-            Mode::Layout => self.layout.zoom(steps),
-            Mode::Orbit => self.orbit.dolly(steps),
-        }
-        self.following = false;
-    }
-
-    /// The camera forward projected to the ground plane (Orbit's; meaningless in Layout, where the move
-    /// uses the exact screen cardinals instead). The Orbit-relative move reads this to pick the grid axis
-    /// nearest the way the camera faces.
+    /// The camera forward projected to the ground plane, as `(x, z)`. Its sign and dominant axis (not its
+    /// length) are what the camera-relative Move reads to pick the nearest grid axis, so it rides the
+    /// yaw-only ground forward (`FlyCamera::ground_forward`), a unit horizontal vector at any pitch.
     pub fn ground_forward(&self) -> Vec2 {
-        self.orbit.ground_forward()
+        let forward = self.fly.ground_forward();
+        Vec2::new(forward.x, forward.z)
     }
 
-    /// The view-projection for the active mode (far supplied per frame - the scene's render distance).
+    /// The perspective view-projection (far supplied per frame - the scene's render distance).
     pub fn view_proj(&self, aspect: f32, far: f32) -> Mat4 {
-        match self.mode {
-            Mode::Layout => self.layout.view_proj(aspect, far),
-            Mode::Orbit => self.orbit.view_proj(aspect, far),
-        }
+        self.fly.view_proj(aspect, far)
     }
 
-    /// The eye position the renderer reads (fog distances from it), by mode.
+    /// The eye position the renderer reads (fog distances from it).
     pub fn eye(&self) -> Vec3 {
-        match self.mode {
-            Mode::Layout => self.layout.eye(),
-            Mode::Orbit => self.orbit.eye(),
-        }
+        self.fly.position
     }
 
-    /// The world-space cursor ray for picking and drag-and-drop, by mode. Layout's straight-down ortho
-    /// ray ignores `far`; Orbit's perspective unprojection needs it (the same far the view projects with).
+    /// The world-space cursor ray for picking and drag-and-drop, through the perspective unprojection
+    /// ([`FlyCamera::cursor_ray`]). `far` is the same far the view projects with.
     pub fn cursor_ray(&self, pos_in_rect: Vec2, rect_size: Vec2, far: f32) -> (Vec3, Vec3) {
-        match self.mode {
-            Mode::Layout => self.layout.cursor_ray(pos_in_rect, rect_size),
-            Mode::Orbit => self.orbit.cursor_ray(pos_in_rect, rect_size, far),
-        }
-    }
-
-    /// Keep the camera centred on the selection (the selection rung of the framing ladder). Called each
-    /// frame after the render residency reconciles, so `bounds` is the selection's current world AABB
-    /// (`None` when nothing is selected or it has no resolvable bounds); `recenter` is the recenter key.
-    ///
-    /// Auto-CENTER, not fit: a new selection (different from the last centred) or a recenter (re)couples
-    /// the follow and moves the focus onto the selection, leaving the zoom and angle untouched (Layout's
-    /// half_height, Orbit's distance + yaw + pitch), so the camera-to-object distance is identical before
-    /// and after - jumping between instances slides the view over without zooming. While coupled the focus
-    /// tracks the selection's centre, so a keyboard move or a drag-and-drop keeps it centred. A decoupled
-    /// follow (a manual Look-nav surveyed away) stays put until the next new selection or recenter - never
-    /// an automatic jump. Fit-framing belongs to the macro chunk-framing tier (`fit_to`, parked).
-    pub fn track_selection(&mut self, selection: Option<InstanceId>, bounds: Option<Aabb>, recenter: bool) {
-        let changed = selection != self.framed;
-        self.framed = selection;
-        let Some(bounds) = bounds else { return };
-        // A new selection or an explicit recenter (re)couples the follow.
-        if changed || recenter {
-            self.following = true;
-        }
-        // Coupled: slide the shared focus onto the selection, preserving zoom and angle.
-        if self.following {
-            self.set_focus((bounds.min + bounds.max) * 0.5);
-        }
-    }
-
-    /// Track the selection id during a manual mouse drag without moving the camera. A drag positions the
-    /// selection against the current view (its cursor ray reads the focus), so following it would feed the
-    /// moved focus back into that mapping and run away - the view must hold still through the drag. Syncing
-    /// the framed id keeps the drop from reading as a new selection; the follow coupling is left as-is, so
-    /// the drop frame (no longer dragging) re-centers a coupled selection once - it stays framed - while a
-    /// decoupled one is left where the survey put it.
-    pub fn hold_selection(&mut self, selection: Option<InstanceId>) {
-        self.framed = selection;
+        self.fly.cursor_ray(pos_in_rect, rect_size, far)
     }
 }
 
@@ -346,203 +168,170 @@ mod tests {
         Aabb::new(center - Vec3::splat(half), center + Vec3::splat(half))
     }
 
-    // ---- orbit camera ----
+    // ---- spawn ----
 
     #[test]
-    fn the_orbit_position_sits_at_distance_and_looks_at_the_focus() {
-        // The orbit position is built from focus + distance + yaw + pitch: it sits `distance` out from the
-        // focus and its forward points straight back at it - the property the perspective view relies on.
-        let cam = OrbitCamera { focus: Vec3::new(4.0, 1.0, -2.0), distance: 12.0, yaw: 0.7, pitch: -0.4 };
-        let fly = cam.fly();
-        assert!(((cam.focus - fly.position).length() - 12.0).abs() < EPS, "the eye is `distance` from the focus");
-        let to_focus = (cam.focus - fly.position).normalize();
-        assert!((to_focus - fly.forward()).length() < EPS, "forward points at the focus: {:?}", fly.forward());
-        assert_eq!(cam.eye(), fly.position, "eye is the derived orbit position");
+    fn spawn_sits_back_from_the_focus_and_looks_at_it() {
+        // over(focus) places the eye SPAWN_DISTANCE out along a gentle downward look and aims straight at
+        // the focus - the spawn-over-a-scene vantage the renderer draws from.
+        let focus = Vec3::new(64.0, 2.0, 64.0);
+        let cam = Camera::over(focus);
+        assert!(((focus - cam.eye()).length() - SPAWN_DISTANCE).abs() < EPS, "eye sits SPAWN_DISTANCE out");
+        let to_focus = (focus - cam.eye()).normalize();
+        assert!((to_focus - cam.fly.forward()).length() < EPS, "forward points at the focus");
+        assert!(cam.eye().y > focus.y, "the spawn eye floats above the focus (a downward look)");
     }
 
-    #[test]
-    fn orbit_steps_yaw_and_pitch_and_clamps_pitch_off_the_poles() {
-        let mut cam = OrbitCamera::over(Vec3::ZERO);
-        let yaw0 = cam.yaw;
-        cam.orbit(1, 0); // right swings the camera right: yaw subtracts a step (see orbit's doc)
-        assert!((cam.yaw - (yaw0 - ORBIT_ANGLE_STEP)).abs() < EPS, "right swings the camera by one angle step");
-        let pitch0 = cam.pitch;
-        cam.orbit(0, -1); // forward tips toward top-down (pitch decreases)
-        assert!(cam.pitch < pitch0, "forward tips the pitch down (camera up and over)");
-        // Drive the pitch hard into both poles: it clamps off them and never reaches +/-pi/2.
-        for _ in 0..1000 {
-            cam.orbit(0, 1);
-        }
-        assert!((cam.pitch - ORBIT_PITCH_LIMIT).abs() < EPS, "pitch clamps off the up pole: {}", cam.pitch);
-        for _ in 0..1000 {
-            cam.orbit(0, -1);
-        }
-        assert!((cam.pitch + ORBIT_PITCH_LIMIT).abs() < EPS, "pitch clamps off the down pole: {}", cam.pitch);
-        assert!(cam.pitch.abs() < std::f32::consts::FRAC_PI_2, "never reaches the pole");
-    }
+    // ---- free-fly translate ----
 
     #[test]
-    fn dolly_scales_the_distance_clamped_and_reverses() {
-        let mut cam = OrbitCamera::over(Vec3::ZERO);
-        let before = cam.distance;
-        cam.dolly(1);
-        assert!(cam.distance > before, "a positive step backs off");
-        cam.dolly(-1);
-        assert!((cam.distance - before).abs() < 1e-2, "the inverse step returns to the start");
-        for _ in 0..1000 {
-            cam.dolly(-1);
-        }
-        assert!(cam.distance >= ORBIT_MIN_DISTANCE - EPS, "dolly in clamps to the band");
-        for _ in 0..1000 {
-            cam.dolly(1);
-        }
-        assert!(cam.distance <= ORBIT_MAX_DISTANCE + EPS, "dolly out clamps to the band");
-    }
-
-    #[test]
-    fn orbit_right_swings_the_eye_right_and_left_swings_it_left() {
-        // The A/D direction: from the default vantage (eye on the +Z side at yaw 0), pressing right (+dx,
-        // D) must swing the eye to the subject's right (+X), and left (-dx, A) to the left (-X). This is
-        // the inversion the fix corrects - before it, right swung the eye the wrong way.
-        let base = OrbitCamera::over(Vec3::ZERO);
-        let mut right = base;
-        right.orbit(1, 0);
-        assert!(right.eye().x > base.eye().x, "right (D) swings the eye to +X: {} -> {}", base.eye().x, right.eye().x);
-        let mut left = base;
-        left.orbit(-1, 0);
-        assert!(left.eye().x < base.eye().x, "left (A) swings the eye to -X: {} -> {}", base.eye().x, left.eye().x);
-    }
-
-    // ---- per-mode fit (parked for the macro chunk-framing tier) ----
-
-    #[test]
-    fn orbit_fit_looks_at_the_centre_from_a_fit_distance() {
-        // Orbit framing sets focus + a fit distance: the eye sits far enough out for the bounds' sphere to
-        // fit the fov, looking at the centre, keeping the yaw and easing the pitch into the downward band.
-        let mut cam = OrbitCamera { focus: Vec3::ZERO, distance: 5.0, yaw: 1.2, pitch: 0.8 };
-        let b = bounds(Vec3::new(10.0, 2.0, -4.0), 3.0);
-        cam.fit_to(b.min, b.max);
-        assert!((cam.focus - Vec3::new(10.0, 2.0, -4.0)).length() < EPS, "focus on the bounds centre");
-        assert_eq!(cam.yaw, 1.2, "framing keeps the yaw");
-        assert!(cam.pitch < 0.0, "pitch eased into the gentle downward band: {}", cam.pitch);
-        let fly = cam.fly();
-        assert!((cam.focus - fly.position).length() > 3.0, "backs off past the bounds radius");
-        assert!(((cam.focus - fly.position).normalize() - fly.forward()).length() < EPS, "still looks at the centre");
-    }
-
-    #[test]
-    fn layout_fit_centres_and_sizes_the_zoom_to_the_bounds() {
-        // Layout framing sets focus.xz + a fit half_height: the focus centres on the bounds and the zoom
-        // grows with the larger horizontal extent, floored so a tiny placement still reads.
-        let mut cam = LayoutCamera::over(Vec3::ZERO);
-        let wide = bounds(Vec3::new(6.0, 0.0, 6.0), 20.0); // a 40m box
-        cam.fit_to(wide.min, wide.max);
-        assert!((cam.focus.x - 6.0).abs() < EPS && (cam.focus.z - 6.0).abs() < EPS, "focus centres on the bounds");
-        assert!(cam.half_height > 20.0, "the zoom grows to fit the 40m box: {}", cam.half_height);
-        // A tiny placement floors to a readable view rather than diving onto it.
-        let tiny = bounds(Vec3::ZERO, 0.25);
-        cam.fit_to(tiny.min, tiny.max);
-        assert!(cam.half_height >= 4.0, "a tiny bounds floors to a readable zoom: {}", cam.half_height);
-    }
-
-    // ---- mode and shared focus ----
-
-    #[test]
-    fn cycling_the_mode_keeps_the_shared_focus() {
-        let mut cam = Camera::over(Vec3::new(7.0, 0.0, -5.0));
-        assert_eq!(cam.mode(), Mode::Orbit, "the default home is Orbit");
-        // Cycle to Layout and pan its focus, then cycle back: Orbit must look at the same place the
-        // Layout view ended on - the shared focus carries across the switch.
-        cam.cycle_mode();
-        assert_eq!(cam.mode(), Mode::Layout);
-        cam.look_cluster(1, 0);
-        let layout_focus = cam.layout.focus;
-        cam.cycle_mode();
-        assert_eq!(cam.mode(), Mode::Orbit, "cycles back to Orbit");
-        assert_eq!(cam.orbit.focus, layout_focus, "the switch carries the shared focus across");
-    }
-
-    // ---- auto-frame coupling ----
-
-    #[test]
-    fn selecting_centers_and_couples_without_changing_zoom_or_angle() {
-        // Auto-CENTER, not fit: a new selection moves the focus onto the instance and couples the follow,
-        // but leaves the Orbit distance + yaw + pitch (the zoom and angle) untouched, so the
-        // camera-to-object distance is identical before and after - jumping between instances slides the
-        // view over, it never zooms.
-        let mut cam = Camera::over(Vec3::ZERO); // the Orbit home
-        let (d0, yaw0, pitch0) = (cam.orbit.distance, cam.orbit.yaw, cam.orbit.pitch);
-
-        let first = bounds(Vec3::new(40.0, 2.0, -15.0), 1.0);
-        cam.track_selection(Some(InstanceId(1)), Some(first), false);
-        assert!(cam.following, "a new selection couples the follow");
-        assert!((cam.focus() - Vec3::new(40.0, 2.0, -15.0)).length() < EPS, "focus moves onto the selection");
-        assert_eq!((cam.orbit.distance, cam.orbit.yaw, cam.orbit.pitch), (d0, yaw0, pitch0), "zoom and angle unchanged");
-        assert!(((cam.eye() - cam.focus()).length() - d0).abs() < EPS, "the camera-to-object distance holds");
-
-        // The same selection at a new position (a keyboard move): the follow keeps centring, no zoom change.
-        let moved = bounds(Vec3::new(43.0, 2.0, -15.0), 1.0);
-        cam.track_selection(Some(InstanceId(1)), Some(moved), false);
-        assert!((cam.focus() - Vec3::new(43.0, 2.0, -15.0)).length() < EPS, "the follow keeps it centred as it moves");
-        assert_eq!(cam.orbit.distance, d0, "the follow still does not zoom");
-    }
-
-    #[test]
-    fn selecting_centers_in_layout_without_changing_the_zoom() {
-        // The Layout half of auto-center: a new selection centres the focus but leaves half_height, so a
-        // small instance does not zoom the view in (a fit would).
+    fn strafe_is_a_d_correct_and_forward_back_track_the_ground_facing() {
+        // At yaw 0 the camera faces world -Z (north): D (dx +1) strafes to +X (east, screen-right), A
+        // (dx -1) to -X (west); W (dz -1) steps north (-Z), S (dz +1) south. This is the A/D sign the
+        // free-fly strafe must get right.
         let mut cam = Camera::over(Vec3::ZERO);
-        cam.cycle_mode(); // -> Layout
-        let hh0 = cam.layout.half_height;
-        let b = bounds(Vec3::new(25.0, 0.0, 30.0), 5.0); // a 10m box; a fit would zoom in, center must not
-        cam.track_selection(Some(InstanceId(1)), Some(b), false);
-        assert!((cam.focus().x - 25.0).abs() < EPS && (cam.focus().z - 30.0).abs() < EPS, "focus centres on the selection");
-        assert_eq!(cam.layout.half_height, hh0, "the Layout zoom (half_height) is unchanged - center, not fit");
+        cam.fly.pitch = 0.0; // level, so the ground facing is exactly -Z
+        let base = cam.eye();
+        cam.fly(1, 0, 0); // D
+        assert!(cam.eye().x > base.x, "D strafes to +X (east): {} -> {}", base.x, cam.eye().x);
+        let mut left = Camera::over(Vec3::ZERO);
+        left.fly(-1, 0, 0); // A
+        assert!(left.eye().x < 0.0, "A strafes to -X (west): {}", left.eye().x);
+        let mut fwd = Camera::over(Vec3::ZERO);
+        let z0 = fwd.eye().z;
+        fwd.fly(0, -1, 0); // W
+        assert!(fwd.eye().z < z0, "W steps north (-Z): {} -> {}", z0, fwd.eye().z);
+        let mut back = Camera::over(Vec3::ZERO);
+        let z1 = back.eye().z;
+        back.fly(0, 1, 0); // S
+        assert!(back.eye().z > z1, "S steps south (+Z): {} -> {}", z1, back.eye().z);
     }
 
     #[test]
-    fn a_manual_nav_decouples_and_recenter_re_couples() {
+    fn the_vertical_pair_raises_and_lowers_in_world_y() {
+        // Q/E move the camera in world +Y, independent of the look direction.
         let mut cam = Camera::over(Vec3::ZERO);
-        let at = bounds(Vec3::new(10.0, 0.0, 10.0), 1.0);
-        cam.track_selection(Some(InstanceId(1)), Some(at), false);
-        // Survey away with a Look-nav: the follow decouples.
-        cam.look_cluster(1, 0);
-        assert!(!cam.following, "a manual Look-nav decouples the follow (survey)");
-        // The selection now moves, but a decoupled camera does not chase it.
-        let moved = bounds(Vec3::new(20.0, 0.0, 10.0), 1.0);
-        let surveyed = cam.focus();
-        cam.track_selection(Some(InstanceId(1)), Some(moved), false);
-        assert_eq!(cam.focus(), surveyed, "surveying does not chase the work");
-        // Recenter re-centers on the current selection and re-couples.
-        cam.track_selection(Some(InstanceId(1)), Some(moved), true);
-        assert!(cam.following && (cam.focus() - Vec3::new(20.0, 0.0, 10.0)).length() < EPS, "recenter snaps back and re-couples");
+        let y0 = cam.eye().y;
+        cam.fly(0, 0, 1); // raise (E)
+        assert!((cam.eye().y - (y0 + FLY_STEP_M)).abs() < EPS, "raise steps world +Y one cell");
+        cam.fly(0, 0, -1); // lower (Q)
+        assert!((cam.eye().y - y0).abs() < EPS, "lower returns it");
     }
 
     #[test]
-    fn a_new_selection_recenters_even_while_decoupled() {
-        // Cycling to a different instance re-centers and re-couples, even after surveying away - the doc's
-        // "moving or cycling the selection re-frames it".
+    fn strafe_follows_the_yaw_after_a_look() {
+        // After yawing 90 degrees to the right (now facing +X / east), W steps east and D strafes south
+        // (+Z) - the cluster stays camera-relative.
         let mut cam = Camera::over(Vec3::ZERO);
-        cam.track_selection(Some(InstanceId(1)), Some(bounds(Vec3::new(5.0, 0.0, 0.0), 1.0)), false);
-        cam.look_cluster(0, 1); // decouple
-        cam.track_selection(Some(InstanceId(2)), Some(bounds(Vec3::new(-8.0, 0.0, 3.0), 1.0)), false);
-        assert!(cam.following, "a different selection re-couples");
-        assert!((cam.focus() - Vec3::new(-8.0, 0.0, 3.0)).length() < EPS, "and centres on the new instance");
+        cam.fly.pitch = 0.0;
+        cam.look(Vec2::new(std::f32::consts::FRAC_PI_2 / LOOK_SENSITIVITY, 0.0)); // yaw -> +pi/2
+        let base = cam.eye();
+        cam.fly(0, -1, 0); // W, now facing east
+        assert!(cam.eye().x > base.x, "W steps east after the turn: {} -> {}", base.x, cam.eye().x);
+        let mut strafe = Camera::over(Vec3::ZERO);
+        strafe.fly.pitch = 0.0;
+        strafe.look(Vec2::new(std::f32::consts::FRAC_PI_2 / LOOK_SENSITIVITY, 0.0));
+        let z0 = strafe.eye().z;
+        strafe.fly(1, 0, 0); // D, facing east -> strafes south
+        assert!(strafe.eye().z > z0, "D strafes south facing east: {} -> {}", z0, strafe.eye().z);
+    }
+
+    // ---- look ----
+
+    #[test]
+    fn look_yaws_right_on_rightward_motion_and_pitches_down_on_downward_motion() {
+        let mut cam = Camera::over(Vec3::ZERO);
+        let (yaw0, pitch0) = (cam.fly.yaw, cam.fly.pitch);
+        cam.look(Vec2::new(10.0, 0.0));
+        assert!(cam.fly.yaw > yaw0, "rightward motion yaws right (+yaw)");
+        cam.look(Vec2::new(0.0, 10.0));
+        assert!(cam.fly.pitch < pitch0, "downward motion pitches down (the view follows the mouse)");
     }
 
     #[test]
-    fn a_drag_holds_the_camera_still_then_the_drop_re_centers_a_coupled_selection() {
-        // A mouse drag positions the selection against the current view, so the camera must hold still
-        // through it (a follow would feed the moved focus back into the cursor ray and run away).
-        // hold_selection tracks the id without moving; the coupled follow survives, so the drop frame's
-        // track_selection re-centers once and the selection stays centred.
+    fn look_clamps_pitch_off_the_poles() {
         let mut cam = Camera::over(Vec3::ZERO);
-        cam.track_selection(Some(InstanceId(1)), Some(bounds(Vec3::new(5.0, 0.0, 0.0), 1.0)), false);
-        let held = cam.focus();
-        cam.hold_selection(Some(InstanceId(1)));
-        assert_eq!(cam.focus(), held, "the camera holds still through the drag");
-        let dropped = bounds(Vec3::new(30.0, 0.0, 0.0), 1.0);
-        cam.track_selection(Some(InstanceId(1)), Some(dropped), false);
-        assert!((cam.focus() - Vec3::new(30.0, 0.0, 0.0)).length() < EPS, "the drop re-centers - it stays centred");
+        cam.look(Vec2::new(0.0, -100_000.0)); // hard up
+        assert!((cam.fly.pitch - PITCH_LIMIT).abs() < EPS, "pitch clamps off the up pole: {}", cam.fly.pitch);
+        cam.look(Vec2::new(0.0, 100_000.0)); // hard down
+        assert!((cam.fly.pitch + PITCH_LIMIT).abs() < EPS, "pitch clamps off the down pole: {}", cam.fly.pitch);
+    }
+
+    // ---- ground forward (the Move grid axis reads this) ----
+
+    #[test]
+    fn ground_forward_is_minus_z_at_yaw_zero_regardless_of_pitch() {
+        // The Move nearest-grid-axis reads this; it must be the yaw-only facing, unaffected by a steep
+        // pitch (looking near-straight-down still steps north at yaw 0).
+        let mut cam = Camera::over(Vec3::ZERO);
+        cam.fly.pitch = -1.4; // steep downward look
+        let gf = cam.ground_forward();
+        assert!((gf - Vec2::new(0.0, -1.0)).length() < EPS, "ground forward is -Z at yaw 0: {gf:?}");
+    }
+
+    // ---- frame verb (the eased transition) ----
+
+    #[test]
+    fn frame_to_then_easing_ends_looking_at_the_centre_from_the_current_direction_at_a_fit_distance() {
+        // The Frame pose: set a target framing the bounds (keeping yaw, easing pitch into the gentle
+        // downward band), then advance until it settles. It ends looking straight at the bounds centre,
+        // from the kept yaw, backed off past the bounds radius - and the ease has terminated.
+        let mut cam = Camera::over(Vec3::new(5.0, 0.0, 5.0));
+        let yaw0 = cam.fly.yaw;
+        let b = bounds(Vec3::new(40.0, 2.0, -15.0), 3.0);
+        cam.frame_to(b);
+        let target = cam.transition.expect("frame_to arms a transition");
+        // Advance to convergence (the ease is exponential, so a generous cap settles it).
+        for _ in 0..200 {
+            cam.advance();
+        }
+        assert!(cam.transition.is_none(), "the ease terminates");
+        assert_eq!(cam.fly, target, "and lands exactly on the framed pose");
+        let center = (b.min + b.max) * 0.5;
+        let to_center = (center - cam.eye()).normalize();
+        assert!((to_center - cam.fly.forward()).length() < EPS, "ends looking at the bounds centre");
+        assert_eq!(cam.fly.yaw, yaw0, "keeps the current view direction (yaw)");
+        assert!((center - cam.eye()).length() > 3.0, "backs off past the bounds radius");
+    }
+
+    #[test]
+    fn easing_moves_toward_the_target_without_overshooting() {
+        // One advance closes part of the gap (it does not jump straight there, so the view glides), and
+        // it never overshoots: the distance to the target only shrinks.
+        let mut cam = Camera::over(Vec3::new(5.0, 0.0, 5.0));
+        let b = bounds(Vec3::new(40.0, 2.0, -15.0), 3.0);
+        cam.frame_to(b);
+        let target = cam.transition.unwrap();
+        let gap0 = (target.position - cam.eye()).length();
+        cam.advance();
+        let gap1 = (target.position - cam.eye()).length();
+        assert!(gap1 < gap0, "the ease closes the gap: {gap0} -> {gap1}");
+        assert!(gap1 > 0.0, "but does not snap there in one frame (it glides)");
+    }
+
+    #[test]
+    fn a_direct_fly_or_look_cancels_an_in_progress_frame_ease() {
+        // Framing is explicit and a manual nav wins: flying or looking mid-glide drops the transition, so
+        // the camera does not fight the user.
+        let mut cam = Camera::over(Vec3::ZERO);
+        cam.frame_to(bounds(Vec3::new(20.0, 0.0, 0.0), 2.0));
+        assert!(cam.transition.is_some());
+        cam.fly(1, 0, 0);
+        assert!(cam.transition.is_none(), "a fly cancels the ease");
+        cam.frame_to(bounds(Vec3::new(20.0, 0.0, 0.0), 2.0));
+        cam.look(Vec2::new(5.0, 0.0));
+        assert!(cam.transition.is_none(), "a look cancels the ease");
+    }
+
+    #[test]
+    fn selecting_alone_never_moves_the_camera() {
+        // The doc's rule: there is no auto-frame. The camera only moves through fly / look / the Frame
+        // verb, so nothing here can move it without an explicit call - asserted by the absence of any
+        // selection hook on Camera (a compile-time guarantee) and that a fresh camera at rest does not
+        // drift when advance runs with no transition.
+        let mut cam = Camera::over(Vec3::new(3.0, 1.0, 2.0));
+        let at_rest = cam.eye();
+        cam.advance(); // no transition armed
+        assert_eq!(cam.eye(), at_rest, "advance is inert at rest - selection cannot move the camera");
     }
 }

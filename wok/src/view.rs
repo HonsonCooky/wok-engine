@@ -28,7 +28,6 @@
 //! single writer, the same as every other action.
 
 use crate::action::Action;
-use crate::camera::Mode;
 use crate::inspector;
 use crate::loaded::LoadedScene;
 use crate::menu;
@@ -46,8 +45,6 @@ use crate::workspace;
 /// `loaded_scene` is the active scene tab's loaded data (reconciled by the frame loop, `crate::loaded`),
 /// which the Instances nav view lists; it is `None` when no scene tab is active. The model alone cannot
 /// carry it - it is filesystem residency, not pure model state - so it is threaded in separately.
-/// `camera_mode` is likewise frame-loop residency (the camera is not model state), threaded in for the
-/// status bar to show the live camera mode.
 ///
 /// The viewport interaction - the camera and the transform grammar - lives in the frame loop
 /// (`crate::main` / `crate::interaction`), not the chrome: the keyboard verbs read wok-platform input
@@ -58,7 +55,6 @@ pub fn chrome(
     ctx: &egui::Context,
     model: &Model,
     loaded_scene: Option<&LoadedScene>,
-    camera_mode: Mode,
 ) -> (Vec<Action>, egui::Rect) {
     let mut actions = Vec::new();
     // Region order is load-bearing (sharp-edges 2): the nav panel is added first on whichever side it
@@ -70,7 +66,7 @@ pub fn chrome(
     // The status bar shows the save dot when the open scene has unsaved edits (residency state, not
     // model state, so it is read from the loaded scene here and passed in).
     let dirty = loaded_scene.is_some_and(|scene| scene.dirty());
-    menu::status_bar(ctx, model.project.as_ref(), camera_mode, model.shell.target(), dirty, &mut actions);
+    menu::status_bar(ctx, model.project.as_ref(), model.shell.target(), dirty, &mut actions);
     workspace::tab_bar(ctx, model, &mut actions);
     // The editor area is the central region left after the three bounding panels; capture it now, before
     // the central panel consumes it, so the floating inspector can anchor to and clip to it. The

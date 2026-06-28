@@ -13,7 +13,6 @@
 //! OS light/dark.
 
 use crate::action::Action;
-use crate::camera::Mode;
 use crate::model::{Model, NavSide, Shell, Target};
 use crate::project::{self, Project};
 use crate::recent::Recents;
@@ -149,15 +148,14 @@ fn disabled_item(ui: &mut egui::Ui, label: &str) {
 /// The bottom status bar, within the view column only (the composition root shows the navigation
 /// panel first, so this bottom panel spans only the width right of it, never under the nav). The left
 /// shows the open project's name - the in-window confirmation that Open took effect, which the title
-/// bar carries too - or that none is open - then the camera `mode` (Layout / Orbit) and the cluster
-/// `target` (Move / Look), the keyboard-first interaction's current camera and aim
-/// (designs/movement-camera-design.md), in primary text so they read as the live modes. The right holds
-/// the snap setting and, when the open scene has unsaved edits (`dirty`), the save dot - the Save click
-/// target. The richer readouts (counts, framerate, integrity) join as their features land.
+/// bar carries too - or that none is open - then the cluster `target` (Move / Look), the keyboard-first
+/// interaction's current cluster aim (designs/movement-camera-design.md), in primary text so it reads as
+/// the live mode. The right holds the snap setting and, when the open scene has unsaved edits (`dirty`),
+/// the save dot - the Save click target. The richer readouts (counts, framerate, integrity) join as
+/// their features land.
 pub fn status_bar(
     ctx: &egui::Context,
     project: Option<&Project>,
-    mode: Mode,
     target: Target,
     dirty: bool,
     actions: &mut Vec<Action>,
@@ -170,10 +168,8 @@ pub fn status_bar(
                 Some(project) => ui.label(egui::RichText::new(project.name()).color(dim)),
                 None => ui.label(egui::RichText::new("No project open").color(dim)),
             };
-            // The camera mode then the cluster target, the keyboard-first interaction's current camera
-            // and aim. Primary text (not dim) so they read as the live modes, each set off by a separator.
-            ui.separator();
-            ui.label(egui::RichText::new(mode.label()).color(p.text));
+            // The cluster target, the keyboard-first interaction's current aim. Primary text (not dim) so
+            // it reads as the live mode, set off by a separator.
             ui.separator();
             ui.label(egui::RichText::new(target.label()).color(p.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

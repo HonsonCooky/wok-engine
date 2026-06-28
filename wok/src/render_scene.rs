@@ -147,10 +147,9 @@ impl RenderScene {
         self.source_chunks = chunks.to_vec();
     }
 
-    /// Spawn the editor camera over the first loaded chunk: in the Orbit home, looking at its centre,
-    /// focused on the terrain height there (or the origin plane when the chunk has no terrain). Both
-    /// modes share that focus, so cycling to Layout looks straight down at the same place. Called right
-    /// after a fresh [`build`](Self::build), where the store still carries the chunks' heightmaps.
+    /// Spawn the free-fly editor camera over the first loaded chunk, looking at its centre at the terrain
+    /// height there (or the origin plane when the chunk has no terrain) from the spawn vantage. Called
+    /// right after a fresh [`build`](Self::build), where the store still carries the chunks' heightmaps.
     pub fn spawn_camera(&self) -> Camera {
         let half = CHUNK_SIZE_M * 0.5;
         let (origin, ground) = self.store.iter_loaded().next().map_or((Vec3::ZERO, 0.0), |(coord, runtime)| {
@@ -601,10 +600,9 @@ mod tests {
         // from fog - the decoupling.
         assert!(scene.far_plane() >= 50.0);
         assert_eq!(scene.far_plane(), 3.0 * CHUNK_SIZE_M);
-        // The camera spawns in the Orbit home over the scene centre, well-formed (the precise focus and
-        // distance are camera.rs's tests; here only that spawn produces a usable camera).
+        // The free-fly camera spawns over the scene centre, well-formed (the precise focus and distance
+        // are camera.rs's tests; here only that spawn produces a usable camera).
         let cam = scene.spawn_camera();
-        assert_eq!(cam.mode(), crate::camera::Mode::Orbit, "spawns in the Orbit home");
         assert!(cam.eye().is_finite(), "the spawn camera is well-formed");
 
         let _ = std::fs::remove_dir_all(&root);
