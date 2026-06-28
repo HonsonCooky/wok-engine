@@ -142,10 +142,11 @@ impl OrbitCamera {
 /// camera-mode key, separate from the [`Target`](crate::model::Target) toggle that aims the cluster.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Mode {
-    /// Top-down orthographic - the default home for placing and arranging (the world reads as a map).
-    #[default]
+    /// Top-down orthographic - the precise placement view, where Move maps the screen cardinals to the
+    /// world axes exactly (the world reads as a map). Cycle to it for grid-true arranging.
     Layout,
-    /// Perspective, orbiting the focus - the inspect mode for form, silhouette, and height.
+    /// Perspective, orbiting the focus - the default home, for reading form, silhouette, and height.
+    #[default]
     Orbit,
     // Walk (perspective at player eye height) is the reserved third mode (the doc): deferred, so it is
     // not a variant yet. It joins here with its own view_proj arm and a slot in `cycled` when built.
@@ -196,12 +197,12 @@ pub struct Camera {
 }
 
 impl Camera {
-    /// A camera over `focus` in the Layout home (both modes looking at it), not yet following a selection
+    /// A camera over `focus` in the Orbit home (both modes looking at it), not yet following a selection
     /// - the spawn-over-a-scene and pre-scene default. [`RenderScene::spawn_camera`](crate::render_scene::RenderScene::spawn_camera)
     /// builds this over a freshly loaded scene.
     pub fn over(focus: Vec3) -> Camera {
         Camera {
-            mode: Mode::Layout,
+            mode: Mode::Orbit,
             layout: LayoutCamera::over(focus),
             orbit: OrbitCamera::over(focus),
             following: false,
@@ -433,15 +434,16 @@ mod tests {
     #[test]
     fn cycling_the_mode_keeps_the_shared_focus() {
         let mut cam = Camera::over(Vec3::new(7.0, 0.0, -5.0));
-        assert_eq!(cam.mode(), Mode::Layout, "the default home is Layout");
-        // Pan the Layout focus, then cycle: Orbit must look at the same place the Layout view ended on.
+        assert_eq!(cam.mode(), Mode::Orbit, "the default home is Orbit");
+        // Cycle to Layout and pan its focus, then cycle back: Orbit must look at the same place the
+        // Layout view ended on - the shared focus carries across the switch.
+        cam.cycle_mode();
+        assert_eq!(cam.mode(), Mode::Layout);
         cam.look_cluster(1, 0);
         let layout_focus = cam.layout.focus;
         cam.cycle_mode();
-        assert_eq!(cam.mode(), Mode::Orbit);
+        assert_eq!(cam.mode(), Mode::Orbit, "cycles back to Orbit");
         assert_eq!(cam.orbit.focus, layout_focus, "the switch carries the shared focus across");
-        cam.cycle_mode();
-        assert_eq!(cam.mode(), Mode::Layout, "cycles back to Layout");
     }
 
     // ---- auto-frame coupling ----

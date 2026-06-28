@@ -440,14 +440,14 @@ mod tests {
 
     #[test]
     fn keyboard_cycles_the_camera_mode_on_the_press_edge() {
-        // The mode key flips Layout <-> Orbit on a tap (camera residency, so no action routes), and the
+        // The mode key flips Orbit <-> Layout on a tap (camera residency, so no action routes), and the
         // status bar reads the result through `mode()`.
         let model = Model::default();
         let mut cam = Camera::over(Vec3::ZERO);
-        assert_eq!(cam.mode(), Mode::Layout, "the default home");
+        assert_eq!(cam.mode(), Mode::Orbit, "the default home");
         let actions = keyboard(&input_with_chars(&['c']), false, &model, None, &mut cam);
         assert!(actions.is_empty(), "the mode cycle is camera-only - no model action");
-        assert_eq!(cam.mode(), Mode::Orbit, "the mode key cycles to Orbit");
+        assert_eq!(cam.mode(), Mode::Layout, "the mode key cycles to Layout");
     }
 
     #[test]
