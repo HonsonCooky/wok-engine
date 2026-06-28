@@ -134,10 +134,12 @@ const PAN_FRACTION: f32 = 0.06;
 
 /// Margin on the framed zoom: the bounds' larger horizontal extent is the half-height times this, so the
 /// selection sits inside the view with breathing room rather than touching the edges.
+#[allow(dead_code)]
 const FIT_MARGIN: f32 = 1.3;
 
 /// Smallest half-height framing zooms to, so a tiny placement gets a readable working view instead of the
 /// camera diving onto it (an 8m-tall view at this floor) - the orthographic analogue of [`FRAME_MIN_RADIUS`].
+#[allow(dead_code)]
 const FIT_MIN_HALF_HEIGHT: f32 = 4.0;
 
 /// A top-down orthographic camera over a focus point on the world plane. The default Layout camera: the
@@ -220,12 +222,15 @@ impl LayoutCamera {
         self.half_height = (self.half_height * factor).clamp(MIN_HALF_HEIGHT, MAX_HALF_HEIGHT);
     }
 
-    /// Frame an axis-aligned bounds top-down (the selection rung of the framing ladder,
-    /// designs/movement-camera-design.md): centre the focus on it and size the zoom so the bounds' larger
-    /// horizontal extent fits the view with margin, floored so a tiny placement still reads and clamped to
-    /// the zoom band. Half-height is a half-extent, so fitting the larger of the X/Z extents covers both
-    /// axes for any landscape aspect; the wide axis sits a touch looser than the tall one, which the
-    /// margin absorbs. The combined [`Camera`] calls this for the Layout half of an auto-frame.
+    /// Frame an axis-aligned bounds top-down: centre the focus on it and size the zoom so the bounds'
+    /// larger horizontal extent fits the view with margin, floored so a tiny placement still reads and
+    /// clamped to the zoom band. Half-height is a half-extent, so fitting the larger of the X/Z extents
+    /// covers both axes for any landscape aspect; the wide axis sits a touch looser than the tall one,
+    /// which the margin absorbs.
+    ///
+    /// Parked: the selection auto-frame only re-centers now (it preserves the zoom), so nothing calls this
+    /// yet. Kept for the macro chunk-framing tier, which frames a chunk's bounds to fit.
+    #[allow(dead_code)]
     pub fn fit_to(&mut self, min: Vec3, max: Vec3) {
         self.focus = (min + max) * 0.5;
         let extent = (max - min).max(Vec3::ZERO);
