@@ -1,20 +1,18 @@
-//! The editor's static camera math: the pure matrix and cursor-ray primitives the renderer and the
+//! The editor's camera math: the pure matrix, basis, and cursor-ray primitives the renderer and the
 //! (parked) picking read.
 //!
-//! The interaction layer that flew the camera was demolished to a render-only baseline (the editor
-//! interaction is being rebuilt incrementally, one workflow at a time - designs/orchestrator-state.md;
-//! the detailed grammar in designs/movement-camera-design.md is ON HOLD). What survives here is the
-//! minimum the render path and picking need: [`FlyCamera`], a perspective camera pose
-//! ([`forward`](FlyCamera::forward) / [`view_proj`](FlyCamera::view_proj) /
-//! [`cursor_ray`](FlyCamera::cursor_ray)), wrapped by the static [`Camera`] in [`modes`] (re-exported as
-//! [`Camera`]). Nothing drives it; it sits at a fixed spawn vantage over the open scene. The
-//! get-around-camera workflow (the first rebuild bite) re-adds the fly basis and the input that moves it.
+//! What lives here is the perspective camera pose [`FlyCamera`]
+//! ([`forward`](FlyCamera::forward) / [`right`](FlyCamera::right) / [`view_proj`](FlyCamera::view_proj) /
+//! [`cursor_ray`](FlyCamera::cursor_ray)), wrapped by the get-around [`Camera`] in [`modes`] (re-exported
+//! as [`Camera`]) that the viewport flies (`crate::viewport`). The editor interaction is being rebuilt
+//! incrementally, one workflow at a time (designs/orchestrator-state.md); this is the get-around-camera
+//! bite, and the rest of the movement-camera grammar (designs/movement-camera-design.md) is still to come.
 //!
 //! Everything here is pure - no egui, no input, no window - and unit tested below.
 //!
 //! Conventions: right-handed, `+Y` up. `yaw` is radians about `+Y` with `0` facing `-Z`, positive
 //! turning right (toward `+X`); `pitch` is radians with positive looking up. `forward` follows the
-//! yaw/pitch.
+//! yaw/pitch; `right` is always horizontal (no roll), `+X` at yaw 0 (screen-right, the A/D strafe sign).
 
 use glam::{Mat4, Vec2, Vec3};
 
@@ -28,8 +26,8 @@ pub use modes::Camera;
 const FOV_Y_RADIANS: f32 = std::f32::consts::FRAC_PI_3;
 const NEAR_PLANE: f32 = 0.1;
 
-/// A perspective camera pose - the basis the static [`Camera`] ([`modes`]) holds. The renderer reads its
-/// [`view_proj`](Self::view_proj); the parked picking casts its [`cursor_ray`](Self::cursor_ray).
+/// A perspective camera pose - the basis the get-around [`Camera`] ([`modes`]) flies. The renderer reads
+/// its [`view_proj`](Self::view_proj); the parked picking casts its [`cursor_ray`](Self::cursor_ray).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlyCamera {
     pub position: Vec3,
@@ -43,6 +41,13 @@ impl FlyCamera {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
         Vec3::new(sin_yaw * cos_pitch, sin_pitch, -cos_yaw * cos_pitch)
+    }
+
+    /// The unit vector to the camera's right, always horizontal (roll is never introduced). The free-fly
+    /// strafe steps along this, so right (`+X` at yaw 0) is the screen-right direction A/D maps to.
+    pub fn right(&self) -> Vec3 {
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        Vec3::new(cos_yaw, 0.0, sin_yaw)
     }
 
     /// The combined view-projection matrix for a target with the given aspect ratio, with the far
@@ -101,9 +106,19 @@ mod tests {
 
     #[test]
     fn yaw_zero_faces_negative_z() {
-        // The render-only baseline keeps the forward basis the view matrix and the parked cursor ray are
-        // built on; at yaw 0 / pitch 0 the camera looks straight down world -Z.
+        // The forward basis the view matrix, the fly step, and the parked cursor ray are built on; at
+        // yaw 0 / pitch 0 the camera looks straight down world -Z.
         assert!(close(camera().forward(), Vec3::NEG_Z));
+    }
+
+    #[test]
+    fn right_is_plus_x_at_yaw_zero_and_stays_horizontal_when_pitched() {
+        // The strafe steps along right: it must be +X at yaw 0 (screen-right, the A/D sign) and never
+        // pick up a vertical component when the camera pitches (no roll), so A/D stays level.
+        assert!(close(camera().right(), Vec3::X));
+        let pitched = FlyCamera { yaw: 0.9, pitch: -0.7, ..camera() };
+        assert!(pitched.right().y.abs() < EPS, "right stays horizontal under pitch: {:?}", pitched.right());
+        assert!((pitched.right().length() - 1.0).abs() < EPS, "and unit length");
     }
 
     // ---- matrices ----

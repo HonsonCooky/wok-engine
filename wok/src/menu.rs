@@ -148,9 +148,9 @@ fn disabled_item(ui: &mut egui::Ui, label: &str) {
 /// The bottom status bar, within the view column only (the composition root shows the navigation
 /// panel first, so this bottom panel spans only the width right of it, never under the nav). The left
 /// shows the open project's name - the in-window confirmation that Open took effect, which the title
-/// bar carries too - or that none is open. The right holds the snap setting and, when the open scene
-/// has unsaved edits (`dirty`), the save dot - the Save click target. The richer readouts (counts,
-/// framerate, integrity) join as their features land.
+/// bar carries too - or that none is open. The right holds the save dot - the Save click target - when
+/// the open scene has unsaved edits (`dirty`). The richer readouts (counts, framerate, integrity) join
+/// as their features land.
 pub fn status_bar(ctx: &egui::Context, project: Option<&Project>, dirty: bool, actions: &mut Vec<Action>) {
     egui::TopBottomPanel::bottom("wok_status_bar").exact_height(STATUS_BAR_HEIGHT).show(ctx, |ui| {
         let dim = theme::palette(ui.ctx()).text_dim;
@@ -160,12 +160,10 @@ pub fn status_bar(ctx: &egui::Context, project: Option<&Project>, dirty: bool, a
                 None => ui.label(egui::RichText::new("No project open").color(dim)),
             };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // The save dot sits at the right edge, shown only when there are unsaved edits; the snap
-                // setting to its left. In a right-to-left layout the first item added is the rightmost.
+                // The save dot sits at the right edge, shown only when the open scene has unsaved edits.
                 if dirty {
                     save_dot(ui, actions);
                 }
-                ui.label(egui::RichText::new("snap 1 m / 5 deg").color(dim));
             });
         });
     });

@@ -13,17 +13,18 @@
 //! The editor well is the 3D Scene viewport. The authored scene (`crate::loaded`) is derived into a
 //! render residency (`crate::render_scene`, distinct from the editable model) reconciled to the open
 //! scene, and wok-render draws it - terrain, placeholder prefab shapes, the scene's lighting - into the
-//! well's rect through a static camera (`crate::camera`). The frame order is load-bearing: reconcile the
-//! authored scene, build the chrome, drain the chrome's actions, reconcile the render residency (an edit
-//! just applied shows this frame), then draw the 3D with the chrome painted over it (`crate::render`).
+//! well's rect through the get-around camera (`crate::camera`, driven by `crate::viewport`). The frame
+//! order is load-bearing: reconcile the authored scene, build the chrome, drain the chrome's actions,
+//! reconcile the render residency (an edit just applied shows this frame), drive the camera from the
+//! viewport input, then draw the 3D with the chrome painted over it (`crate::render`).
 //!
-//! The viewport is a render-only baseline: the interaction layer was demolished so the editor opens,
-//! renders the open scene from a single static vantage, and lets the chrome select (the Instances tree)
-//! and edit (the floating inspector, Ctrl+S) - but nothing drives the camera and the well raises no
-//! gestures. The frame loop carries a clearly marked seam between the action drain and the draw where the
-//! next rebuild bite (the get-around camera, then click-to-select, then move) plugs its viewport input
-//! in, rebuilt incrementally one workflow at a time (designs/orchestrator-state.md; the detailed grammar
-//! in designs/movement-camera-design.md is on hold).
+//! The viewport interaction is being rebuilt incrementally, one workflow at a time
+//! (designs/orchestrator-state.md; the detailed grammar in designs/movement-camera-design.md is on hold).
+//! This bite is the get-around camera (`crate::viewport`): a held right-drag over the well flies the
+//! camera (mouse-look, WASD, E/Q, Shift to boost) and a scroll dollies it. The chrome still selects (the
+//! Instances tree) and edits (the floating inspector, Ctrl+S); click-to-select in the well and moving
+//! instances are the next bites. The frame loop carries a clearly marked seam between the action drain and
+//! the draw where each bite plugs its viewport input in.
 //!
 //! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish` (inside `render::draw`):
 //! each frame runs the egui pass (building the chrome), draws the 3D into the well rect (or clears the
@@ -48,6 +49,7 @@ mod render;
 mod render_scene;
 mod theme;
 mod view;
+mod viewport;
 mod workspace;
 
 use action::Action;
@@ -59,6 +61,7 @@ use model::Model;
 use render::Gpu;
 use render_scene::RenderScene;
 use std::path::Path;
+use wok_platform::winit::dpi::PhysicalPosition;
 use wok_platform::winit::event::WindowEvent;
 use wok_platform::{App, Desc, FrameCtx, Platform};
 
@@ -79,10 +82,14 @@ struct Editor {
     /// `loaded_scene` and reconciled to it each frame so edits show. Separate from the editable model;
     /// `None` when no scene is open or it failed to load.
     render_scene: Option<RenderScene>,
-    /// The camera the viewport renders through: one static vantage (`crate::camera`). Positioned over the
-    /// scene when one loads (`RenderScene::spawn_camera`); nothing drives it in the render-only baseline,
-    /// and the get-around-camera workflow (the first rebuild bite) re-adds the input that moves it.
+    /// The camera the viewport renders through (`crate::camera`). Positioned over the scene when one loads
+    /// (`RenderScene::spawn_camera`), then driven each frame by the viewport input (`crate::viewport`): the
+    /// get-around camera's look / fly / dolly. Frame-loop residency, not model state.
     camera: Camera,
+    /// The cursor-lock anchor while a right-drag viewport look is held: the press position the cursor is
+    /// pinned at, restored there on release so it never jumps (`crate::viewport`). `None` when no look is
+    /// active. Frame-loop residency the viewport input threads across frames.
+    viewport_grab: Option<PhysicalPosition<f64>>,
     /// The window title last pushed to the OS, so `set_title` fires only when it changes.
     title: String,
 }
@@ -109,6 +116,7 @@ impl Editor {
             loaded_scene: None,
             render_scene: None,
             camera: default_camera(),
+            viewport_grab: None,
             title: String::new(),
         }
     }
@@ -188,30 +196,34 @@ impl App for Editor {
             }
         }
 
-        // ---- viewport interaction seam (render-only baseline) ----
-        // The interaction layer was demolished to a render-only baseline: the directional cluster, the
-        // camera nav, the right-drag cursor lock, the drag-and-drop move, and the Frame verb are all gone.
-        // The camera is a single static vantage (RenderScene::spawn_camera on load); no input drives it
-        // and the well raises no gestures, so clicks, drags, and keys in the viewport do nothing. The next
-        // rebuild bite (the get-around camera, then click-to-select, then move - the Unity-style workflow
-        // ladder, designs/orchestrator-state.md) plugs its viewport input in HERE, between the action
-        // drain above and the draw below: read ctx.input, mutate the camera (frame-loop residency), or
-        // route selection / transform edits through action::handle, the same single writer the chrome uses.
-
         // The editor well is a transparent egui panel, so the surface clear behind it (when no scene
         // draws) is the well's colour: the active theme's editor background. The surface is sRGB and
         // wgpu reads the clear value as linear; `render::draw` decodes it through Rgba.
         let editor_bg = theme::palette(&gui.ctx).editor_bg;
 
         // The render residency and the 3D pass need the device. Reconcile the residency to the open scene
-        // (a fresh build spawns the static camera over it; an in-memory edit just applied is re-derived
-        // here so it shows this frame), then draw the 3D into the well and paint the chrome over it.
+        // (a fresh build spawns the camera over it; an in-memory edit just applied is re-derived here so
+        // it shows this frame).
         let Some(gpu) = self.gpu.as_mut() else { return };
         if render_scene::reconcile(&mut self.render_scene, gpu, ctx.platform, self.loaded_scene.as_ref()) {
             if let Some(scene) = self.render_scene.as_ref() {
                 self.camera = scene.spawn_camera();
             }
         }
+
+        // ---- viewport interaction seam ----
+        // The viewport input runs here, between the chrome's action drain above and the draw below, after
+        // the render residency reconciles (so a freshly loaded scene's spawn vantage is the base this
+        // frame's drive builds on). This bite is the get-around camera (`crate::viewport`): a held
+        // right-drag over the well looks and flies the camera (WASD + E/Q, Shift to boost), and a scroll
+        // dollies it. The camera is frame-loop residency, so the drive mutates it directly rather than
+        // routing through the single writer. The next bites (click-to-select, then move) plug their own
+        // viewport input in here beside this one, routing selection / transform edits through
+        // action::handle. egui's Context is an Arc handle, so clone it before the call: the input reads
+        // egui's pointer / layer state while it mutates self.camera and self.viewport_grab in the same
+        // statement, without borrowing `gui` across it.
+        let ectx = gui.ctx.clone();
+        viewport::camera_input(&ectx, editor_rect, ctx, &mut self.camera, &mut self.viewport_grab);
 
         render::draw(ctx.platform, gpu, self.render_scene.as_ref(), self.camera, editor_rect, editor_bg, gui, output);
 
