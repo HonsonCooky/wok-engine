@@ -187,6 +187,14 @@ impl InputCollector {
                 self.scroll_delta.0 += dx;
                 self.scroll_delta.1 += dy;
             }
+            // Losing focus (alt-tab, a system dialog) means later key/button releases go to another
+            // window: winit delivers no release here, so anything held would stick "down" forever (a
+            // camera that keeps flying, a look button that never lets go). Drop the held sets on focus
+            // loss so input resets to neutral; the per-frame edge sets clear themselves at snapshot.
+            WindowEvent::Focused(false) => {
+                self.keys_held.clear();
+                self.mouse_buttons_held.clear();
+            }
             _ => {}
         }
     }
@@ -199,6 +207,17 @@ impl InputCollector {
     /// can read the repeat. A release drops the held entry and edges `keys_released`. The held-set
     /// guard also swallows any stray non-repeat press of an already-held key.
     fn key_input(&mut self, key: Key, state: ElementState, repeat: bool) {
+        // Normalize a printable character to its lowercase form before tracking it. winit's logical_key
+        // reflects the live modifier state, so a letter pressed without Shift arrives as `Character("a")`
+        // but its release while Shift (or a held boost) is down arrives as `Character("A")` - a different
+        // key. Removing "A" would miss the "a" still in keys_held, leaving the key stuck "down" forever
+        // (a camera that keeps flying with nothing pressed). Folding both to "a" keeps press and release
+        // on the same key; every accessor (char_pressed/char_held) already matches case-insensitively,
+        // so consumers are unaffected.
+        let key = match key {
+            Key::Character(s) => Key::Character(s.to_ascii_lowercase().into()),
+            other => other,
+        };
         match state {
             ElementState::Pressed if repeat => {
                 self.keys_repeating.insert(key);
@@ -404,6 +423,40 @@ mod tests {
 
         c.key_input(key("r"), ElementState::Released, false);
         assert!(!c.snapshot().char_held('r'), "held clears on release");
+    }
+
+    #[test]
+    fn a_letter_released_while_shift_changed_its_case_does_not_stick() {
+        // winit reports logical_key against the live modifiers, so a key pressed as "a" can release as
+        // "A" (Shift / a held boost down). The collector lowercases both, so the case-shifted release
+        // still clears the press and the key does not stay stuck "held" - the bug that made the editor
+        // camera fly on its own.
+        let mut c = InputCollector::new();
+        c.key_input(key("a"), ElementState::Pressed, false); // pressed without shift
+        assert!(c.snapshot().char_held('a'), "the press registers");
+        c.key_input(key("A"), ElementState::Released, false); // released with shift down -> uppercase
+        assert!(!c.snapshot().char_held('a'), "the case-shifted release clears the held key");
+    }
+
+    #[test]
+    fn losing_focus_clears_held_keys_and_buttons() {
+        // A key or button held when the window loses focus would otherwise stick (its release lands in
+        // another window). Focused(false) drops the held sets so input returns to neutral.
+        let mut c = InputCollector::new();
+        c.key_input(key("w"), ElementState::Pressed, false);
+        c.handle_window_event(&WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Right,
+        });
+        let frame = c.snapshot();
+        assert!(frame.char_held('w'), "key held before focus loss");
+        assert!(frame.mouse_held(MouseButton::Right), "button held before focus loss");
+
+        c.handle_window_event(&WindowEvent::Focused(false));
+        let frame = c.snapshot();
+        assert!(!frame.char_held('w'), "focus loss clears held keys");
+        assert!(!frame.mouse_held(MouseButton::Right), "and held mouse buttons");
     }
 
     #[test]
