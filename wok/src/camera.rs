@@ -1,12 +1,12 @@
 //! The editor's camera math: the pure matrix, basis, and cursor-ray primitives the renderer and the
-//! (parked) picking read.
+//! picking read.
 //!
 //! What lives here is the perspective camera pose [`FlyCamera`]
 //! ([`forward`](FlyCamera::forward) / [`right`](FlyCamera::right) / [`view_proj`](FlyCamera::view_proj) /
 //! [`cursor_ray`](FlyCamera::cursor_ray)), wrapped by the get-around [`Camera`] in [`modes`] (re-exported
 //! as [`Camera`]) that the viewport flies (`crate::viewport`). The editor interaction is being rebuilt
 //! incrementally, one workflow at a time (designs/orchestrator-state.md); this is the get-around-camera
-//! bite, and the rest of the movement-camera grammar (designs/movement-camera-design.md) is still to come.
+//! bite; the rest of the interaction grammar is still to come (designs/editor-design.md, the Input section).
 //!
 //! Everything here is pure - no egui, no input, no window - and unit tested below.
 //!
@@ -27,7 +27,7 @@ const FOV_Y_RADIANS: f32 = std::f32::consts::FRAC_PI_3;
 const NEAR_PLANE: f32 = 0.1;
 
 /// A perspective camera pose - the basis the get-around [`Camera`] ([`modes`]) flies. The renderer reads
-/// its [`view_proj`](Self::view_proj); the parked picking casts its [`cursor_ray`](Self::cursor_ray).
+/// its [`view_proj`](Self::view_proj); the click-to-select casts its [`cursor_ray`](Self::cursor_ray).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlyCamera {
     pub position: Vec3,
@@ -72,11 +72,10 @@ impl FlyCamera {
     /// difference, normalized so a pick `t` reads as world distance. The ndc is a ratio of point
     /// coordinates, so the result is identical whether measured in points or pixels.
     ///
-    /// Parked with the picking (the render-only baseline drives no picking yet): the renderer reads
-    /// [`view_proj`], and the click-to-select workflow (a rebuild bite) reads this.
+    /// The renderer reads [`view_proj`]; the viewport click-to-select (`crate::viewport`) casts this to
+    /// turn a click in the well into the world ray it picks placements with.
     ///
     /// [`view_proj`]: Self::view_proj
-    #[allow(dead_code)]
     pub fn cursor_ray(&self, pos_in_rect: Vec2, rect_size: Vec2, far: f32) -> (Vec3, Vec3) {
         let ndc_x = 2.0 * pos_in_rect.x / rect_size.x - 1.0;
         let ndc_y = 1.0 - 2.0 * pos_in_rect.y / rect_size.y;
@@ -106,7 +105,7 @@ mod tests {
 
     #[test]
     fn yaw_zero_faces_negative_z() {
-        // The forward basis the view matrix, the fly step, and the parked cursor ray are built on; at
+        // The forward basis the view matrix, the fly step, and the cursor ray are built on; at
         // yaw 0 / pitch 0 the camera looks straight down world -Z.
         assert!(close(camera().forward(), Vec3::NEG_Z));
     }
@@ -132,7 +131,7 @@ mod tests {
         assert!(clip.z > 0.0 && clip.z < 1.0, "depth should be inside wgpu's 0..1 range: {}", clip.z);
     }
 
-    // ---- cursor_ray (parked, but still correct) ----
+    // ---- cursor_ray ----
 
     #[test]
     fn cursor_ray_through_the_center_points_along_forward() {

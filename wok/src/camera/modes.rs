@@ -5,8 +5,8 @@
 //! spawn pose and adds the drive verbs the viewport feeds (`crate::viewport`): [`look`](Camera::look)
 //! (right-drag mouse-look), [`fly`](Camera::fly) (WASD + raise/lower, dt-based), and
 //! [`dolly`](Camera::dolly) (scroll). This is the get-around camera (the first rebuild bite); the rest of
-//! the movement-camera grammar - selection-aware Move, the Frame verb, angle presets
-//! (designs/movement-camera-design.md) - is still to come. Pure like the primitive: no egui, no input, no
+//! the interaction grammar - selection-aware Move, the Frame verb, angle presets (designs/editor-design.md,
+//! the Input section) - is still to come. Pure like the primitive: no egui, no input, no
 //! window (the viewport reads the input and calls these).
 
 use glam::{Mat4, Vec2, Vec3};
@@ -38,7 +38,7 @@ const PITCH_LIMIT: f32 = 1.55;
 
 /// The editor's camera: one [`FlyCamera`] the viewport flies and looks. The frame loop holds one
 /// (frame-loop residency, not model state); the viewport drives it from the input each frame
-/// (`crate::viewport`), the renderer reads its matrices, and the parked picking casts its cursor ray.
+/// (`crate::viewport`), the renderer reads its matrices, and the click-to-select casts its cursor ray.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     /// The live perspective camera the renderer and picking read.
@@ -95,10 +95,9 @@ impl Camera {
         self.fly.position
     }
 
-    /// The world-space cursor ray for picking ([`FlyCamera::cursor_ray`]). `far` is the same far the
-    /// view projects with. Parked with the picking: the render-only baseline casts no ray yet, and the
-    /// click-to-select workflow (a rebuild bite) reads this.
-    #[allow(dead_code)]
+    /// The world-space cursor ray for picking ([`FlyCamera::cursor_ray`]). `far` is the same far the view
+    /// projects with, so the unprojection inverts the exact matrix the renderer drew with. The viewport
+    /// click-to-select (`crate::viewport`) casts this on a left press over the well.
     pub fn cursor_ray(&self, pos_in_rect: Vec2, rect_size: Vec2, far: f32) -> (Vec3, Vec3) {
         self.fly.cursor_ray(pos_in_rect, rect_size, far)
     }

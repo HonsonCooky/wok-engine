@@ -1,5 +1,5 @@
 //! Pure spatial helpers for the editor's transform grammar, kept across the interaction demolition
-//! (designs/movement-camera-design.md, "What survives, what is thrown out"). The held-key gizmo that
+//! (the surviving direction now lives in designs/editor-design.md's Input section). The held-key gizmo that
 //! drove these is gone; the rebuilt grammar (brief 2: drag-and-drop move, the keyboard rotate)
 //! composes the same primitives, so they survive here unchanged: grid snap, resting an instance's
 //! bottom on a surface, the gimbal-free world-axis rotate step, and the ray-vs-ground-plane hit. Pure

@@ -19,11 +19,12 @@
 //! viewport input, then draw the 3D with the chrome painted over it (`crate::render`).
 //!
 //! The viewport interaction is being rebuilt incrementally, one workflow at a time
-//! (designs/orchestrator-state.md; the detailed grammar in designs/movement-camera-design.md is on hold).
-//! This bite is the get-around camera (`crate::viewport`): a held right-drag over the well flies the
-//! camera (mouse-look, WASD, E/Q, Shift to boost) and a scroll dollies it. The chrome still selects (the
-//! Instances tree) and edits (the floating inspector, Ctrl+S); click-to-select in the well and moving
-//! instances are the next bites. The frame loop carries a clearly marked seam between the action drain and
+//! (designs/orchestrator-state.md; the direction is in designs/editor-design.md's Input section). The
+//! camera bite is the get-around camera (`crate::viewport`): a held right-drag over the well flies the
+//! camera (mouse-look, WASD, E/Q, Shift to boost) and a scroll dollies it. The select bite is
+//! click-to-select: a left press over the well picks the placement under the cursor (a miss deselects),
+//! lighting the same Instances-tree highlight and floating inspector a tree-select does. Moving a selected
+//! instance is the next bite. The frame loop carries a clearly marked seam between the action drain and
 //! the draw where each bite plugs its viewport input in.
 //!
 //! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish` (inside `render::draw`):
@@ -214,16 +215,27 @@ impl App for Editor {
         // ---- viewport interaction seam ----
         // The viewport input runs here, between the chrome's action drain above and the draw below, after
         // the render residency reconciles (so a freshly loaded scene's spawn vantage is the base this
-        // frame's drive builds on). This bite is the get-around camera (`crate::viewport`): a held
+        // frame's drive builds on). Two bites live here. The get-around camera (`crate::viewport`): a held
         // right-drag over the well looks and flies the camera (WASD + E/Q, Shift to boost), and a scroll
-        // dollies it. The camera is frame-loop residency, so the drive mutates it directly rather than
-        // routing through the single writer. The next bites (click-to-select, then move) plug their own
-        // viewport input in here beside this one, routing selection / transform edits through
-        // action::handle. egui's Context is an Arc handle, so clone it before the call: the input reads
-        // egui's pointer / layer state while it mutates self.camera and self.viewport_grab in the same
-        // statement, without borrowing `gui` across it.
+        // dollies it; the camera is frame-loop residency, so the drive mutates it directly rather than
+        // routing through the single writer. Then click-to-select: a left press over the well casts the
+        // cursor ray, and the placement it hits (or a miss, which deselects) routes through action::handle
+        // like every other selection, since the selection IS model state. The move bite plugs in here next.
+        // egui's Context is an Arc handle, so clone it before the calls: the input reads egui's pointer /
+        // layer state while it mutates self.camera and self.viewport_grab in the same statement, without
+        // borrowing `gui` across it.
         let ectx = gui.ctx.clone();
         viewport::camera_input(&ectx, editor_rect, ctx, &mut self.camera, &mut self.viewport_grab);
+
+        // Click-to-select gates off the camera lock the drive just set (a held right-drag look is flying,
+        // not selecting) and is a no-op with no scene open. The hit-or-miss decision becomes a Select /
+        // Deselect the single writer applies, lighting the tree highlight and the inspector.
+        let lock_active = self.viewport_grab.is_some();
+        if let Some(action) =
+            viewport::pick_input(&ectx, editor_rect, &self.camera, self.render_scene.as_ref(), lock_active)
+        {
+            action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
+        }
 
         render::draw(ctx.platform, gpu, self.render_scene.as_ref(), self.camera, editor_rect, editor_bg, gui, output);
 

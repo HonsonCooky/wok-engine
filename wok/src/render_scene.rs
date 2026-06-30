@@ -211,9 +211,9 @@ impl RenderScene {
     /// placement whose prefab or active state is absent is skipped rather than failing the pick.
     /// Terrain is not a placement, so a ray meeting only terrain returns `None`.
     ///
-    /// Parked with the surface query (the interaction demolition removed the click-to-select that drove
-    /// it); the click-to-select workflow (a rebuild bite) is its caller.
-    #[allow(dead_code)]
+    /// The viewport click-to-select's spatial query (`crate::viewport`): a left press over the well casts
+    /// the cursor ray here, the nearest hit becomes the selection, and a miss (terrain or empty space)
+    /// deselects.
     pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<InstanceId> {
         let mut best: Option<(f32, InstanceId)> = None;
         for chunk in &self.source_chunks {
