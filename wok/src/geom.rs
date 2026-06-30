@@ -5,10 +5,11 @@
 //! bottom on a surface, the gimbal-free world-axis rotate step, and the ray-vs-ground-plane hit. Pure
 //! math - no egui, no input, no camera - so each is unit tested below with no window.
 //!
-//! Parked, not dead: nothing calls these until brief 2 wires the new grammar, the same
-//! kept-for-the-rebuild treatment `crate::camera`'s framing math carries. The module-wide
-//! `#![allow(dead_code)]` says so in one place; brief 2 narrows it as the callers land.
-#![allow(dead_code)]
+//! Partly live now: the drag-to-move (`crate::viewport`) composes [`snap`] and [`rest_y`], so those are
+//! used; [`rotate_step`] (the keyboard rotate) and [`ray_vs_ground_plane`] (the grounded-off free move)
+//! are still parked for their workflows, each under an individual `#[allow(dead_code)]` so the rest of
+//! the module warns honestly. The same kept-for-the-rebuild treatment `crate::camera`'s framing math
+//! carries.
 
 use glam::{Quat, Vec3};
 use wok_scene::Transform;
@@ -33,6 +34,10 @@ pub fn rest_y(floor: f32, base_y: f32, aabb_min_y: f32) -> f32 {
 /// regardless of the placement's current heading. A relative quaternion compose, so it is
 /// gimbal-lock-free - successive steps keep turning past 90deg rather than sticking. The non-rotation
 /// fields pass through. Pure so the step is unit tested.
+///
+/// Parked for the keyboard rotate workflow (W4), its only caller; an individual `#[allow(dead_code)]`
+/// keeps it warning-free until then.
+#[allow(dead_code)]
 pub fn rotate_step(base: Transform, axis: Vec3, degrees: f32) -> Transform {
     let rotation = Quat::from_axis_angle(axis, degrees.to_radians()) * base.rotation;
     Transform { rotation, ..base }
@@ -40,7 +45,11 @@ pub fn rotate_step(base: Transform, axis: Vec3, degrees: f32) -> Transform {
 
 /// The world point where the ray `origin + t*dir` meets the horizontal plane `y = height`, or `None`
 /// when the ray runs parallel to the plane (no crossing) or the crossing is behind the eye (`t <= 0`).
-/// The free move casts the cursor ray at the selection's height.
+/// The grounded-off free move casts the cursor ray at the selection's height.
+///
+/// Parked for the grounded-off free move workflow (W5), its only caller; an individual
+/// `#[allow(dead_code)]` keeps it warning-free until then.
+#[allow(dead_code)]
 pub fn ray_vs_ground_plane(origin: Vec3, dir: Vec3, height: f32) -> Option<Vec3> {
     if dir.y.abs() < 1e-5 {
         return None;

@@ -8,7 +8,8 @@
 //! Shift boosts - and scroll to dolly along the look. Click-to-select: a left press over the well picks
 //! the placement under the cursor, and a miss on terrain or sky deselects - routed through the single
 //! writer, so it lights the same Instances-tree highlight and floating inspector a tree-select does.
-//! Moving a selected instance is a later bite that plugs its own input in here, beside these.
+//! Drag-to-move: a left press also arms the picked instance; dragging it past a small threshold rests it
+//! on the surface under the cursor (base grounded, snapped to the 1m grid), routed as a transform edit.
 //!
 //! Where it runs: the frame loop's viewport interaction seam (`crate::main`), between the chrome's action
 //! drain and the draw. [`camera_input`] reads the egui pointer state (a cloned [`egui::Context`]) and the
@@ -16,7 +17,10 @@
 //! camera is frame-loop residency, not the model, so the drive routes through neither the single writer
 //! nor an action. [`pick_input`] is the other entry: it casts the cursor ray on a left press and returns
 //! the [`Select`](crate::action::Action::Select) / [`Deselect`](crate::action::Action::Deselect) action
-//! the seam routes through `action::handle`, since the selection IS model state.
+//! the seam routes through `action::handle`, since the selection IS model state - and on a hit it arms
+//! the drag. [`drag_input`] is the third: while the left button stays down it moves the armed instance
+//! along the surface, returning a [`SetInstanceTransform`](crate::action::Action::SetInstanceTransform)
+//! the seam routes the same way, and the button lifting clears the arm.
 //!
 //! The right-drag look cursor lock (the proven pattern, designs/sharp-edges.md section 2): while a
 //! right-drag begun over the well is held, the cursor is hidden and pinned so the mouse never leaves the
@@ -25,22 +29,46 @@
 //! nothing. The lock decision ([`grab_transition`]) is pure and unit tested; the window side effects are
 //! in [`update_cursor_grab`].
 
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 use wok_platform::FrameCtx;
 use wok_platform::input::InputState;
 use wok_platform::winit::dpi::PhysicalPosition;
 use wok_platform::winit::event::MouseButton;
 use wok_platform::winit::keyboard::NamedKey;
 use wok_platform::winit::window::{CursorGrabMode, Window};
-use wok_scene::InstanceId;
+use wok_scene::{Aabb, InstanceId, Transform};
 
 use crate::action::Action;
 use crate::camera::Camera;
+use crate::geom;
+use crate::loaded::LoadedScene;
 use crate::render_scene::RenderScene;
 
 /// The boost key (Shift): a held boost multiplies the fly speed (`Camera::fly`). The cluster, raise/lower,
 /// and boost are sane placeholders, not the final binding - the rebindable layout is a later bite.
 const BOOST: NamedKey = NamedKey::Shift;
+
+/// The world grid the drag-to-move snaps to, in metres - the snap-assisted-placement default
+/// (editor-design Input: grid snap 1m, on by default). The escape toggle is a later bite (W5).
+const GRID_STEP: f32 = 1.0;
+
+/// How far (in egui points) the pointer must travel from the left press before the drag-to-move starts,
+/// so a plain click stays select-only. Critical: [`RenderScene::surface_ray`](crate::render_scene::RenderScene::surface_ray)
+/// excludes the dragged instance, so without this gate a click would drop a floating instance to the
+/// ground under it. A few points is enough to tell a click from a drag without feeling sticky.
+const DRAG_THRESHOLD_PX: f32 = 4.0;
+
+/// An armed viewport drag-to-move: the instance a left press selected and the press position (egui
+/// points). Threaded across frames by the seam (`crate::main`) beside the camera grab anchor: the press
+/// arms it ([`pick_input`]), a later held frame past [`DRAG_THRESHOLD_PX`] moves it ([`drag_input`]),
+/// and the button lifting clears it. The press anchor is what tells a genuine drag from a plain click.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewportDrag {
+    /// The picked instance the drag moves.
+    pub id: InstanceId,
+    /// The left-press position (egui points), the threshold anchor.
+    pub press: Vec2,
+}
 
 /// Drive the get-around camera from one frame of input, the single entry the viewport seam calls
 /// (`crate::main`). Reads the egui pointer state (`egui_ctx`, a cloned [`egui::Context`] handle so the
@@ -94,6 +122,8 @@ pub fn camera_input(
 /// placements and return the selection action it implies. [`Select`](Action::Select) the nearest
 /// placement hit, or [`Deselect`](Action::Deselect) on empty ground or sky. `None` means the click is not
 /// a select this frame (no scene open, mid-look, no press, or off the well), so the seam routes nothing.
+/// A hit also ARMS the drag-to-move (`drag`), anchored at this press, so a later held frame past the
+/// threshold moves the instance ([`drag_input`]); a miss clears any armed drag.
 ///
 /// Shares the camera drive's over-the-well gate ([`pointer_over_well`]) and is likewise blind to
 /// `is_using_pointer`: on the press frame the well's own background click-sense marks the pointer as
@@ -107,6 +137,7 @@ pub fn pick_input(
     camera: &Camera,
     render_scene: Option<&RenderScene>,
     lock_active: bool,
+    drag: &mut Option<ViewportDrag>,
 ) -> Option<Action> {
     // With no scene open there is nothing to pick; a held right-drag look is a fly, not a select, so a
     // left-click mid-look does not select either (the lock state the camera drive set this frame).
@@ -127,7 +158,84 @@ pub fn pick_input(
     let pos_in_rect = Vec2::new(pos.x - editor_rect.min.x, pos.y - editor_rect.min.y);
     let rect_size = Vec2::new(editor_rect.width(), editor_rect.height());
     let (origin, dir) = camera.cursor_ray(pos_in_rect, rect_size, render_scene.far_plane());
-    Some(pick_action(render_scene.pick(origin, dir)))
+    let action = pick_action(render_scene.pick(origin, dir));
+    // Arm the drag-to-move from this same press: a hit becomes the drag target anchored here, so a held
+    // frame past the threshold moves it ([`drag_input`]); a miss disarms. The move itself never runs on
+    // the press frame - the threshold has not been crossed yet.
+    *drag = match &action {
+        Action::Select(id) => Some(ViewportDrag { id: *id, press: Vec2::new(pos.x, pos.y) }),
+        _ => None,
+    };
+    Some(action)
+}
+
+/// The drag-to-move, the seam's third entry (`crate::main`): while the left button stays down and an
+/// armed instance ([`pick_input`] set `drag` on the press) has been dragged past [`DRAG_THRESHOLD_PX`]
+/// over the well, rest that instance on the surface under the cursor and return the
+/// [`SetInstanceTransform`](Action::SetInstanceTransform) the seam routes through `action::handle`. The
+/// button lifting (or never being down) clears the arm and moves nothing - the release-clear, so the
+/// next press re-arms cleanly. `None` means no move this frame: no scene, mid-look (flying), no armed
+/// drag, a click that has not crossed the threshold, the pointer off the well, a stale id, or the cursor
+/// over empty sky (off any surface) - all hold the instance where it is rather than fling it.
+///
+/// The threshold is what keeps a plain click select-only: [`surface_ray`](RenderScene::surface_ray)
+/// excludes the dragged instance, so a press that does not move would otherwise drop a floating instance
+/// straight to the ground beneath it. The lifted math (1677821) composes
+/// [`surface_ray`](RenderScene::surface_ray) -> [`instance_aabb`](RenderScene::instance_aabb) ->
+/// [`grounded_drop`] with the snap-assisted-placement defaults baked on (grid + grounded); the escape
+/// toggles are a later bite (W5). The world hit is written into the chunk-local translation - exact for
+/// the single-chunk scenes the editor authors today; the world-to-local re-home is a deferred bite.
+pub fn drag_input(
+    egui_ctx: &egui::Context,
+    editor_rect: egui::Rect,
+    camera: &Camera,
+    render_scene: Option<&RenderScene>,
+    loaded: Option<&LoadedScene>,
+    drag: &mut Option<ViewportDrag>,
+    lock_active: bool,
+) -> Option<Action> {
+    // The button lifting (or never down) ends the drag: clear the arm and move nothing, so the next
+    // press re-arms cleanly. This runs before every other gate, so a release always disarms.
+    if !egui_ctx.input(|i| i.pointer.primary_down()) {
+        *drag = None;
+        return None;
+    }
+    // A held right-drag look is flying, not moving (can't move while flying). The button is still down,
+    // so the arm holds - only the release above clears it.
+    if lock_active {
+        return None;
+    }
+    let render_scene = render_scene?;
+    let armed = (*drag)?;
+    // Only a genuine drag moves: the pointer must be over the well and have travelled past the threshold
+    // from the press anchor, so a plain click (press + release in place) stays select-only.
+    let pos = egui_ctx.pointer_latest_pos()?;
+    let pos = Vec2::new(pos.x, pos.y);
+    if !pointer_over_well(egui_ctx, editor_rect) || (pos - armed.press).length() < DRAG_THRESHOLD_PX {
+        return None;
+    }
+    // The dragged instance's current transform (the move keeps its rotation and scale); a stale id or no
+    // loaded scene means nothing to move.
+    let current = loaded?.placement(armed.id)?.transform;
+    // Cast the cursor ray at the surface under it, excluding the dragged instance so it never rests on
+    // itself, and rest its base there snapped to the grid. Off any surface (empty sky) holds - no move.
+    let pos_in_rect = Vec2::new(pos.x - editor_rect.min.x, pos.y - editor_rect.min.y);
+    let rect_size = Vec2::new(editor_rect.width(), editor_rect.height());
+    let (origin, dir) = camera.cursor_ray(pos_in_rect, rect_size, render_scene.far_plane());
+    let hit = render_scene.surface_ray(origin, dir, armed.id)?;
+    let bounds = render_scene.instance_aabb(armed.id)?;
+    Some(Action::SetInstanceTransform(armed.id, grounded_drop(hit, current, bounds)))
+}
+
+/// The drag-to-move's grounded grid snap: rest the instance's base on the surface point `hit` under the
+/// cursor, snapping X/Z and the resting pivot to the 1m grid, keeping `current`'s rotation and scale.
+/// The lifted drag_to math (1677821) with the snap-assisted-placement defaults on (grid + grounded). Pure
+/// - hit + current transform + world bounds in, snapped grounded transform out - so it is unit tested
+/// without a scene; the grid snap and the rest-the-bottom pivot are `geom`'s own tested primitives.
+fn grounded_drop(hit: Vec3, current: Transform, bounds: Aabb) -> Transform {
+    let pivot_y = geom::snap(geom::rest_y(hit.y, current.translation.y, bounds.min.y), GRID_STEP);
+    let translation = Vec3::new(geom::snap(hit.x, GRID_STEP), pivot_y, geom::snap(hit.z, GRID_STEP));
+    Transform { translation, ..current }
 }
 
 /// The pointer is over the viewport well: inside the editor rect and under no foreground egui layer (a
@@ -289,5 +397,25 @@ mod tests {
         // render_scene.rs; this pins only the mapping the viewport seam routes through the single writer.
         assert_eq!(pick_action(Some(InstanceId(7))), Action::Select(InstanceId(7)), "a hit selects that instance");
         assert_eq!(pick_action(None), Action::Deselect, "a miss on terrain or sky deselects");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn grounded_drop_rests_the_base_on_the_grid_and_keeps_rotation_and_scale() {
+        // The lifted drag-to-move compose: rest a unit cube's base (world AABB min.y -0.5 at its current
+        // height 0) on a surface hit at (2.4, 3.4, -1.6) and snap to the 1m grid. X 2.4 -> 2, Z -1.6 ->
+        // -2, and the resting pivot (flush 3.4 + 0.5 = 3.9) snaps to a grid-whole 4; rotation and scale
+        // pass through untouched. The grid snap and the rest-the-bottom pivot are geom's tested primitives;
+        // this pins only that the move composes them as the inspector-equivalent edit the seam routes.
+        let current = Transform {
+            translation: Vec3::new(7.3, 0.0, -2.8),
+            rotation: glam::Quat::from_rotation_y(1.0),
+            scale: Vec3::splat(2.0),
+        };
+        let bounds = Aabb::new(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5));
+        let dropped = grounded_drop(Vec3::new(2.4, 3.4, -1.6), current, bounds);
+        assert_eq!(dropped.translation, Vec3::new(2.0, 4.0, -2.0), "base grounded, X/Z and pivot grid-snapped");
+        assert_eq!(dropped.rotation, current.rotation, "rotation is kept");
+        assert_eq!(dropped.scale, current.scale, "scale is kept");
     }
 }

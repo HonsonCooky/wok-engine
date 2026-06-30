@@ -23,9 +23,9 @@
 //! camera bite is the get-around camera (`crate::viewport`): a held right-drag over the well flies the
 //! camera (mouse-look, WASD, E/Q, Shift to boost) and a scroll dollies it. The select bite is
 //! click-to-select: a left press over the well picks the placement under the cursor (a miss deselects),
-//! lighting the same Instances-tree highlight and floating inspector a tree-select does. Moving a selected
-//! instance is the next bite. The frame loop carries a clearly marked seam between the action drain and
-//! the draw where each bite plugs its viewport input in.
+//! lighting the same Instances-tree highlight and floating inspector a tree-select does. The move bite
+//! drags a selected instance along the surface under the cursor (base grounded, grid-snapped). The frame
+//! loop carries a clearly marked seam between the action drain and the draw where each bite plugs in.
 //!
 //! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish` (inside `render::draw`):
 //! each frame runs the egui pass (building the chrome), draws the 3D into the well rect (or clears the
@@ -91,6 +91,10 @@ struct Editor {
     /// pinned at, restored there on release so it never jumps (`crate::viewport`). `None` when no look is
     /// active. Frame-loop residency the viewport input threads across frames.
     viewport_grab: Option<PhysicalPosition<f64>>,
+    /// The armed viewport drag-to-move target: the instance a left press over the well selected and the
+    /// press anchor, so a held frame past the threshold moves it (`crate::viewport`). `None` when no drag
+    /// is armed. Frame-loop residency the viewport input threads across frames, beside the camera grab.
+    viewport_drag: Option<viewport::ViewportDrag>,
     /// The window title last pushed to the OS, so `set_title` fires only when it changes.
     title: String,
 }
@@ -118,6 +122,7 @@ impl Editor {
             render_scene: None,
             camera: default_camera(),
             viewport_grab: None,
+            viewport_drag: None,
             title: String::new(),
         }
     }
@@ -215,25 +220,49 @@ impl App for Editor {
         // ---- viewport interaction seam ----
         // The viewport input runs here, between the chrome's action drain above and the draw below, after
         // the render residency reconciles (so a freshly loaded scene's spawn vantage is the base this
-        // frame's drive builds on). Two bites live here. The get-around camera (`crate::viewport`): a held
+        // frame's drive builds on). Three bites live here. The get-around camera (`crate::viewport`): a held
         // right-drag over the well looks and flies the camera (WASD + E/Q, Shift to boost), and a scroll
         // dollies it; the camera is frame-loop residency, so the drive mutates it directly rather than
         // routing through the single writer. Then click-to-select: a left press over the well casts the
         // cursor ray, and the placement it hits (or a miss, which deselects) routes through action::handle
-        // like every other selection, since the selection IS model state. The move bite plugs in here next.
-        // egui's Context is an Arc handle, so clone it before the calls: the input reads egui's pointer /
-        // layer state while it mutates self.camera and self.viewport_grab in the same statement, without
-        // borrowing `gui` across it.
+        // like every other selection, since the selection IS model state - and a hit also arms the
+        // drag-to-move. Then the move: while the left button stays down, dragging the armed instance past a
+        // small threshold rests it on the surface under the cursor (grounded, grid-snapped), routed as a
+        // transform edit; the button lifting clears the arm. egui's Context is an Arc handle, so clone it
+        // before the calls: the input reads egui's pointer / layer state while it mutates self.camera,
+        // self.viewport_grab, and self.viewport_drag in the same statements, without borrowing `gui` across it.
         let ectx = gui.ctx.clone();
         viewport::camera_input(&ectx, editor_rect, ctx, &mut self.camera, &mut self.viewport_grab);
 
         // Click-to-select gates off the camera lock the drive just set (a held right-drag look is flying,
         // not selecting) and is a no-op with no scene open. The hit-or-miss decision becomes a Select /
-        // Deselect the single writer applies, lighting the tree highlight and the inspector.
+        // Deselect the single writer applies, lighting the tree highlight and the inspector; a hit also
+        // arms the drag-to-move at this press.
         let lock_active = self.viewport_grab.is_some();
-        if let Some(action) =
-            viewport::pick_input(&ectx, editor_rect, &self.camera, self.render_scene.as_ref(), lock_active)
-        {
+        if let Some(action) = viewport::pick_input(
+            &ectx,
+            editor_rect,
+            &self.camera,
+            self.render_scene.as_ref(),
+            lock_active,
+            &mut self.viewport_drag,
+        ) {
+            action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
+        }
+
+        // The move: while the left button stays down, the armed instance follows the surface under the
+        // cursor once the drag passes the threshold (base grounded, snapped to the 1m grid - the
+        // snap-assisted-placement defaults on); the button lifting clears the arm. The resulting transform
+        // edit routes through the single writer like the inspector's, so it dirties and shows the same frame.
+        if let Some(action) = viewport::drag_input(
+            &ectx,
+            editor_rect,
+            &self.camera,
+            self.render_scene.as_ref(),
+            self.loaded_scene.as_ref(),
+            &mut self.viewport_drag,
+            lock_active,
+        ) {
             action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
         }
 
