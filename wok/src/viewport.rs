@@ -10,8 +10,8 @@
 //! writer, so it lights the same Instances-tree highlight and floating inspector a tree-select does.
 //! Drag-to-move: a left press also arms the picked instance; dragging it past a small threshold rests it
 //! on the surface under the cursor (base grounded, snapped to the 1m grid), routed as a transform edit.
-//! Rotate / scale: with an instance selected and the camera not flying, W/E/R spin it about world X/Y/Z
-//! in 5-degree steps (Shift reverses) and S/D scale it uniformly - the fly cluster reused for a second
+//! Rotate / scale: with an instance selected and the camera not flying, A/D yaw it and W/S pitch it in
+//! 5-degree steps (Shift+A/D roll it) and Q/E scale it uniformly - the fly cluster reused for a second
 //! context, focus-gated so a name being typed never rotates - each routed as the same transform edit.
 //!
 //! Where it runs: the frame loop's viewport interaction seam (`crate::main`), between the chrome's action
@@ -24,7 +24,7 @@
 //! the drag. [`drag_input`] is the third: while the left button stays down it moves the armed instance
 //! along the surface, returning a [`SetInstanceTransform`](crate::action::Action::SetInstanceTransform)
 //! the seam routes the same way, and the button lifting clears the arm. [`transform_input`] is the
-//! fourth: with a selection and the camera idle it folds the W/E/R rotate and S/D scale keys into one
+//! fourth: with a selection and the camera idle it folds the A/D, W/S rotate and Q/E scale keys into one
 //! [`SetInstanceTransform`](crate::action::Action::SetInstanceTransform) the seam routes the same way.
 //!
 //! The right-drag look cursor lock (the proven pattern, designs/sharp-edges.md section 2): while a
@@ -64,8 +64,8 @@ const GRID_STEP: f32 = 1.0;
 const DRAG_THRESHOLD_PX: f32 = 4.0;
 
 /// The keyboard rotation step in degrees - the rotation-snap default (editor-design Input: rotation snap
-/// 5 degrees, on by default), applied per W/E/R tap or repeat about a world axis; Shift reverses the
-/// sign. The toggle to free it (unsnapped rotation) is a later bite (W5). Transform feel is tunable.
+/// 5 degrees, on by default), applied per rotate-key (A/D yaw, W/S pitch, Shift+A/D roll) tap or repeat
+/// about a world axis. The toggle to free it (unsnapped rotation) is a later bite (W5). Transform feel is tunable.
 const ROTATE_STEP_DEG: f32 = 5.0;
 
 /// The uniform scale factor per D (up) / S (down) tap or repeat: D multiplies the scale by this, S by its
@@ -257,24 +257,28 @@ fn grounded_drop(hit: Vec3, current: Transform, bounds: Aabb) -> Transform {
 }
 
 /// The keyboard rotate / scale, the seam's fourth entry (`crate::main`): with an instance selected and
-/// the fly cluster otherwise idle (no right-drag look holding the camera, no left-drag move), the W/E/R
-/// and S/D keys transform the selection in place and return the
-/// [`SetInstanceTransform`](Action::SetInstanceTransform) the seam routes through `action::handle`. W/E/R
-/// spin it +[`ROTATE_STEP_DEG`] about world X/Y/Z (Shift reverses to a negative step); D/S scale it
-/// uniformly up/down by [`SCALE_STEP`], floored at [`SCALE_MIN`] so a shrink never reaches zero. A tap is
-/// one step; a hold repeats at the OS rate (`char_pressed || char_repeating`). `None` means no transform
-/// this frame: no selection, flying, mid-drag, a focused text field (a name being typed, not a rotate),
-/// a held Ctrl (so Ctrl+S stays Save), a stale id, or simply no transform key down.
+/// the fly cluster otherwise idle (no right-drag look holding the camera, no left-drag move), the A/D,
+/// W/S, and Q/E keys transform the selection in place and return the
+/// [`SetInstanceTransform`](Action::SetInstanceTransform) the seam routes through `action::handle`. A/D
+/// yaw it about world Y (A left, D right), W/S pitch it about world X, and Shift+A / Shift+D roll it about
+/// world Z (Shift is the roll modifier, re-routing A/D from yaw to roll); each spin is a [`ROTATE_STEP_DEG`]
+/// step. Q/E scale it uniformly down/up by [`SCALE_STEP`] (Q/E = down/up, as in the fly cluster's
+/// raise/lower), floored at [`SCALE_MIN`] so a shrink never reaches zero. A tap is one step; a hold repeats
+/// at the OS rate (`char_pressed || char_repeating`). `None` means no transform this frame: no selection,
+/// flying, mid-drag, a focused text field (a name being typed, not a rotate), a held Ctrl (so Ctrl+S stays
+/// Save), a stale id, or simply no transform key down.
 ///
 /// Context-gated, reusing the fly cluster (editor-design Input, "modes reuse one small key set across
-/// contexts"): the same W/S that fly the camera while the right button looks instead rotate / scale when
-/// it does not. Focus-gated on egui's `wants_keyboard_input`, so a focused inspector field types into the
-/// field rather than transforming. Shift is free here as the reverse modifier - the camera boost it names
-/// while flying does not apply, since this runs only when not flying. The 5-degree step is the
-/// rotation-snap default baked on (editor-design Input); the toggle to free it is a later bite (W5).
-/// Multiple keys in one frame fold deterministically (rotations in X/Y/Z order, then scale) into a single
-/// transform, so the edit is one action however many keys are down. The gimbal-free spin is
-/// [`geom::rotate_step`]; the floored multiply is [`geom::scale_uniform`].
+/// contexts"): the same WASD + Q/E that fly the camera while the right button looks instead rotate / scale
+/// when it does not. The scheme is directional and controller-shaped (canon: controller-mappable) - A/D and
+/// W/S are bidirectional on their own, so Shift is freed to be the roll modifier rather than a reverse
+/// sign, and the mnemonic G/R/T keys stay open for the W5 snap toggles. Focus-gated on egui's
+/// `wants_keyboard_input`, so a focused inspector field types into the field rather than transforming;
+/// Shift stays the camera boost while flying (a different context). The 5-degree step is the rotation-snap
+/// default baked on (editor-design Input); the toggle to free it is a later bite (W5). Multiple keys in one
+/// frame fold deterministically (rotations in a fixed key order, then scale) into a single transform, so
+/// the edit is one action however many keys are down. The gimbal-free spin is [`geom::rotate_step`]; the
+/// floored multiply is [`geom::scale_uniform`].
 pub fn transform_input(
     egui_ctx: &egui::Context,
     input: &InputState,
@@ -291,7 +295,7 @@ pub fn transform_input(
     let id = selection?;
     // Focus gate (editor-design Input): a focused text field (the inspector's Name) types, it does not
     // transform. Ctrl is reserved for the command combos (Ctrl+S Save), so a held Ctrl is never a
-    // transform; Shift is allowed below - it is the reverse-rotate modifier.
+    // transform; Shift is allowed below - it is the roll modifier on A/D.
     if egui_ctx.wants_keyboard_input() || input.key_held(NamedKey::Control) {
         return None;
     }
@@ -300,19 +304,29 @@ pub fn transform_input(
     let current = loaded?.placement(id)?.transform;
 
     // Fold every transform key down this frame into one new transform, starting from the current: a tap
-    // fires the press edge, a hold the OS repeat. Rotations apply in X/Y/Z order, then scale, so a frame
-    // with several keys is one deterministic edit. Shift flips the rotation to a negative step.
-    let degrees = if input.key_held(NamedKey::Shift) { -ROTATE_STEP_DEG } else { ROTATE_STEP_DEG };
+    // fires the press edge, a hold the OS repeat. Rotations apply in a fixed key order, then scale, so a
+    // frame with several keys down is one deterministic edit.
+    let pressed = |key: char| input.char_pressed(key) || input.char_repeating(key);
+    // Shift is the roll modifier: held, it re-routes A/D from yaw (world Y) to roll (world Z). W/S pitch
+    // (world X) and Q/E scale regardless of Shift. A is the left / counter-clockwise sense, D the right.
+    let ad_axis = if input.key_held(NamedKey::Shift) { Vec3::Z } else { Vec3::Y };
     let mut t = current;
     let mut changed = false;
-    for (key, axis) in [('w', Vec3::X), ('e', Vec3::Y), ('r', Vec3::Z)] {
-        if input.char_pressed(key) || input.char_repeating(key) {
+    for (down, axis, degrees) in [
+        (pressed('a'), ad_axis, ROTATE_STEP_DEG),
+        (pressed('d'), ad_axis, -ROTATE_STEP_DEG),
+        (pressed('w'), Vec3::X, -ROTATE_STEP_DEG),
+        (pressed('s'), Vec3::X, ROTATE_STEP_DEG),
+    ] {
+        if down {
             t = geom::rotate_step(t, axis, degrees);
             changed = true;
         }
     }
-    for (key, factor) in [('d', SCALE_STEP), ('s', 1.0 / SCALE_STEP)] {
-        if input.char_pressed(key) || input.char_repeating(key) {
+    // Scale uniform: Q down (x 1/SCALE_STEP), E up (x SCALE_STEP) - Q/E = down/up, the same sense as the
+    // fly cluster's raise/lower, so the keys read alike in both contexts.
+    for (down, factor) in [(pressed('q'), 1.0 / SCALE_STEP), (pressed('e'), SCALE_STEP)] {
+        if down {
             t = geom::scale_uniform(t, factor, SCALE_MIN);
             changed = true;
         }

@@ -25,8 +25,8 @@
 //! click-to-select: a left press over the well picks the placement under the cursor (a miss deselects),
 //! lighting the same Instances-tree highlight and floating inspector a tree-select does. The move bite
 //! drags a selected instance along the surface under the cursor (base grounded, grid-snapped). The
-//! rotate/scale bite reuses the idle fly cluster: with the camera not flying, W/E/R spin the selection
-//! about world X/Y/Z in 5-degree steps (Shift reverses) and S/D scale it uniformly. The frame loop
+//! rotate/scale bite reuses the idle fly cluster: with the camera not flying, A/D yaw and W/S pitch the
+//! selection in 5-degree steps (Shift+A/D roll it) and Q/E scale it uniformly. The frame loop
 //! carries a clearly marked seam between the action drain and the draw where each bite plugs in.
 //!
 //! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish` (inside `render::draw`):
@@ -231,7 +231,7 @@ impl App for Editor {
         // drag-to-move. Then the move: while the left button stays down, dragging the armed instance past a
         // small threshold rests it on the surface under the cursor (grounded, grid-snapped), routed as a
         // transform edit; the button lifting clears the arm. Then the keyboard rotate/scale: with the
-        // camera idle and an instance selected, W/E/R rotate and S/D scale it about / by world axes, also
+        // camera idle and an instance selected, A/D yaw, W/S pitch, Shift+A/D roll, and Q/E scale it, also
         // routed as a transform edit through the single writer. egui's Context is an Arc handle, so clone
         // it before the calls: the input reads egui's pointer / layer state while it mutates self.camera,
         // self.viewport_grab, and self.viewport_drag in the same statements, without borrowing `gui` across it.
@@ -271,7 +271,7 @@ impl App for Editor {
         }
 
         // The keyboard rotate / scale: with an instance selected and the fly cluster idle (no right-drag
-        // look, no left-drag move), W/E/R spin the selection about world X/Y/Z (Shift reverses) and S/D
+        // look, no left-drag move), A/D yaw the selection and W/S pitch it (Shift+A/D roll it) and Q/E
         // scale it uniformly, in 5-degree / factor steps (the snap-assisted default; the toggle to free
         // it is W5). It is focus-gated (a name being typed types, it does not rotate) and routes the same
         // SetInstanceTransform the inspector and the drag-to-move do, through the single writer, so the

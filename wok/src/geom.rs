@@ -36,7 +36,7 @@ pub fn rest_y(floor: f32, base_y: f32, aabb_min_y: f32) -> f32 {
 /// gimbal-lock-free - successive steps keep turning past 90deg rather than sticking. The non-rotation
 /// fields pass through. Pure so the step is unit tested.
 ///
-/// The keyboard rotate (`crate::viewport`) composes this on each W/E/R tap about a world axis; its
+/// The keyboard rotate (`crate::viewport`) composes this on each rotate-key tap about a world axis; its
 /// uniform-scale sibling is [`scale_uniform`].
 pub fn rotate_step(base: Transform, axis: Vec3, degrees: f32) -> Transform {
     let rotation = Quat::from_axis_angle(axis, degrees.to_radians()) * base.rotation;
