@@ -1,15 +1,16 @@
 //! Pure spatial helpers for the editor's transform grammar, kept across the interaction demolition
 //! (the surviving direction now lives in designs/editor-design.md's Input section). The held-key gizmo that
-//! drove these is gone; the rebuilt grammar (brief 2: drag-and-drop move, the keyboard rotate)
+//! drove these is gone; the rebuilt grammar (drag-and-drop move, the keyboard rotate and scale)
 //! composes the same primitives, so they survive here unchanged: grid snap, resting an instance's
-//! bottom on a surface, the gimbal-free world-axis rotate step, and the ray-vs-ground-plane hit. Pure
-//! math - no egui, no input, no camera - so each is unit tested below with no window.
+//! bottom on a surface, the gimbal-free world-axis rotate step, the uniform scale step, and the
+//! ray-vs-ground-plane hit. Pure math - no egui, no input, no camera - so each is unit tested below
+//! with no window.
 //!
-//! Partly live now: the drag-to-move (`crate::viewport`) composes [`snap`] and [`rest_y`], so those are
-//! used; [`rotate_step`] (the keyboard rotate) and [`ray_vs_ground_plane`] (the grounded-off free move)
-//! are still parked for their workflows, each under an individual `#[allow(dead_code)]` so the rest of
-//! the module warns honestly. The same kept-for-the-rebuild treatment `crate::camera`'s framing math
-//! carries.
+//! Partly live now: the drag-to-move (`crate::viewport`) composes [`snap`] and [`rest_y`], and the
+//! keyboard rotate / scale (also `crate::viewport`) composes [`rotate_step`] and [`scale_uniform`], so
+//! those are used; only [`ray_vs_ground_plane`] (the grounded-off free move) is still parked for its
+//! workflow, under an individual `#[allow(dead_code)]` so the rest of the module warns honestly. The
+//! same kept-for-the-rebuild treatment `crate::camera`'s framing math carries.
 
 use glam::{Quat, Vec3};
 use wok_scene::Transform;
@@ -35,12 +36,21 @@ pub fn rest_y(floor: f32, base_y: f32, aabb_min_y: f32) -> f32 {
 /// gimbal-lock-free - successive steps keep turning past 90deg rather than sticking. The non-rotation
 /// fields pass through. Pure so the step is unit tested.
 ///
-/// Parked for the keyboard rotate workflow (W4), its only caller; an individual `#[allow(dead_code)]`
-/// keeps it warning-free until then.
-#[allow(dead_code)]
+/// The keyboard rotate (`crate::viewport`) composes this on each W/E/R tap about a world axis; its
+/// uniform-scale sibling is [`scale_uniform`].
 pub fn rotate_step(base: Transform, axis: Vec3, degrees: f32) -> Transform {
     let rotation = Quat::from_axis_angle(axis, degrees.to_radians()) * base.rotation;
     Transform { rotation, ..base }
+}
+
+/// Scale `base` uniformly by `factor`, flooring each component at `min` so a shrink never reaches zero or
+/// flips negative (which would make a degenerate, inside-out, un-pickable instance). A component-wise
+/// multiply, so an already non-uniform scale keeps its ratio until a component meets the floor; the
+/// non-scale fields pass through. Pure so the step is unit tested. The keyboard scale (`crate::viewport`)
+/// composes this on each D (up) / S (down) tap, mirroring [`rotate_step`].
+pub fn scale_uniform(base: Transform, factor: f32, min: f32) -> Transform {
+    let scale = (base.scale * factor).max(Vec3::splat(min));
+    Transform { scale, ..base }
 }
 
 /// The world point where the ray `origin + t*dir` meets the horizontal plane `y = height`, or `None`
@@ -103,6 +113,29 @@ mod tests {
         // The non-rotation fields pass through.
         let scaled = Transform { scale: Vec3::splat(2.0), ..Transform::IDENTITY };
         assert_eq!(rotate_step(scaled, Vec3::Y, 5.0).scale, Vec3::splat(2.0), "scale untouched");
+    }
+
+    #[test]
+    fn scale_uniform_multiplies_floors_at_the_min_and_leaves_rotation_and_translation() {
+        // The keyboard scale step: D grows by the factor, S shrinks by its inverse, and a shrink floors
+        // each component at `min` so the scale never reaches zero or flips negative. Rotation and
+        // translation pass through untouched.
+        let base = Transform {
+            translation: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Quat::from_rotation_y(1.0),
+            scale: Vec3::splat(1.0),
+        };
+        let up = scale_uniform(base, 1.1, 0.05);
+        assert_eq!(up.scale, Vec3::splat(1.1), "grows by the factor");
+        let down = scale_uniform(base, 1.0 / 1.1, 0.05);
+        assert!((down.scale - Vec3::splat(1.0 / 1.1)).length() < EPS, "shrinks by the inverse: {:?}", down.scale);
+        // A tiny scale shrunk further floors at min, component-wise - never zero, never negative.
+        let tiny = Transform { scale: Vec3::splat(0.06), ..base };
+        let floored = scale_uniform(tiny, 0.5, 0.05);
+        assert_eq!(floored.scale, Vec3::splat(0.05), "a shrink past the floor clamps to min, not zero");
+        // The non-scale fields pass through untouched.
+        assert_eq!(up.translation, base.translation, "translation untouched");
+        assert_eq!(up.rotation, base.rotation, "rotation untouched");
     }
 
     #[test]

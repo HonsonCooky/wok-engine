@@ -10,6 +10,9 @@
 //! writer, so it lights the same Instances-tree highlight and floating inspector a tree-select does.
 //! Drag-to-move: a left press also arms the picked instance; dragging it past a small threshold rests it
 //! on the surface under the cursor (base grounded, snapped to the 1m grid), routed as a transform edit.
+//! Rotate / scale: with an instance selected and the camera not flying, W/E/R spin it about world X/Y/Z
+//! in 5-degree steps (Shift reverses) and S/D scale it uniformly - the fly cluster reused for a second
+//! context, focus-gated so a name being typed never rotates - each routed as the same transform edit.
 //!
 //! Where it runs: the frame loop's viewport interaction seam (`crate::main`), between the chrome's action
 //! drain and the draw. [`camera_input`] reads the egui pointer state (a cloned [`egui::Context`]) and the
@@ -20,7 +23,9 @@
 //! the seam routes through `action::handle`, since the selection IS model state - and on a hit it arms
 //! the drag. [`drag_input`] is the third: while the left button stays down it moves the armed instance
 //! along the surface, returning a [`SetInstanceTransform`](crate::action::Action::SetInstanceTransform)
-//! the seam routes the same way, and the button lifting clears the arm.
+//! the seam routes the same way, and the button lifting clears the arm. [`transform_input`] is the
+//! fourth: with a selection and the camera idle it folds the W/E/R rotate and S/D scale keys into one
+//! [`SetInstanceTransform`](crate::action::Action::SetInstanceTransform) the seam routes the same way.
 //!
 //! The right-drag look cursor lock (the proven pattern, designs/sharp-edges.md section 2): while a
 //! right-drag begun over the well is held, the cursor is hidden and pinned so the mouse never leaves the
@@ -57,6 +62,19 @@ const GRID_STEP: f32 = 1.0;
 /// excludes the dragged instance, so without this gate a click would drop a floating instance to the
 /// ground under it. A few points is enough to tell a click from a drag without feeling sticky.
 const DRAG_THRESHOLD_PX: f32 = 4.0;
+
+/// The keyboard rotation step in degrees - the rotation-snap default (editor-design Input: rotation snap
+/// 5 degrees, on by default), applied per W/E/R tap or repeat about a world axis; Shift reverses the
+/// sign. The toggle to free it (unsnapped rotation) is a later bite (W5). Transform feel is tunable.
+const ROTATE_STEP_DEG: f32 = 5.0;
+
+/// The uniform scale factor per D (up) / S (down) tap or repeat: D multiplies the scale by this, S by its
+/// inverse, so a tap each way returns near the original. Transform feel is tunable.
+const SCALE_STEP: f32 = 1.1;
+
+/// The per-component floor a scale-down clamps to, so a shrink never reaches zero or flips negative (a
+/// degenerate, un-pickable instance). Transform feel is tunable.
+const SCALE_MIN: f32 = 0.05;
 
 /// An armed viewport drag-to-move: the instance a left press selected and the press position (egui
 /// points). Threaded across frames by the seam (`crate::main`) beside the camera grab anchor: the press
@@ -236,6 +254,72 @@ fn grounded_drop(hit: Vec3, current: Transform, bounds: Aabb) -> Transform {
     let pivot_y = geom::snap(geom::rest_y(hit.y, current.translation.y, bounds.min.y), GRID_STEP);
     let translation = Vec3::new(geom::snap(hit.x, GRID_STEP), pivot_y, geom::snap(hit.z, GRID_STEP));
     Transform { translation, ..current }
+}
+
+/// The keyboard rotate / scale, the seam's fourth entry (`crate::main`): with an instance selected and
+/// the fly cluster otherwise idle (no right-drag look holding the camera, no left-drag move), the W/E/R
+/// and S/D keys transform the selection in place and return the
+/// [`SetInstanceTransform`](Action::SetInstanceTransform) the seam routes through `action::handle`. W/E/R
+/// spin it +[`ROTATE_STEP_DEG`] about world X/Y/Z (Shift reverses to a negative step); D/S scale it
+/// uniformly up/down by [`SCALE_STEP`], floored at [`SCALE_MIN`] so a shrink never reaches zero. A tap is
+/// one step; a hold repeats at the OS rate (`char_pressed || char_repeating`). `None` means no transform
+/// this frame: no selection, flying, mid-drag, a focused text field (a name being typed, not a rotate),
+/// a held Ctrl (so Ctrl+S stays Save), a stale id, or simply no transform key down.
+///
+/// Context-gated, reusing the fly cluster (editor-design Input, "modes reuse one small key set across
+/// contexts"): the same W/S that fly the camera while the right button looks instead rotate / scale when
+/// it does not. Focus-gated on egui's `wants_keyboard_input`, so a focused inspector field types into the
+/// field rather than transforming. Shift is free here as the reverse modifier - the camera boost it names
+/// while flying does not apply, since this runs only when not flying. The 5-degree step is the
+/// rotation-snap default baked on (editor-design Input); the toggle to free it is a later bite (W5).
+/// Multiple keys in one frame fold deterministically (rotations in X/Y/Z order, then scale) into a single
+/// transform, so the edit is one action however many keys are down. The gimbal-free spin is
+/// [`geom::rotate_step`]; the floored multiply is [`geom::scale_uniform`].
+pub fn transform_input(
+    egui_ctx: &egui::Context,
+    input: &InputState,
+    selection: Option<InstanceId>,
+    loaded: Option<&LoadedScene>,
+    lock_active: bool,
+    drag: Option<ViewportDrag>,
+) -> Option<Action> {
+    // A held right-drag look is flying (the fly cluster drives the camera), and a held left-drag is
+    // moving - neither is a rotate / scale. With nothing selected there is nothing to transform.
+    if lock_active || drag.is_some() {
+        return None;
+    }
+    let id = selection?;
+    // Focus gate (editor-design Input): a focused text field (the inspector's Name) types, it does not
+    // transform. Ctrl is reserved for the command combos (Ctrl+S Save), so a held Ctrl is never a
+    // transform; Shift is allowed below - it is the reverse-rotate modifier.
+    if egui_ctx.wants_keyboard_input() || input.key_held(NamedKey::Control) {
+        return None;
+    }
+    // The selected instance's current transform - the same source the drag-to-move reads it from (a
+    // stale id, or no loaded scene, means nothing to transform).
+    let current = loaded?.placement(id)?.transform;
+
+    // Fold every transform key down this frame into one new transform, starting from the current: a tap
+    // fires the press edge, a hold the OS repeat. Rotations apply in X/Y/Z order, then scale, so a frame
+    // with several keys is one deterministic edit. Shift flips the rotation to a negative step.
+    let degrees = if input.key_held(NamedKey::Shift) { -ROTATE_STEP_DEG } else { ROTATE_STEP_DEG };
+    let mut t = current;
+    let mut changed = false;
+    for (key, axis) in [('w', Vec3::X), ('e', Vec3::Y), ('r', Vec3::Z)] {
+        if input.char_pressed(key) || input.char_repeating(key) {
+            t = geom::rotate_step(t, axis, degrees);
+            changed = true;
+        }
+    }
+    for (key, factor) in [('d', SCALE_STEP), ('s', 1.0 / SCALE_STEP)] {
+        if input.char_pressed(key) || input.char_repeating(key) {
+            t = geom::scale_uniform(t, factor, SCALE_MIN);
+            changed = true;
+        }
+    }
+    // No transform key down changes nothing, so route nothing (an equal transform would no-op in the
+    // loaded scene anyway). One key or several, the fold is a single transform edit.
+    changed.then_some(Action::SetInstanceTransform(id, t))
 }
 
 /// The pointer is over the viewport well: inside the editor rect and under no foreground egui layer (a

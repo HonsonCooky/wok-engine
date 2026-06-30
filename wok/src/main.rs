@@ -24,8 +24,10 @@
 //! camera (mouse-look, WASD, E/Q, Shift to boost) and a scroll dollies it. The select bite is
 //! click-to-select: a left press over the well picks the placement under the cursor (a miss deselects),
 //! lighting the same Instances-tree highlight and floating inspector a tree-select does. The move bite
-//! drags a selected instance along the surface under the cursor (base grounded, grid-snapped). The frame
-//! loop carries a clearly marked seam between the action drain and the draw where each bite plugs in.
+//! drags a selected instance along the surface under the cursor (base grounded, grid-snapped). The
+//! rotate/scale bite reuses the idle fly cluster: with the camera not flying, W/E/R spin the selection
+//! about world X/Y/Z in 5-degree steps (Shift reverses) and S/D scale it uniformly. The frame loop
+//! carries a clearly marked seam between the action drain and the draw where each bite plugs in.
 //!
 //! The frame loop is the platform's `gfx::begin_frame -> draw -> Frame::finish` (inside `render::draw`):
 //! each frame runs the egui pass (building the chrome), draws the 3D into the well rect (or clears the
@@ -220,7 +222,7 @@ impl App for Editor {
         // ---- viewport interaction seam ----
         // The viewport input runs here, between the chrome's action drain above and the draw below, after
         // the render residency reconciles (so a freshly loaded scene's spawn vantage is the base this
-        // frame's drive builds on). Three bites live here. The get-around camera (`crate::viewport`): a held
+        // frame's drive builds on). Four bites live here. The get-around camera (`crate::viewport`): a held
         // right-drag over the well looks and flies the camera (WASD + E/Q, Shift to boost), and a scroll
         // dollies it; the camera is frame-loop residency, so the drive mutates it directly rather than
         // routing through the single writer. Then click-to-select: a left press over the well casts the
@@ -228,8 +230,10 @@ impl App for Editor {
         // like every other selection, since the selection IS model state - and a hit also arms the
         // drag-to-move. Then the move: while the left button stays down, dragging the armed instance past a
         // small threshold rests it on the surface under the cursor (grounded, grid-snapped), routed as a
-        // transform edit; the button lifting clears the arm. egui's Context is an Arc handle, so clone it
-        // before the calls: the input reads egui's pointer / layer state while it mutates self.camera,
+        // transform edit; the button lifting clears the arm. Then the keyboard rotate/scale: with the
+        // camera idle and an instance selected, W/E/R rotate and S/D scale it about / by world axes, also
+        // routed as a transform edit through the single writer. egui's Context is an Arc handle, so clone
+        // it before the calls: the input reads egui's pointer / layer state while it mutates self.camera,
         // self.viewport_grab, and self.viewport_drag in the same statements, without borrowing `gui` across it.
         let ectx = gui.ctx.clone();
         viewport::camera_input(&ectx, editor_rect, ctx, &mut self.camera, &mut self.viewport_grab);
@@ -262,6 +266,23 @@ impl App for Editor {
             self.loaded_scene.as_ref(),
             &mut self.viewport_drag,
             lock_active,
+        ) {
+            action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
+        }
+
+        // The keyboard rotate / scale: with an instance selected and the fly cluster idle (no right-drag
+        // look, no left-drag move), W/E/R spin the selection about world X/Y/Z (Shift reverses) and S/D
+        // scale it uniformly, in 5-degree / factor steps (the snap-assisted default; the toggle to free
+        // it is W5). It is focus-gated (a name being typed types, it does not rotate) and routes the same
+        // SetInstanceTransform the inspector and the drag-to-move do, through the single writer, so the
+        // edit dirties and the inspector's rotation / scale readouts update the same frame.
+        if let Some(action) = viewport::transform_input(
+            &ectx,
+            &ctx.input,
+            self.model.shell.selection(),
+            self.loaded_scene.as_ref(),
+            lock_active,
+            self.viewport_drag,
         ) {
             action::handle(&mut self.model, self.loaded_scene.as_mut(), action);
         }
