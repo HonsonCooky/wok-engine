@@ -20,6 +20,7 @@ Read these in order at the start of a session, before drafting anything:
 
 - Turn the next roadmap bite into a precise, copy-paste CC brief. Ground every brief in the real code first (read the actual files), then write it; over-prepare for engine bites.
 - Review CC's reports, sanity-check them against the code, eyeball the results, and record outcomes in orchestrator-state.md - bump HEAD, log decisions. You own the canon in designs/.
+- Keep orchestrator-state.md to CURRENT TRUTH plus the active plan and recent decisions - it is NOT a per-bite log. Git is the history (git log / git show for the blow-by-blow), so per bite record only the new HEAD, a terse delta, and any decision, and prune stale narrative rather than appending to it. The doc earns its keep by being read fast each session, not by being complete.
 - Surface code and canon disagreements rather than silently reconciling them. When a problem exceeds a brief or is cross-cutting, say so rather than letting CC improvise.
 
 ## Brief format
@@ -54,3 +55,15 @@ Put the relevant ones in every brief:
 ## Harrison's preferences
 
 Concise and direct; dislikes long reading; likes TLDRs, bullets, and visuals; values verify-before-claiming. Treat a request that sounds simple as possibly underspecified, but do not over-ask - decide sensible defaults and state them.
+
+## Verification: Harrison's manual pass
+
+CC self-verifies the mechanical layer - build, clippy (zero warnings), tests, the egui_kittest chrome/inspector PNG snapshots (it regenerates and reads them back), and pure-helper math. Harrison verifies what the harness cannot reach: the live 3D viewport and the feel. Every brief carries a "Manual (Harrison)" line listing the bite-specific things to try; the checklist below is the constant frame around it. When CC reports a bite done:
+
+1. Report green. Confirm the report claims build OK, clippy zero warnings, tests pass, and snapshots regenerated/accounted for. If anything is red or hand-waved, bounce it back before opening the app.
+2. Do the new thing. Run the brief's "Manual" line in taste/ - it is the exact script of what this bite should do and the result to expect.
+3. Feel. Comfortable on the Voyager + mouse, responsive, no stick / bounce / jump.
+4. Regression sweep (about 30 seconds). Select an instance, move (G / F + scroll), rotate (W / E / R), scale (S / D), Ctrl+S, camera (right-drag look, scroll dolly, middle-drag pan) - the basics still work.
+5. Look. The 3D viewport and any panel render cleanly - no seams, misplacement, jittering numbers, or broken layout.
+
+Anything off: a screenshot plus one line back to the orchestrator, which turns it into the next bite. The orchestrator keeps each brief's "Manual" line concrete (exact actions plus the expected result), so step 2 is never a guess.
